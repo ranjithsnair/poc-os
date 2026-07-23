@@ -12,7 +12,7 @@
  * The table below is a linear array, not indexed by character code, so
  * it only needs one entry per glyph actually used by main.c instead of
  * a full ASCII set — currently that's every letter in "HELLO, WORLD!"
- * and "LUCY-OS BOOTED VIA LIMINE" plus the punctuation they use.
+ * and "BOOTED VIA LIMINE" plus the punctuation they use.
  * Add a row here (and nowhere else) to support a new character.
  */
 
@@ -50,7 +50,7 @@ static const struct font8x8_glyph font8x8_table[] = {
 };
 
 /* Fallback glyph (all pixels off) for characters not in the table above,
- * e.g. the spaces in "LUCY-OS BOOTED VIA LIMINE" — this is what makes
+ * e.g. the spaces in "BOOTED VIA LIMINE" — this is what makes
  * spaces render as blank instead of crashing or drawing garbage. */
 static const uint8_t font8x8_blank[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 

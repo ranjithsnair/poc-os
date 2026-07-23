@@ -1,5 +1,5 @@
 /*
- * Lucy-OS kernel entry point.
+ * PoC-OS kernel entry point.
  *
  * This kernel is loaded and started by the Limine bootloader, which hands
  * off control at `kmain` in 64-bit long mode with paging already set up
@@ -100,14 +100,14 @@ void kmain(void) {
     /* Bring up the serial console first so every step below can log,
      * even if the framebuffer path fails. */
     serial_init();
-    serial_print("Lucy-OS: kernel entered via Limine.\n");
+    serial_print("PoC-OS: kernel entered via Limine.\n");
 
     /* LIMINE_BASE_REVISION_SUPPORTED becomes false if the bootloader that
      * loaded us is too old to understand the base revision we declared
      * above; continuing would risk relying on protocol features it
      * doesn't implement, so we stop instead. */
     if (!LIMINE_BASE_REVISION_SUPPORTED) {
-        serial_print("Lucy-OS: unsupported Limine base revision, halting.\n");
+        serial_print("PoC-OS: unsupported Limine base revision, halting.\n");
         hcf();
     }
 
@@ -117,7 +117,7 @@ void kmain(void) {
      * to draw, so bail out to the halt loop. */
     if (framebuffer_request.response == NULL ||
         framebuffer_request.response->framebuffer_count < 1) {
-        serial_print("Lucy-OS: no framebuffer available, halting.\n");
+        serial_print("PoC-OS: no framebuffer available, halting.\n");
         hcf();
     }
 
@@ -136,10 +136,10 @@ void kmain(void) {
     /* Title line in green at 4x scale (32px-tall glyphs), subtitle in
      * light grey at 2x scale (16px-tall glyphs) beneath it. */
     draw_string(fb, 32, 32, "HELLO, WORLD!", 0x0032cd90, 4);
-    draw_string(fb, 32, 96, "LUCY-OS BOOTED VIA LIMINE", 0x00e0e0e0, 2);
+    draw_string(fb, 32, 96, "BOOTED VIA LIMINE", 0x00e0e0e0, 2);
 
     /* Mirror confirmation of a successful boot to the serial log. */
-    serial_print("Hello, World! Lucy-OS is up.\n");
+    serial_print("Hello, World! PoC-OS is up.\n");
 
     /* Nothing left to do: there's no scheduler, no further kernel work,
      * so park the CPU forever. */

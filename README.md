@@ -1,4 +1,4 @@
-# Lucy-OS
+# PoC-OS
 
 A minimal, freestanding x86-64 "hello world" kernel, booted via the
 [Limine](https://github.com/limine-bootloader/limine) bootloader. It boots
@@ -10,8 +10,8 @@ it's a starting skeleton for OS development, not a functional OS yet.
 ```
 +----------------------------------------+
 |                                        |
-|   HELLO, WORLD!                       |
-|   LUCY-OS BOOTED VIA LIMINE           |
+|   HELLO, WORLD!                        |
+|   BOOTED VIA LIMINE                    |
 |                                        |
 +----------------------------------------+
 ```
