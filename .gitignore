@@ -4,3 +4,4 @@ iso_root/
 limine/
 *.iso
 *.hdd
+initrd.tar

@@ -16,6 +16,15 @@ all: $(IMAGE_NAME).iso
 kernel:
 	$(MAKE) -C kernel
 
+# Builds the initrd: a USTAR archive bundling every file under initrd/,
+# which kernel/src/tarfs.c reads at boot (see the module_path directive
+# in limine.conf). --format=ustar pins the exact on-disk layout tarfs.c's
+# parser was written and tested against — GNU tar's default format
+# differs in some header fields, so this flag isn't optional.
+INITRD_FILES := $(wildcard initrd/*)
+initrd.tar: $(INITRD_FILES)
+	tar --format=ustar -cf $@ -C initrd $(notdir $(INITRD_FILES))
+
 # Fetches and builds the Limine bootloader tooling (the `limine` binary
 # used below to install the BIOS boot record) if it isn't present yet.
 # Pinned to the v9.x binary release branch so the vendored copy matches
@@ -33,10 +42,11 @@ limine/limine:
 #      with a BIOS boot catalog entry and a UEFI boot partition
 #   4. stamp a BIOS boot record onto the finished ISO via `limine bios-install`
 #      so it's also bootable on legacy BIOS, not just UEFI
-$(IMAGE_NAME).iso: kernel limine/limine
+$(IMAGE_NAME).iso: kernel limine/limine initrd.tar
 	rm -rf iso_root
 	mkdir -p iso_root/boot/limine
 	cp kernel/bin/kernel iso_root/boot/
+	cp initrd.tar iso_root/boot/
 	cp limine.conf iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT
 	cp limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
@@ -60,7 +70,7 @@ run: $(IMAGE_NAME).iso
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso
+	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar
 
 # Full clean, including the fetched limine/ directory.
 .PHONY: distclean

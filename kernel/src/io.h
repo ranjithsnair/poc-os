@@ -1,0 +1,26 @@
+/* Shared x86 port I/O helpers, used by every driver that talks to
+ * hardware over `in`/`out` instead of memory-mapped registers (PIC, PIT,
+ * PS/2 keyboard). serial.c predates this file and keeps its own copies. */
+#ifndef IO_H
+#define IO_H
+
+#include <stdint.h>
+
+static inline void outb(uint16_t port, uint8_t val) {
+    asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* Port 0x80 is an unused POST diagnostic port; writing to it is a
+ * standard trick to burn ~1us, which the PIC needs between init command
+ * words on real hardware (QEMU doesn't care, but real 8259s do). */
+static inline void io_wait(void) {
+    outb(0x80, 0);
+}
+
+#endif
