@@ -1,8 +1,8 @@
 /*
  * Minimal PS/2 keyboard driver: decodes scancode set 1 make codes to
- * unshifted US QWERTY ASCII and echoes them to the serial console. This
- * exists right now as a smoke test that IRQs actually work end to end
- * (PIC -> IDT -> C handler) -- there's no shift/modifier tracking or
+ * unshifted US QWERTY ASCII and feeds them to console.c's line
+ * discipline (which echoes them and buffers completed lines for
+ * SYS_READ on fd 0) -- there's no shift/modifier tracking or
  * framebuffer console input yet.
  */
 #include <stdint.h>
@@ -10,7 +10,7 @@
 #include "io.h"
 #include "isr.h"
 #include "pic.h"
-#include "serial.h"
+#include "console.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 
@@ -44,7 +44,7 @@ static void keyboard_handler(struct registers *regs) {
     }
     char c = scancode_to_ascii[scancode];
     if (c != 0) {
-        serial_putc(c);
+        console_feed_char(c);
     }
 }
 

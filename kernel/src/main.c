@@ -19,6 +19,7 @@
 #include "idt.h"        /* Interrupt Descriptor Table */
 #include "pic.h"        /* 8259 PIC remap/EOI */
 #include "pit.h"        /* timer tick source (IRQ0) */
+#include "console.h"    /* stdin line discipline fed by the keyboard IRQ */
 #include "keyboard.h"   /* PS/2 keyboard (IRQ1) */
 #include "pmm.h"        /* physical frame allocator */
 #include "vmm.h"        /* virtual memory mapping */
@@ -69,7 +70,7 @@ static volatile struct limine_hhdm_request hhdm_request = {
 
 /* Request struct asking Limine for the modules listed via module_path in
  * limine.conf -- the initrd (an initrd.tar built by the top-level
- * Makefile from initrd/*, since there's no disk driver to load files
+ * Makefile from initrd/ contents, since there's no disk driver to load files
  * from anywhere else yet). tarfs.c reads it. */
 __attribute__((used, section(".requests")))
 static volatile struct limine_module_request module_request = {
@@ -95,24 +96,6 @@ static void hcf(void) {
     for (;;) {
         asm ("hlt");
     }
-}
-
-/* Print an unsigned 64-bit value in decimal -- serial_print() only
- * handles pre-built strings, and this file's only numeric output is a
- * one-off memory-size log line, so a dedicated helper isn't worth having
- * outside this file. */
-static void serial_print_dec(uint64_t v) {
-    char buf[21];
-    int i = 20;
-    buf[i] = '\0';
-    if (v == 0) {
-        buf[--i] = '0';
-    }
-    while (v > 0) {
-        buf[--i] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    serial_print(&buf[i]);
 }
 
 /* Write a single pixel into the framebuffer.
@@ -177,6 +160,7 @@ void kmain(void) {
     idt_init();
     pic_remap();
     pit_init(100);
+    console_init();
     keyboard_init();
     serial_print("PoC-OS: GDT/IDT/PIC/PIT/keyboard initialized.\n");
 
@@ -232,7 +216,7 @@ void kmain(void) {
 
     /* Reads a known file back out of the initrd as a smoke test --
      * there's no disk driver yet, so module_request.response->modules[0]
-     * (an initrd.tar built from initrd/* by the top-level Makefile) is
+     * (an initrd.tar built from initrd/ contents by the top-level Makefile) is
      * the only "filesystem" this kernel can see. */
     if (module_request.response == NULL || module_request.response->module_count < 1) {
         serial_print("PoC-OS: no initrd module available.\n");

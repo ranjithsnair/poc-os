@@ -26,6 +26,15 @@
 #define VMM_KERNEL_HEAP_PML4_INDEX 300
 #define VMM_KERNEL_HEAP_BASE (0xFFFF000000000000ULL | ((uint64_t)VMM_KERNEL_HEAP_PML4_INDEX << 39))
 
+/* User-space address space layout, shared by every process (elf.c,
+ * process.c). Both regions sit in the low (non-canonical-sign-extended)
+ * half of the address space, far above any ELF's own PT_LOAD segments
+ * (which link low, e.g. 0x400000) and far below the halfway point where
+ * addresses would need the canonical high bits set. */
+#define VMM_USER_STACK_TOP   0x0000700000000000ULL
+#define VMM_USER_STACK_PAGES 8 /* 32KiB initial stack */
+#define VMM_USER_ANON_BASE   0x0000600000000000ULL
+
 void vmm_init(uint64_t hhdm_offset);
 
 /* Physical address of the PML4 that was active when vmm_init() ran
@@ -39,6 +48,16 @@ uint64_t vmm_kernel_address_space(void);
  * and kmalloc all keep working no matter which address space is loaded.
  * Everything else starts unmapped. Returns 0 on allocation failure. */
 uint64_t vmm_create_address_space(void);
+
+/* Frees every physical frame this address space owns exclusively: a
+ * full four-level page-table walk, freeing each present leaf frame via
+ * pmm_free_frame(), skipping the three PML4 entries every address space
+ * shares with the kernel's own (HHDM/kernel image/kernel heap -- see
+ * vmm_create_address_space()) so shared kernel memory is never freed,
+ * then freeing the intermediate tables and finally the PML4 frame
+ * itself. Called from process_exit_current() so repeated process
+ * creation/exit doesn't leak physical memory the way it used to. */
+void vmm_destroy_address_space(uint64_t pml4_phys);
 
 /* Loads CR3. */
 void vmm_switch_address_space(uint64_t pml4_phys);

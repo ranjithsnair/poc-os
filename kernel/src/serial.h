@@ -14,4 +14,8 @@ void serial_putc(char c);
 /* Send a NUL-terminated string over COM1, translating '\n' to "\r\n". */
 void serial_print(const char *str);
 
+/* Send an unsigned 64-bit value over COM1 in decimal, no leading zeros
+ * (0 itself prints as "0"). */
+void serial_print_dec(uint64_t v);
+
 #endif

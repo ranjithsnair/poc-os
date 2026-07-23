@@ -95,7 +95,10 @@ static int names_equal(const char *header_name, const char *filename) {
     return filename[TAR_NAME_LEN] == '\0';
 }
 
-const uint8_t *tarfs_read(const char *filename, uint64_t *out_size) {
+/* Shared by tarfs_read()/tarfs_stat(): finds filename's ustar header,
+ * or NULL if the archive isn't initialized, malformed, or doesn't
+ * contain it. */
+static const struct tar_header *find_header(const char *filename) {
     if (archive_base == NULL) {
         return NULL;
     }
@@ -117,16 +120,33 @@ const uint8_t *tarfs_read(const char *filename, uint64_t *out_size) {
             break;
         }
 
-        uint64_t size = parse_octal(hdr->size, sizeof(hdr->size));
-        const uint8_t *data = block + TAR_BLOCK_SIZE;
-
         if (names_equal(hdr->name, filename)) {
-            *out_size = size;
-            return data;
+            return hdr;
         }
 
+        uint64_t size = parse_octal(hdr->size, sizeof(hdr->size));
         uint64_t data_blocks = (size + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE;
         offset += TAR_BLOCK_SIZE + data_blocks * TAR_BLOCK_SIZE;
     }
     return NULL;
+}
+
+const uint8_t *tarfs_read(const char *filename, uint64_t *out_size) {
+    const struct tar_header *hdr = find_header(filename);
+    if (hdr == NULL) {
+        return NULL;
+    }
+    *out_size = parse_octal(hdr->size, sizeof(hdr->size));
+    return (const uint8_t *)hdr + TAR_BLOCK_SIZE;
+}
+
+const uint8_t *tarfs_stat(const char *filename, uint64_t *out_size, uint32_t *out_mode, char *out_typeflag) {
+    const struct tar_header *hdr = find_header(filename);
+    if (hdr == NULL) {
+        return NULL;
+    }
+    *out_size = parse_octal(hdr->size, sizeof(hdr->size));
+    *out_mode = (uint32_t)parse_octal(hdr->mode, sizeof(hdr->mode));
+    *out_typeflag = hdr->typeflag;
+    return (const uint8_t *)hdr + TAR_BLOCK_SIZE;
 }

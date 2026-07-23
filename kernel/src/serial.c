@@ -57,3 +57,17 @@ void serial_print(const char *str) {
         serial_putc(str[i]);
     }
 }
+
+void serial_print_dec(uint64_t v) {
+    char buf[21];
+    int i = 20;
+    buf[i] = '\0';
+    if (v == 0) {
+        buf[--i] = '0';
+    }
+    while (v > 0) {
+        buf[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    serial_print(&buf[i]);
+}

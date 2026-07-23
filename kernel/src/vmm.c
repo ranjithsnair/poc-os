@@ -103,6 +103,53 @@ uint64_t vmm_create_address_space(void) {
     return new_phys;
 }
 
+/* Every leaf mapping this kernel ever creates (vmm_map()) is a plain
+ * 4KiB page -- next_table() never sets the PS (huge-page) bit on an
+ * intermediate entry -- so this walk never needs to special-case a 1GiB/
+ * 2MiB leaf appearing at the PDPT/PD level. */
+void vmm_destroy_address_space(uint64_t pml4_phys) {
+    uint64_t *pml4 = phys_to_virt(pml4_phys);
+    size_t hhdm_index = (hhdm_base >> 39) & 0x1FF;
+
+    for (size_t i4 = 0; i4 < 512; i4++) {
+        if (i4 == hhdm_index || i4 == KERNEL_PML4_INDEX || i4 == VMM_KERNEL_HEAP_PML4_INDEX) {
+            continue; /* shared with the kernel's own address space -- not ours to free */
+        }
+        if (!(pml4[i4] & VMM_PRESENT)) {
+            continue;
+        }
+
+        uint64_t pdpt_phys = pml4[i4] & PTE_ADDR_MASK;
+        uint64_t *pdpt = phys_to_virt(pdpt_phys);
+        for (size_t i3 = 0; i3 < 512; i3++) {
+            if (!(pdpt[i3] & VMM_PRESENT)) {
+                continue;
+            }
+
+            uint64_t pd_phys = pdpt[i3] & PTE_ADDR_MASK;
+            uint64_t *pd = phys_to_virt(pd_phys);
+            for (size_t i2 = 0; i2 < 512; i2++) {
+                if (!(pd[i2] & VMM_PRESENT)) {
+                    continue;
+                }
+
+                uint64_t pt_phys = pd[i2] & PTE_ADDR_MASK;
+                uint64_t *pt = phys_to_virt(pt_phys);
+                for (size_t i1 = 0; i1 < 512; i1++) {
+                    if (pt[i1] & VMM_PRESENT) {
+                        pmm_free_frame(pt[i1] & PTE_ADDR_MASK);
+                    }
+                }
+                pmm_free_frame(pt_phys);
+            }
+            pmm_free_frame(pd_phys);
+        }
+        pmm_free_frame(pdpt_phys);
+    }
+
+    pmm_free_frame(pml4_phys);
+}
+
 void vmm_switch_address_space(uint64_t pml4_phys) {
     asm volatile ("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
 }
