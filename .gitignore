@@ -5,3 +5,14 @@ limine/
 *.iso
 *.hdd
 initrd.tar
+disk.img
+disk_root/
+userland/*.o
+userland/*.gcc.o
+userland/*.elf
+mlibc/
+toolchain/src/
+toolchain/build-binutils/
+toolchain/build-gcc/
+toolchain/cross/
+toolchain/sysroot/

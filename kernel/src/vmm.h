@@ -49,6 +49,18 @@ uint64_t vmm_kernel_address_space(void);
  * Everything else starts unmapped. Returns 0 on allocation failure. */
 uint64_t vmm_create_address_space(void);
 
+/* Builds a brand-new address space that is a deep copy of `src_pml4_phys`:
+ * the shared kernel/HHDM/heap entries are set up exactly as
+ * vmm_create_address_space() does, and every present user-space leaf page
+ * in the source is given a fresh physical frame with the same content and
+ * the same permission flags (VMM_WRITABLE/VMM_USER/VMM_NX) in the new
+ * address space. This is fork()'s copy-on-write-free "just duplicate
+ * everything" primitive -- process_fork() uses it to give the child its
+ * own private copy of the parent's entire address space. Returns 0 on
+ * allocation failure (partial copies made so far are torn back down via
+ * vmm_destroy_address_space() before returning). */
+uint64_t vmm_clone_address_space(uint64_t src_pml4_phys);
+
 /* Frees every physical frame this address space owns exclusively: a
  * full four-level page-table walk, freeing each present leaf frame via
  * pmm_free_frame(), skipping the three PML4 entries every address space
@@ -78,6 +90,14 @@ void vmm_unmap(uint64_t pml4_phys, uint64_t virt);
  * address space (with the same low 12 bits as `virt`), or UINT64_MAX if
  * it isn't mapped. */
 uint64_t vmm_translate(uint64_t pml4_phys, uint64_t virt);
+
+/* Returns the VMM_WRITABLE/VMM_USER/VMM_NX bits `virt` is currently
+ * mapped with, or 0 if it isn't mapped -- elf.c uses this so that when
+ * two PT_LOAD segments with different permissions (e.g. a read-only
+ * header segment and an executable .text segment) share one physical
+ * page, whichever is processed second can broaden the mapping (clear
+ * NX, add WRITABLE) instead of silently re-narrowing it back down. */
+uint64_t vmm_page_flags(uint64_t pml4_phys, uint64_t virt);
 
 /* Converts a physical address to a kernel-accessible pointer via the
  * HHDM -- the only way to touch a physical frame (e.g. one fresh out of

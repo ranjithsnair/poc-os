@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include "vmm.h"
 #include "pmm.h"
+#include "string.h"
 
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ull
 #define KERNEL_PML4_INDEX 511
@@ -101,6 +102,67 @@ uint64_t vmm_create_address_space(void) {
     new_pml4[VMM_KERNEL_HEAP_PML4_INDEX] = kernel_pml4[VMM_KERNEL_HEAP_PML4_INDEX];
 
     return new_phys;
+}
+
+/* Every user-space virtual address this kernel ever hands out (ELF
+ * PT_LOAD segments linked low, the stack at VMM_USER_STACK_TOP, anon
+ * memory at VMM_USER_ANON_BASE) has PML4 index < 256 -- the "low half" of
+ * the canonical address space -- so reconstructing a virtual address from
+ * a bare PML4/PDPT/PD/PT index walk never needs the sign-extension a
+ * high-half address would require. */
+uint64_t vmm_clone_address_space(uint64_t src_pml4_phys) {
+    uint64_t dst_phys = vmm_create_address_space();
+    if (dst_phys == 0) {
+        return 0;
+    }
+
+    uint64_t *src_pml4 = phys_to_virt(src_pml4_phys);
+    size_t hhdm_index = (hhdm_base >> 39) & 0x1FF;
+
+    for (size_t i4 = 0; i4 < 512; i4++) {
+        if (i4 == hhdm_index || i4 == KERNEL_PML4_INDEX || i4 == VMM_KERNEL_HEAP_PML4_INDEX) {
+            continue;
+        }
+        if (!(src_pml4[i4] & VMM_PRESENT)) {
+            continue;
+        }
+
+        uint64_t *src_pdpt = phys_to_virt(src_pml4[i4] & PTE_ADDR_MASK);
+        for (size_t i3 = 0; i3 < 512; i3++) {
+            if (!(src_pdpt[i3] & VMM_PRESENT)) {
+                continue;
+            }
+
+            uint64_t *src_pd = phys_to_virt(src_pdpt[i3] & PTE_ADDR_MASK);
+            for (size_t i2 = 0; i2 < 512; i2++) {
+                if (!(src_pd[i2] & VMM_PRESENT)) {
+                    continue;
+                }
+
+                uint64_t *src_pt = phys_to_virt(src_pd[i2] & PTE_ADDR_MASK);
+                for (size_t i1 = 0; i1 < 512; i1++) {
+                    if (!(src_pt[i1] & VMM_PRESENT)) {
+                        continue;
+                    }
+
+                    uint64_t src_frame = src_pt[i1] & PTE_ADDR_MASK;
+                    uint64_t flags = src_pt[i1] & (VMM_WRITABLE | VMM_USER | VMM_NX);
+                    uint64_t dst_frame = pmm_alloc_frame();
+                    if (dst_frame == 0) {
+                        vmm_destroy_address_space(dst_phys);
+                        return 0;
+                    }
+                    memcpy(phys_to_virt(dst_frame), phys_to_virt(src_frame), PMM_FRAME_SIZE);
+
+                    uint64_t virt = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
+                                     ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
+                    vmm_map(dst_phys, virt, dst_frame, flags);
+                }
+            }
+        }
+    }
+
+    return dst_phys;
 }
 
 /* Every leaf mapping this kernel ever creates (vmm_map()) is a plain
@@ -210,4 +272,23 @@ uint64_t vmm_translate(uint64_t pml4_phys, uint64_t virt) {
     if (!(pt[i1] & VMM_PRESENT)) return UINT64_MAX;
 
     return (pt[i1] & PTE_ADDR_MASK) | (virt & 0xFFF);
+}
+
+uint64_t vmm_page_flags(uint64_t pml4_phys, uint64_t virt) {
+    uint64_t *pml4 = phys_to_virt(pml4_phys);
+
+    size_t i4 = (virt >> 39) & 0x1FF;
+    size_t i3 = (virt >> 30) & 0x1FF;
+    size_t i2 = (virt >> 21) & 0x1FF;
+    size_t i1 = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[i4] & VMM_PRESENT)) return 0;
+    uint64_t *pdpt = phys_to_virt(pml4[i4] & PTE_ADDR_MASK);
+    if (!(pdpt[i3] & VMM_PRESENT)) return 0;
+    uint64_t *pd = phys_to_virt(pdpt[i3] & PTE_ADDR_MASK);
+    if (!(pd[i2] & VMM_PRESENT)) return 0;
+    uint64_t *pt = phys_to_virt(pd[i2] & PTE_ADDR_MASK);
+    if (!(pt[i1] & VMM_PRESENT)) return 0;
+
+    return pt[i1] & (VMM_WRITABLE | VMM_USER | VMM_NX);
 }

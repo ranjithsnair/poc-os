@@ -26,12 +26,37 @@
 #include "heap.h"       /* kmalloc/kfree */
 #include "process.h"    /* preemptive round-robin scheduler */
 #include "tarfs.h"      /* initrd (ustar archive) reader */
+#include "vfs.h"        /* writable FAT32 disk (virtio_blk.c/fat32.c) mount */
+#include "fpu.h"        /* x87/SSE state (enable at boot, save/restore per process) */
 
 /* The ring3 test program (user_test.S): pure register/immediate code
  * with no absolute-address references, safe to copy to a fresh page and
  * run from anywhere -- see process_create()'s doc comment. */
 extern const uint8_t user_test_program[];
 extern const uint8_t user_test_program_end[];
+
+/* fork_test.S / exec_test.S: same flat-blob shape as user_test_program,
+ * exercising SYS_FORK/SYS_WAITPID and SYS_EXECVE respectively. */
+extern const uint8_t fork_test_program[];
+extern const uint8_t fork_test_program_end[];
+extern const uint8_t exec_test_program[];
+extern const uint8_t exec_test_program_end[];
+extern const uint8_t pipe_test_program[];
+extern const uint8_t pipe_test_program_end[];
+extern const uint8_t signal_test_program[];
+extern const uint8_t signal_test_program_end[];
+extern const uint8_t tty_test_program[];
+extern const uint8_t tty_test_program_end[];
+extern const uint8_t mmap_test_program[];
+extern const uint8_t mmap_test_program_end[];
+extern const uint8_t fat32_test_program[];
+extern const uint8_t fat32_test_program_end[];
+extern const uint8_t libc_test_program[];
+extern const uint8_t libc_test_program_end[];
+extern const uint8_t libc_test_gcc_program[];
+extern const uint8_t libc_test_gcc_program_end[];
+extern const uint8_t bash_test_program[];
+extern const uint8_t bash_test_program_end[];
 
 /* Declares the Limine base revision marker. Placed in the ".requests"
  * linker section (see linker.ld) so the bootloader can find it by
@@ -86,6 +111,32 @@ static volatile LIMINE_REQUESTS_START_MARKER;
 
 __attribute__((used, section(".requests_end_marker")))
 static volatile LIMINE_REQUESTS_END_MARKER;
+
+/* Boot-time test scaffolding for the TTY layer (see console.c): simulates
+ * a physically-typed Ctrl-C a few ticks after boot, since there's no way
+ * to inject a real PS/2 scancode in this environment. Registered as the
+ * PIT's tick callback instead of scheduler_tick directly so it reliably
+ * runs on every timer IRQ regardless of which context got interrupted --
+ * unlike code sitting after `hlt` in kmain's own idle loop, which never
+ * runs again once the scheduler has handed off to a user process (every
+ * later timer IRQ enters via whichever process's own kernel stack is
+ * current, never kmain's). This whole function goes away along with the
+ * process_create() test-program calls it's paired with, once a real init
+ * process exists. */
+static void tick_with_injected_ctrl_c(struct registers *regs) {
+    static int injected = 0;
+    /* Round-robin gives each READY process a full tick's slice before
+     * switching to the next, so with 7 boot-spawned test processes
+     * ahead of it in the rotation, tty_test_program's first slice (where
+     * it registers itself as the foreground pid) doesn't start until
+     * roughly tick 6-7 -- comfortably before this, but not so late that
+     * it eats into tty_test_program's own ~20-tick wait window. */
+    if (!injected && pit_get_ticks() >= 15) {
+        console_feed_char(0x03);
+        injected = 1;
+    }
+    scheduler_tick(regs);
+}
 
 /* "Halt and catch fire": park the CPU forever. Used whenever the kernel
  * hits a condition it can't recover from, before interrupts are set up
@@ -162,6 +213,7 @@ void kmain(void) {
     pit_init(100);
     console_init();
     keyboard_init();
+    fpu_init();
     serial_print("PoC-OS: GDT/IDT/PIC/PIT/keyboard initialized.\n");
 
     /* LIMINE_BASE_REVISION_SUPPORTED becomes false if the bootloader that
@@ -214,10 +266,10 @@ void kmain(void) {
         serial_print("PoC-OS: heap allocator initialized (test allocation FAILED).\n");
     }
 
-    /* Reads a known file back out of the initrd as a smoke test --
-     * there's no disk driver yet, so module_request.response->modules[0]
-     * (an initrd.tar built from initrd/ contents by the top-level Makefile) is
-     * the only "filesystem" this kernel can see. */
+    /* Reads a known file back out of the initrd as a smoke test -- purely
+     * a kernel-internal check now (process-visible files live on the
+     * FAT32 disk below; see vfs_init()). module_request.response->modules[0]
+     * (an initrd.tar built from initrd/ contents by the top-level Makefile). */
     if (module_request.response == NULL || module_request.response->module_count < 1) {
         serial_print("PoC-OS: no initrd module available.\n");
     } else {
@@ -237,6 +289,16 @@ void kmain(void) {
         } else {
             serial_print("PoC-OS: initrd: hello.txt not found.\n");
         }
+    }
+
+    /* Mounts the writable FAT32 disk (virtio_blk.c/fat32.c) that
+     * process-visible SYS_OPEN/SYS_EXECVE now go through -- see vfs.c.
+     * No fallback if this fails: every test program spawned below that
+     * touches a file (SYS_OPEN, SYS_EXECVE) will simply fail its own
+     * open/exec call and report that, same as any other missing
+     * resource. */
+    if (!vfs_init()) {
+        serial_print("PoC-OS: no writable filesystem -- file-backed syscalls will fail.\n");
     }
 
     /* Just use the first framebuffer Limine reports (typically the
@@ -275,7 +337,72 @@ void kmain(void) {
     uint64_t user_program_size = (uint64_t)(user_test_program_end - user_test_program);
     process_create(user_test_program, user_program_size, 0x400000);
     process_create(user_test_program, user_program_size, 0x400000);
-    pit_set_tick_callback(scheduler_tick);
+
+    /* Exercise SYS_FORK/SYS_WAITPID and SYS_EXECVE -- expect "CP0" (child,
+     * then parent's reaped-status digit) and "OK" (exec_target.elf, loaded
+     * from the initrd, running in place of exec_test_program) somewhere
+     * in the serial log, interleaved with the "Hi" lines above by the
+     * round-robin scheduler. */
+    uint64_t fork_test_size = (uint64_t)(fork_test_program_end - fork_test_program);
+    process_create(fork_test_program, fork_test_size, 0x400000);
+    uint64_t exec_test_size = (uint64_t)(exec_test_program_end - exec_test_program);
+    process_create(exec_test_program, exec_test_size, 0x400000);
+
+    /* Exercises SYS_PIPE/SYS_DUP2 (via the fork()-after-pipe() refcounting
+     * both process_fork() and process_fd_dup2() need to get right):
+     * expect "hi" from the child echoing back what the parent piped it. */
+    uint64_t pipe_test_size = (uint64_t)(pipe_test_program_end - pipe_test_program);
+    process_create(pipe_test_program, pipe_test_size, 0x400000);
+
+    /* Exercises SYS_SIGACTION/SYS_KILL/SYS_SIGRETURN (a caught signal) and
+     * default-action termination: expect "HS" (handler ran, then the
+     * interrupted code resumed correctly) followed by "T" (a SIGTERM'd
+     * child's exit status came back as the POSIX 128+signum convention). */
+    uint64_t signal_test_size = (uint64_t)(signal_test_program_end - signal_test_program);
+    process_create(signal_test_program, signal_test_size, 0x400000);
+
+    /* Exercises the TTY layer: SYS_IOCTL's TCGETS/TCSETS/TIOCSPGRP, and
+     * Ctrl-C -> SIGINT via console_feed_char() (see
+     * tick_with_injected_ctrl_c() below, which simulates the keypress --
+     * there's no way to inject a real PS/2 scancode in this environment).
+     * Expect "ic!". */
+    uint64_t tty_test_size = (uint64_t)(tty_test_program_end - tty_test_program);
+    process_create(tty_test_program, tty_test_size, 0x400000);
+
+    /* Exercises SYS_ANON_ALLOCATE/SYS_ANON_FREE now that the latter
+     * actually frees physical frames: expect "M" (60 rounds of allocate
+     * 4MiB + touch it + free it all succeeded, which 240MiB total would
+     * not survive on this VM's ~222MiB if frames were being leaked). */
+    uint64_t mmap_test_size = (uint64_t)(mmap_test_program_end - mmap_test_program);
+    process_create(mmap_test_program, mmap_test_size, 0x400000);
+
+    /* Exercises the writable FAT32 disk end-to-end: SYS_OPEN(O_CREAT|
+     * O_WRONLY), SYS_WRITE, SYS_CLOSE, reopen read-only, SYS_READ back
+     * and compare, then SYS_MKDIR + the same dance one directory level
+     * down. Expect "WD". */
+    uint64_t fat32_test_size = (uint64_t)(fat32_test_program_end - fat32_test_program);
+    process_create(fat32_test_program, fat32_test_size, 0x400000);
+
+    /* Exercises the Phase 1 mlibc port: execve()s into a real C program
+     * (userland/hello_libc.c) linked against mlibc's libc.a. Expect
+     * "hello from libc" to appear verbatim in the serial log. */
+    uint64_t libc_test_size = (uint64_t)(libc_test_program_end - libc_test_program);
+    process_create(libc_test_program, libc_test_size, 0x400000);
+
+    /* Phase 2 verification: same program, but built with the real cross
+     * GCC instead of clang -- see libc_test_gcc.S's doc comment. Expect
+     * a second "hello from libc" line. */
+    uint64_t libc_test_gcc_size = (uint64_t)(libc_test_gcc_program_end - libc_test_gcc_program);
+    process_create(libc_test_gcc_program, libc_test_gcc_size, 0x400000);
+
+    /* Phase 3 verification: execve()s into the cross-compiled real GNU
+     * bash binary in isolation (not yet wired as init -- see
+     * bash_test.S's doc comment). Expect a bash prompt/startup activity
+     * in the serial log, not a fault/reboot. */
+    uint64_t bash_test_size = (uint64_t)(bash_test_program_end - bash_test_program);
+    process_create(bash_test_program, bash_test_size, 0x400000);
+
+    pit_set_tick_callback(tick_with_injected_ctrl_c);
     serial_print("PoC-OS: scheduler armed, idling until the first tick.\n");
     hcf();
 }

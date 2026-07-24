@@ -68,6 +68,14 @@ void isr_common_handler(struct registers *regs) {
     serial_print(" rflags="); print_hex64(regs->rflags);
     serial_print(" rsp="); print_hex64(regs->rsp);
     serial_print(" ss="); print_hex64(regs->ss);
+    if (regs->vector == 14) {
+        /* CR2 -- the faulting linear address -- is only meaningful for a
+         * page fault (#PF); every other vector leaves it stale from
+         * whatever last faulted. */
+        uint64_t cr2;
+        asm volatile ("mov %%cr2, %0" : "=r"(cr2));
+        serial_print("\ncr2="); print_hex64(cr2);
+    }
     serial_print("\nSystem halted.\n");
     for (;;) {
         asm volatile ("cli; hlt");

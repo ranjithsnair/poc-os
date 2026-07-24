@@ -2,8 +2,11 @@
  * Minimal PS/2 keyboard driver: decodes scancode set 1 make codes to
  * unshifted US QWERTY ASCII and feeds them to console.c's line
  * discipline (which echoes them and buffers completed lines for
- * SYS_READ on fd 0) -- there's no shift/modifier tracking or
- * framebuffer console input yet.
+ * SYS_READ on fd 0) -- there's no shift tracking or framebuffer console
+ * input yet. Left Ctrl is tracked (make/break code 0x1D/0x9D) just
+ * enough to synthesize the control bytes a real tty produces for
+ * Ctrl-<letter> (1-26, e.g. Ctrl-C -> 0x03), since console.c's Ctrl-C
+ * handling depends on actually receiving that byte.
  */
 #include <stdint.h>
 #include "keyboard.h"
@@ -36,16 +39,34 @@ static const char scancode_to_ascii[128] = {
     /* 0x78 */ 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
+#define SCANCODE_LCTRL 0x1D
+
+static int ctrl_held = 0;
+
 static void keyboard_handler(struct registers *regs) {
     (void)regs;
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
+
+    if (scancode == SCANCODE_LCTRL) {
+        ctrl_held = 1;
+        return;
+    }
+    if (scancode == (SCANCODE_LCTRL | 0x80)) {
+        ctrl_held = 0;
+        return;
+    }
     if (scancode & 0x80) {
-        return; /* key release; nothing to do without modifier tracking */
+        return; /* other key releases; nothing to do without full modifier tracking */
     }
+
     char c = scancode_to_ascii[scancode];
-    if (c != 0) {
-        console_feed_char(c);
+    if (c == 0) {
+        return;
     }
+    if (ctrl_held && c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 1); /* Ctrl-A=0x01 .. Ctrl-Z=0x1A, e.g. Ctrl-C=0x03 */
+    }
+    console_feed_char(c);
 }
 
 void keyboard_init(void) {
