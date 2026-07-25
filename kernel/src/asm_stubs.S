@@ -86,6 +86,11 @@ idt_flush:
 .extern isr_common_handler
 .extern irq_common_handler
 
+/* Landing pad every isrN stub below jumps to: saves every general
+ * register (so isr_common_handler sees the full interrupted context),
+ * calls into C, restores those same registers, discards the vector/
+ * error-code pair the stub pushed, and `iretq`s back to wherever (or
+ * whatever) was interrupted. */
 isr_common_stub:
     PUSH_ALL
     mov %rsp, %rdi        /* struct registers * -> first SysV arg */
@@ -94,6 +99,8 @@ isr_common_stub:
     add $16, %rsp         /* discard the vector/error_code pushed below */
     iretq
 
+/* Same shape as isr_common_stub, for hardware IRQs (irq0-15) instead of
+ * CPU exceptions. */
 irq_common_stub:
     PUSH_ALL
     mov %rsp, %rdi

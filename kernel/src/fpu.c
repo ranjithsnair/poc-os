@@ -3,6 +3,10 @@
 
 uint8_t fpu_default_state[512] __attribute__((aligned(16)));
 
+/* CR0/CR4 are CPU control registers with bits that enable/disable major
+ * features (here, whether FPU/SSE instructions are allowed to run at
+ * all) -- these are the plain read/write helpers fpu_init() uses to
+ * flip those bits. */
 static inline uint64_t read_cr0(void) {
     uint64_t v;
     asm volatile ("mov %%cr0, %0" : "=r"(v));

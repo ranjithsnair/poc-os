@@ -90,14 +90,23 @@ static void serial_rx_handler(struct registers *regs) {
     }
 }
 
+/* Switches the UART from polled output (serial_init() above) to
+ * interrupt-driven input: registers serial_rx_handler() for IRQ4 and
+ * unmasks it at the PIC so typed/pasted bytes arrive as interrupts
+ * instead of needing to be polled for. */
 void serial_input_init(void) {
     outb(COM1 + 1, 0x01); /* IER: enable "data available" interrupt (was 0x00 -- polling only) */
     irq_register_handler(4, serial_rx_handler);
     pic_clear_mask(4);
 }
 
+/* Prints an unsigned integer in decimal, since serial_print() only
+ * knows how to print C strings. Builds the digits into a small stack
+ * buffer back-to-front (easiest way to get decimal digits out of a
+ * binary number is one least-significant digit at a time via `% 10`),
+ * then prints the buffer starting from the first digit written. */
 void serial_print_dec(uint64_t v) {
-    char buf[21];
+    char buf[21]; /* enough digits for the largest possible uint64_t, plus '\0' */
     int i = 20;
     buf[i] = '\0';
     if (v == 0) {

@@ -72,6 +72,9 @@ static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     gdt[6] = high;
 }
 
+/* Builds the 7-entry GDT above, loads it into the CPU, and loads the TSS
+ * on top of it. Must run before idt_init(), since every interrupt gate
+ * names one of the code selectors set up here. Call once, at boot. */
 void gdt_init(void) {
     gdt[0] = 0; /* null descriptor, required by the architecture */
     gdt[1] = make_flat_descriptor(0x9A, 0xA); /* kernel code: P|S|exec/read, L=1 */
@@ -93,6 +96,10 @@ void gdt_init(void) {
     tss_flush();
 }
 
+/* Tells the CPU which kernel stack to switch to on the next ring-3 ->
+ * ring-0 privilege change (e.g. a syscall or IRQ firing while a user
+ * process is running). Called by process.c every time it switches to
+ * a different process, so each one traps into its own kernel stack. */
 void tss_set_kernel_stack(uint64_t rsp0) {
     tss.rsp0 = rsp0;
 }

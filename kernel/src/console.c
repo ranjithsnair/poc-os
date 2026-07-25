@@ -1,3 +1,4 @@
+/* See console.h. */
 #include <stdint.h>
 #include "console.h"
 #include "serial.h"
@@ -26,6 +27,8 @@ static uint8_t ring[CONSOLE_RING_SIZE];
 static uint64_t ring_head = 0;
 static uint64_t ring_count = 0;
 
+/* Appends one byte to the tail of the ring buffer, ready for
+ * console_read_nonblock() to consume. */
 static void ring_push(uint8_t byte) {
     if (ring_count == CONSOLE_RING_SIZE) {
         return; /* full: drop rather than overwrite unread data */
@@ -35,6 +38,8 @@ static void ring_push(uint8_t byte) {
     ring_count++;
 }
 
+/* Resets to an empty line-in-progress and an empty ring buffer. Call
+ * once at boot. */
 void console_init(void) {
     line_len = 0;
     ring_head = 0;

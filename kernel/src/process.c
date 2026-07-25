@@ -118,12 +118,12 @@ static struct process *current(void) {
     return (current_index == -1) ? NULL : &processes[current_index];
 }
 
-/* Shared tail of process_create()/process_create_from_elf(): finds a
- * free slot, allocates the kernel stack, seeds the fd table with the
- * console, and fills in the initial saved-register state an iretq needs
- * to enter ring3 at `entry` with `stack_top` as %rsp. Does NOT touch the
- * address space itself -- callers must have already mapped everything
- * the process needs into `pml4` before calling this. */
+/* Shared tail of process_create_from_elf(): finds a free slot, allocates
+ * the kernel stack, seeds the fd table with the console, and fills in
+ * the initial saved-register state an iretq needs to enter ring3 at
+ * `entry` with `stack_top` as %rsp. Does NOT touch the address space
+ * itself -- callers must have already mapped everything the process
+ * needs into `pml4` before calling this. */
 static uint64_t process_spawn(uint64_t pml4, uint64_t entry, uint64_t stack_top) {
     int slot = -1;
     for (int i = 0; i < PROCESS_MAX; i++) {
@@ -180,9 +180,8 @@ static uint64_t process_spawn(uint64_t pml4, uint64_t entry, uint64_t stack_top)
     /* The saved context a first run needs is identical in shape to what
      * any iretq needs: an entry point, a ring3 code/data selector pair
      * (RPL=3), interrupts enabled, and a stack. General registers start
-     * zeroed -- process_create()'s flat blob never read them before
-     * setting its own, and an ELF's crt0 reads argc/argv off the stack,
-     * not out of registers, so zeroing here is still correct for both. */
+     * zeroed -- an ELF's crt0 reads argc/argv off the stack, not out of
+     * registers, so this is correct for every process this kernel spawns. */
     p->regs.rip = entry;
     p->regs.cs = GDT_USER_CODE | 3;
     p->regs.rflags = 0x200; /* IF=1 */
@@ -197,33 +196,6 @@ static uint64_t process_spawn(uint64_t pml4, uint64_t entry, uint64_t stack_top)
 
     serial_print("PoC-OS: process created.\n");
     return p->pid;
-}
-
-uint64_t process_create(const uint8_t *code, uint64_t code_size, uint64_t entry_virt) {
-    uint64_t pml4 = vmm_create_address_space();
-    uint64_t code_phys = pmm_alloc_frame();
-    uint64_t stack_phys = pmm_alloc_frame();
-    if (pml4 == 0 || code_phys == 0 || stack_phys == 0) {
-        serial_print("PoC-OS: process_create: out of memory.\n");
-        return 0;
-    }
-
-    /* Copy the code blob into the fresh frame via the HHDM, then map it
-     * (and a stack page right after it) into the new process's own
-     * address space -- not the currently active one, which is why
-     * vmm_map() takes an explicit pml4_phys. */
-    uint8_t *code_kernel_ptr = (uint8_t *)vmm_phys_to_virt(code_phys);
-    memcpy(code_kernel_ptr, code, code_size);
-    vmm_map(pml4, entry_virt, code_phys, VMM_USER);
-
-    uint64_t stack_virt = entry_virt + PMM_FRAME_SIZE;
-    vmm_map(pml4, stack_virt, stack_phys, VMM_USER | VMM_WRITABLE | VMM_NX);
-
-    uint64_t pid = process_spawn(pml4, entry_virt, stack_virt + PMM_FRAME_SIZE);
-    if (pid == 0) {
-        vmm_destroy_address_space(pml4);
-    }
-    return pid;
 }
 
 /* Fixed load-base constants for the two ELF images a PT_INTERP-linked
@@ -337,6 +309,8 @@ uint64_t process_create_from_elf(const uint8_t *data, uint64_t size,
     return pid;
 }
 
+/* Linear search for the process with this pid, or NULL if it's not
+ * running (already exited and reaped, or never existed). */
 static struct process *find_by_pid(uint64_t pid) {
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (processes[i].state != PROCESS_UNUSED && processes[i].pid == pid) {
@@ -699,21 +673,30 @@ int64_t process_waitpid(int64_t target_pid, int *out_status) {
     return found_child ? 0 : -1;
 }
 
+/* Returns the currently running process's pid, or 0 if none is running. */
 uint64_t process_current_pid(void) {
     struct process *p = current();
     return (p == NULL) ? 0 : p->pid;
 }
 
+/* Returns the currently running process's parent's pid (0 = boot-spawned,
+ * no parent). */
 uint64_t process_current_ppid(void) {
     struct process *p = current();
     return (p == NULL) ? 0 : p->parent_pid;
 }
 
+/* Returns the currently running process's address space (its PML4
+ * physical address) -- syscall.c passes this to usercopy.c's
+ * copy_from_user()/copy_to_user() to validate syscall pointer arguments. */
 uint64_t process_current_pml4(void) {
     struct process *p = current();
     return (p == NULL) ? 0 : p->pml4_phys;
 }
 
+/* Opens `path` (resolved against the current process's cwd) and installs
+ * it as a fat32-backed fd in the first free slot. Returns the new fd
+ * number, or -1 (file not found, or no free fd slots). */
 int process_fd_open(const char *path, int flags) {
     struct process *p = current();
     if (p == NULL) {
@@ -943,6 +926,10 @@ int process_fd_dup2(int oldfd, int newfd) {
 #define SYS_SEEK_CUR 1
 #define SYS_SEEK_END 2
 
+/* Moves fd's read/write offset, POSIX lseek()-style: SEEK_SET is
+ * relative to the start of the file, SEEK_CUR to the current offset,
+ * SEEK_END to the file's current size. Only fat32-backed fds support
+ * seeking. Returns the new offset, or -1 on an invalid fd/whence/result. */
 int64_t process_fd_lseek(int fd, int64_t offset, int whence) {
     struct process_fd *f = fd_lookup(current(), fd);
     if (f == NULL || f->console_kind != 0) {
@@ -966,6 +953,10 @@ int64_t process_fd_lseek(int fd, int64_t offset, int whence) {
     return new_off;
 }
 
+/* Reports fd's size and mode bits, the way fstat() needs to: a pipe
+ * reports its buffered byte count and S_IFIFO, a console fd (stdin/
+ * stdout/stderr) reports S_IFCHR with size 0, and a real fat32 fd
+ * reports its actual file size/mode. */
 int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode) {
     struct process_fd *f = fd_lookup(current(), fd);
     if (f == NULL) {
@@ -1097,6 +1088,10 @@ uint64_t process_anon_allocate_fixed(uint64_t vaddr, uint64_t size) {
     return vaddr;
 }
 
+/* Changes the read/write/execute permissions of an already-mapped
+ * region, POSIX mprotect()-style. `vaddr` must be page-aligned and every
+ * page in [vaddr, vaddr+size) must already be mapped, or this fails
+ * without changing anything. */
 int process_mprotect(uint64_t vaddr, uint64_t size, uint64_t prot) {
     struct process *p = current();
     if (p == NULL || size == 0 || (vaddr & (PMM_FRAME_SIZE - 1)) != 0) {
@@ -1128,6 +1123,11 @@ int process_mprotect(uint64_t vaddr, uint64_t size, uint64_t prot) {
     return 0;
 }
 
+/* Sets the FS segment base for the current process, both in its saved
+ * state (so a later context switch restores it) and immediately in the
+ * live FS.base MSR (so it takes effect right away too) -- used by
+ * thread-local storage (TLS) setup, which addresses per-thread data via
+ * FS-relative offsets. */
 void process_set_fs_base(uint64_t value) {
     struct process *p = current();
     if (p == NULL) {
@@ -1137,6 +1137,9 @@ void process_set_fs_base(uint64_t value) {
     wrmsr(IA32_FS_BASE_MSR, value);
 }
 
+/* Copies the current process's working directory path into `kbuf`
+ * (kernel buffer). Returns the string length (not including the NUL),
+ * or -1 if `size` is too small to hold it. */
 int process_getcwd(char *kbuf, uint64_t size) {
     struct process *p = current();
     if (p == NULL) {
@@ -1153,6 +1156,8 @@ int process_getcwd(char *kbuf, uint64_t size) {
     return (int)len;
 }
 
+/* Changes the current process's working directory to `kpath` (already
+ * resolved/validated by the caller -- this just stores it). */
 int process_chdir(const char *kpath) {
     struct process *p = current();
     if (p == NULL) {
@@ -1210,6 +1215,8 @@ int process_send_signal(uint64_t target_pid, int sig) {
     return 0;
 }
 
+/* Creates a new directory at `kpath`, resolved against the current
+ * process's cwd. Returns 0 on success, -1 on failure. */
 int process_mkdir(const char *kpath) {
     struct process *p = current();
     if (p == NULL) {

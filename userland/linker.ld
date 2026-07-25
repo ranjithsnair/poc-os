@@ -1,11 +1,12 @@
 /*
- * Minimal linker script for standalone static ET_EXEC ELF64 test
+ * Minimal linker script for standalone static ET_EXEC ELF64 userland
  * binaries -- distinct from kernel/linker.ld (which links the kernel
- * itself at the higher-half 0xffffffff80000000). 0x400000 matches the
- * entry_virt process_create() already uses for its own flat test blob,
- * and is comfortably below VMM_USER_ANON_BASE/VMM_USER_STACK_TOP
- * (kernel/src/vmm.h) so a loaded ELF's segments can never collide with
- * anon memory or the stack region elf.c maps separately.
+ * itself at the higher-half 0xffffffff80000000). 0x400000 is also
+ * ELF_PIE_BASE (process.c) -- where a PIE main executable's segments
+ * land once elf_load() adds its load_base -- and is comfortably below
+ * VMM_USER_ANON_BASE/VMM_USER_STACK_TOP (kernel/src/vmm.h) so a loaded
+ * ELF's segments can never collide with anon memory or the stack region
+ * elf.c maps separately.
  */
 ENTRY(_start)
 SECTIONS

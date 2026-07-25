@@ -38,12 +38,18 @@ static const char *exception_names[32] = {
     "Hypervisor injection exception", "VMM communication exception", "Security exception", "Reserved"
 };
 
+/* One slot per IRQ line (0-15); NULL means "nothing registered", which
+ * irq_common_handler() below just skips over. */
 static irq_handler_t irq_handlers[16];
 
+/* Lets a driver (pit.c, keyboard.c, serial.c) claim one IRQ line so its
+ * own handler gets called whenever that interrupt fires. */
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
     irq_handlers[irq] = handler;
 }
 
+/* Prints a 64-bit value as "0xdeadbeefdeadbeef" over serial -- used for
+ * crash reports, where we can't trust any fancier formatting code. */
 static void print_hex64(uint64_t v) {
     static const char *hex = "0123456789abcdef";
     /* buf[0..1] = "0x", buf[2..17] = 16 hex digits, buf[18] = '\0'. */

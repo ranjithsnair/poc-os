@@ -32,6 +32,9 @@ static uint64_t translate_checked(uint64_t pml4_phys, uint64_t virt, int need_wr
     return (pte & 0x000FFFFFFFFFF000ull) | (virt & 0xFFF);
 }
 
+/* Walks every page overlapping [ptr, ptr+len), one at a time, checking
+ * each is actually mapped and accessible before any copy is allowed to
+ * touch it -- see usercopy.h for exactly what "accessible" requires. */
 int user_range_ok(uint64_t pml4_phys, uint64_t ptr, uint64_t len, int need_write) {
     if (len == 0) {
         return 1;
@@ -78,6 +81,7 @@ static int walk_user_range(uint64_t pml4_phys, uint64_t user_ptr, void *kbuf, ui
     return 1;
 }
 
+/* Copies one chunk from a user page into the kernel buffer. */
 static void copy_page_from_user(uint8_t *kernel_page_ptr, void *kbuf, uint64_t kbuf_offset, uint64_t n) {
     memcpy((uint8_t *)kbuf + kbuf_offset, kernel_page_ptr, n);
 }
@@ -89,10 +93,15 @@ static void copy_page_to_user(uint8_t *kernel_page_ptr, void *kbuf, uint64_t kbu
     memcpy(kernel_page_ptr, (const uint8_t *)kbuf + kbuf_offset, n);
 }
 
+/* Reads `len` bytes out of a user process's memory into `kdst` (kernel
+ * memory), e.g. for a syscall like write() that needs to see the bytes
+ * the user process asked to write. */
 int copy_from_user(uint64_t pml4_phys, void *kdst, uint64_t user_src, uint64_t len) {
     return walk_user_range(pml4_phys, user_src, kdst, len, 0, copy_page_from_user);
 }
 
+/* Writes `len` bytes from `ksrc` (kernel memory) into a user process's
+ * memory, e.g. for a syscall like read() that needs to hand data back. */
 int copy_to_user(uint64_t pml4_phys, uint64_t user_dst, const void *ksrc, uint64_t len) {
     return walk_user_range(pml4_phys, user_dst, (void *)ksrc, len, 1, copy_page_to_user);
 }

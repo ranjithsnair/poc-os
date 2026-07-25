@@ -38,6 +38,10 @@ void pic_remap(void) {
     outb(PIC2_DATA, 0xFF);
 }
 
+/* "End Of Interrupt": tells the PIC the current interrupt has been
+ * handled so it's free to send the next one. Slave-chip IRQs (8-15)
+ * need an EOI sent to *both* chips, since they reach the CPU by being
+ * relayed through the master. */
 void pic_send_eoi(uint8_t irq) {
     if (irq >= 8) {
         outb(PIC2_COMMAND, PIC_EOI);
@@ -45,12 +49,17 @@ void pic_send_eoi(uint8_t irq) {
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
+/* Masks (blocks) one IRQ line so the PIC stops delivering it, without
+ * touching any of the other 7 lines on the same chip -- each PIC has
+ * one "mask" byte, one bit per line, so this only ever flips a single bit. */
 void pic_set_mask(uint8_t irq) {
     uint16_t port = irq < 8 ? PIC1_DATA : PIC2_DATA;
     uint8_t line = irq < 8 ? irq : (uint8_t)(irq - 8);
     outb(port, (uint8_t)(inb(port) | (1 << line)));
 }
 
+/* Unmasks (allows) one IRQ line. Called by a driver once its handler is
+ * registered and it's ready to actually receive that interrupt. */
 void pic_clear_mask(uint8_t irq) {
     uint16_t port = irq < 8 ? PIC1_DATA : PIC2_DATA;
     uint8_t line = irq < 8 ? irq : (uint8_t)(irq - 8);

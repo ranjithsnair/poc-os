@@ -41,9 +41,8 @@ initrd.tar: $(INITRD_FILES)
 	tar --format=ustar -cf $@ -C initrd $(notdir $(INITRD_FILES))
 
 # Builds standalone userland test ELFs (real, independently linked
-# executables -- unlike kernel/src/*_test.S's in-kernel-image flat blobs)
-# used to exercise SYS_EXECVE. See userland/README-ish comment in
-# exec_target.S for why this can't just be another flat blob.
+# executables) used to exercise SYS_EXECVE. See exec_target.S's own
+# doc comment.
 userland/%.elf: userland/%.S userland/linker.ld
 	clang -target x86_64-unknown-none-elf -ffreestanding -fno-stack-protector \
 		-fno-stack-check -fno-pic -fno-pie -m64 -march=x86-64 \
@@ -289,7 +288,7 @@ toolchain/cross/bin/x86_64-elf-gcc: toolchain/cross/bin/x86_64-elf-ld toolchain/
 # Fetches and builds the Limine bootloader tooling (the `limine` binary
 # used below to install the BIOS boot record) if it isn't present yet.
 # Pinned to the v9.x binary release branch so the vendored copy matches
-# the boot protocol version kernel/src/limine.h implements.
+# the boot protocol version kernel/include/limine.h implements.
 limine/limine:
 	rm -rf limine
 	git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1 limine

@@ -1,3 +1,9 @@
+/*
+ * Programmable Interval Timer: fires IRQ0 at a fixed frequency, giving
+ * the kernel a "heartbeat" it can count (pit_get_ticks()) and hook into
+ * (pit_set_tick_callback()) -- process.c uses the callback to preempt
+ * the running process and switch to the next one on a schedule.
+ */
 #include <stddef.h>
 #include "pit.h"
 #include "io.h"
@@ -8,9 +14,12 @@
 #define PIT_COMMAND  0x43
 #define PIT_BASE_FREQUENCY 1193182u /* fixed input clock all PIT dividers are relative to */
 
-static volatile uint64_t ticks = 0;
-static irq_handler_t tick_callback = NULL;
+static volatile uint64_t ticks = 0;      /* total IRQ0 firings since pit_init() */
+static irq_handler_t tick_callback = NULL; /* optional extra handler run on every tick */
 
+/* Registered as the IRQ0 handler. Runs on every timer interrupt: bumps
+ * the tick counter, then hands off to whatever process.c (or nothing,
+ * before it's set up) registered via pit_set_tick_callback(). */
 static void pit_handler(struct registers *regs) {
     ticks++;
     if (tick_callback != NULL) {
@@ -18,6 +27,10 @@ static void pit_handler(struct registers *regs) {
     }
 }
 
+/* Programs PIT channel 0 to fire IRQ0 roughly `frequency_hz` times per
+ * second. The PIT only understands a "divisor" (how many ticks of its
+ * fixed 1.193182MHz input clock make up one output tick), so we convert
+ * the requested Hz into that divisor first. */
 void pit_init(uint32_t frequency_hz) {
     uint16_t divisor = (uint16_t)(PIT_BASE_FREQUENCY / frequency_hz);
     outb(PIT_COMMAND, 0x36); /* channel 0, lobyte/hibyte access, mode 3 (square wave) */

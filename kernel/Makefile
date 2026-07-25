@@ -30,8 +30,9 @@ CFLAGS := -Wall -Wextra -std=gnu11 -O2 -g \
 #                        (matches the link address in linker.ld)
 # -target ...-none-elf:  cross-compile for bare-metal x86-64, no OS ABI
 
-# Only search src/ for #included project headers (limine.h, serial.h, font8x8.h).
-CPPFLAGS := -I src
+# Only search include/ for #included project headers (limine.h, serial.h, etc.)
+# -- headers live separately from src/'s .c/.S implementation files.
+CPPFLAGS := -I include
 
 LDFLAGS := -m elf_x86_64 -nostdlib -static \
     -z max-page-size=0x1000 --gc-sections \

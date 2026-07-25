@@ -40,6 +40,16 @@
 #define VIRTQ_DESC_F_NEXT  1u
 #define VIRTQ_DESC_F_WRITE 2u
 
+/* The "virtqueue" is how the driver and the virtio device pass buffers
+ * back and forth: three parallel arrays sharing one block of memory.
+ * - virtq_desc: one entry per buffer the driver wants the device to
+ *   read from or write to (addr/len = where and how much, `next` chains
+ *   several descriptors into one request, e.g. header+data+status below).
+ * - virtq_avail: the driver's "here are requests to process" queue --
+ *   `ring` holds descriptor-chain head indices, `idx` counts how many
+ *   have ever been pushed.
+ * - virtq_used: the device's "here's what I finished" queue, same idea
+ *   in the other direction. */
 struct virtq_desc {
     uint64_t addr;
     uint32_t len;

@@ -30,12 +30,16 @@
 static uint64_t hhdm_base;
 static uint64_t kernel_pml4_phys; /* the address space active when vmm_init() ran */
 
+/* Reads one of the CPU's "model-specific registers" -- extra control
+ * registers beyond the fixed set (like CR3) every x86-64 CPU has, here
+ * used to read/write EFER (Extended Feature Enable Register). */
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
     asm volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
     return ((uint64_t)hi << 32) | lo;
 }
 
+/* Writes a model-specific register. */
 static inline void wrmsr(uint32_t msr, uint64_t value) {
     asm volatile ("wrmsr" : : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
 }
@@ -220,6 +224,12 @@ void *vmm_phys_to_virt(uint64_t phys) {
     return (void *)phys_to_virt(phys);
 }
 
+/* i4/i3/i2/i1 below are the 4 levels of the page-table walk: a 64-bit
+ * virtual address splits into 4 nine-bit indices (PML4:PDPT:PD:PT,
+ * bits [47:39]:[38:30]:[29:21]:[20:12]) plus a 12-bit in-page offset --
+ * `& 0x1FF` masks out everything except the relevant 9 bits (2^9 = 512
+ * entries per table). This same pattern repeats in every function below
+ * that walks a page table (vmm_unmap/vmm_translate/vmm_page_flags). */
 void vmm_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pml4 = phys_to_virt(pml4_phys);
 

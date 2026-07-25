@@ -27,10 +27,14 @@ struct heap_block {
 static uint64_t heap_start;
 static uint64_t heap_end; /* one past the last mapped byte */
 
+/* Rounds `v` up to the next multiple of `align` (a power of two). */
 static size_t align_up(size_t v, size_t align) {
     return (v + align - 1) & ~(align - 1);
 }
 
+/* Returns a pointer to the block right after `block` in memory (see the
+ * file header comment: there's no stored "next" pointer, so this is
+ * just block's header + however many bytes block's payload uses). */
 static struct heap_block *block_next(struct heap_block *block) {
     return (struct heap_block *)((uint8_t *)block + sizeof(struct heap_block) + block->size);
 }
@@ -66,11 +70,16 @@ static int expand_heap(size_t min_bytes) {
     return 1;
 }
 
+/* Marks the heap as empty (no pages mapped yet) -- the first kmalloc()
+ * call is what actually maps the first page, via expand_heap(). */
 void heap_init(void) {
     heap_start = VMM_KERNEL_HEAP_BASE;
     heap_end = heap_start;
 }
 
+/* Allocates `size` bytes on the kernel heap. First scans the existing
+ * free list for a block big enough to reuse; only if nothing fits does
+ * it ask expand_heap() to map in fresh memory. */
 void *kmalloc(size_t size) {
     if (size == 0) {
         return NULL;
@@ -101,6 +110,9 @@ void *kmalloc(size_t size) {
     return (void *)((uint8_t *)block + sizeof(struct heap_block));
 }
 
+/* Frees a pointer previously returned by kmalloc(). The block's header
+ * sits just before `ptr` in memory, which is how we find it again with
+ * no separate bookkeeping table. */
 void kfree(void *ptr) {
     if (ptr == NULL) {
         return;

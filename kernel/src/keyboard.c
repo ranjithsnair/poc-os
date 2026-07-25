@@ -43,6 +43,8 @@ static const char scancode_to_ascii[128] = {
 
 static int ctrl_held = 0;
 
+/* IRQ1 handler: reads the one scancode byte the keyboard controller has
+ * ready, translates it to ASCII, and hands it to console.c. */
 static void keyboard_handler(struct registers *regs) {
     (void)regs;
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
@@ -69,6 +71,7 @@ static void keyboard_handler(struct registers *regs) {
     console_feed_char(c);
 }
 
+/* Registers keyboard_handler() for IRQ1 and unmasks it at the PIC. */
 void keyboard_init(void) {
     irq_register_handler(1, keyboard_handler);
     pic_clear_mask(1);

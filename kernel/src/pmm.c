@@ -21,26 +21,36 @@ static uint64_t used_frames;
 static uint64_t hhdm_base;
 static uint64_t search_hint; /* frame index the next alloc scan starts from */
 
+/* Converts a physical address to a virtual one we can actually
+ * dereference, via Limine's HHDM (see the file header comment above). */
 static inline void *phys_to_virt(uint64_t phys) {
     return (void *)(phys + hhdm_base);
 }
 
+/* Each frame gets one bit in `bitmap`. `frame / 8` picks the byte that
+ * bit lives in, `frame % 8` picks which of its 8 bits. Marks a frame as
+ * used by setting its bit to 1. */
 static inline void bitmap_set(uint64_t frame) {
     bitmap[frame / 8] |= (uint8_t)(1u << (frame % 8));
 }
 
+/* Marks a frame as free by clearing its bit back to 0. */
 static inline void bitmap_clear(uint64_t frame) {
     bitmap[frame / 8] &= (uint8_t)~(1u << (frame % 8));
 }
 
+/* Returns 1 if a frame's bit is set (used), 0 if clear (free). */
 static inline int bitmap_test(uint64_t frame) {
     return (bitmap[frame / 8] >> (frame % 8)) & 1;
 }
 
+/* Rounds `v` up to the next multiple of `align` (which must be a power
+ * of two). E.g. align_up(4097, 4096) == 8192. */
 static uint64_t align_up(uint64_t v, uint64_t align) {
     return (v + align - 1) & ~(align - 1);
 }
 
+/* Rounds `v` down to the previous multiple of `align`. */
 static uint64_t align_down(uint64_t v, uint64_t align) {
     return v & ~(align - 1);
 }
@@ -126,6 +136,11 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     serial_print("PMM: initialized.\n");
 }
 
+/* Finds one free frame, marks it used, zeroes it, and returns its
+ * physical address. `search_hint` remembers where the last search left
+ * off so repeated allocations don't rescan already-used frames from the
+ * very beginning every time -- the scan still wraps around to frame 0
+ * if it reaches the end without finding anything before `search_hint`. */
 uint64_t pmm_alloc_frame(void) {
     for (uint64_t i = 0; i < total_frames; i++) {
         uint64_t frame = search_hint + i;

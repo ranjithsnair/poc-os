@@ -49,19 +49,29 @@ static uint32_t total_clusters;
 static uint32_t next_free_hint;
 static int mounted = 0;
 
+/* Reads a little-endian 16-bit value out of raw bytes (the on-disk boot
+ * sector/directory entries are little-endian regardless of CPU). */
 static uint16_t read_u16(const uint8_t *p, int off) {
     return (uint16_t)(p[off] | ((uint16_t)p[off + 1] << 8));
 }
 
+/* Same as read_u16(), but for a 32-bit value. */
 static uint32_t read_u32(const uint8_t *p, int off) {
     return (uint32_t)p[off] | ((uint32_t)p[off + 1] << 8) |
            ((uint32_t)p[off + 2] << 16) | ((uint32_t)p[off + 3] << 24);
 }
 
+/* FAT32 numbers clusters starting at 2 (0/1 are reserved), so cluster N's
+ * data sits (N - 2) clusters into the data region -- converts that
+ * cluster number into an absolute disk sector (LBA) to read/write. */
 static uint32_t cluster_to_lba(uint32_t cluster) {
     return data_start_lba + (cluster - 2) * sectors_per_cluster;
 }
 
+/* The File Allocation Table (FAT) is one big array, one 32-bit entry per
+ * cluster, forming a linked list: entry[N] holds the number of the
+ * cluster that comes after cluster N in some file's chain (or a special
+ * "end of chain" marker >= FAT_EOC_MIN). This reads entry `cluster`. */
 static uint32_t fat_read_entry(uint32_t cluster) {
     uint8_t sector[512];
     uint32_t byte_off = cluster * 4;
@@ -70,6 +80,8 @@ static uint32_t fat_read_entry(uint32_t cluster) {
     return read_u32(sector, (int)(byte_off % bytes_per_sector)) & 0x0FFFFFFFu;
 }
 
+/* Writes one FAT entry -- read-modify-write, since an entry is only 4 of
+ * a 512-byte sector's bytes. */
 static void fat_write_entry(uint32_t cluster, uint32_t value) {
     uint8_t sector[512];
     uint32_t byte_off = cluster * 4;
@@ -84,6 +96,11 @@ static void fat_write_entry(uint32_t cluster, uint32_t value) {
     /* Single FAT (see tools/mkfat32.py) -- no second copy to mirror. */
 }
 
+/* Finds one free cluster (FAT entry == 0), marks it end-of-chain, and
+ * returns its number, starting the search from next_free_hint (where the
+ * last allocation left off) rather than from cluster 2 every time, so
+ * repeated allocations don't rescan clusters already known to be used.
+ * Returns 0 if the disk is full. */
 static uint32_t alloc_cluster(void) {
     for (uint32_t i = 0; i < total_clusters; i++) {
         uint32_t c = 2 + ((next_free_hint - 2 + i) % total_clusters);
@@ -96,6 +113,9 @@ static uint32_t alloc_cluster(void) {
     return 0; /* out of space */
 }
 
+/* Walks a whole cluster chain from `cluster` to its end, marking every
+ * cluster in it free (FAT entry = 0) -- used when deleting/truncating a
+ * file so its clusters become available for reuse. */
 static void free_chain(uint32_t cluster) {
     while (cluster >= 2 && cluster < FAT_EOC_MIN) {
         uint32_t next = fat_read_entry(cluster);
@@ -104,6 +124,9 @@ static void free_chain(uint32_t cluster) {
     }
 }
 
+/* Fills every sector of `cluster` with zero bytes -- used for a freshly
+ * allocated directory cluster (so its entries start "unused", 0x00) and
+ * a freshly allocated file cluster (so unwritten bytes read back as 0). */
 static void zero_cluster(uint32_t cluster) {
     uint8_t zero[512];
     memset(zero, 0, sizeof(zero));
@@ -228,6 +251,10 @@ static int find_free_slot(uint32_t dir_cluster, uint32_t *out_cluster, uint32_t 
     return 1;
 }
 
+/* Writes a brand-new 32-byte directory entry at `cluster`/`offset`
+ * (previously found empty by find_free_slot()), filling in the name,
+ * attribute byte, starting cluster and size -- timestamps are left at 0
+ * since this driver has no real-time clock to read them from. */
 static void create_dirent_at(uint32_t cluster, uint32_t offset, const uint8_t name11[11],
                               uint8_t attr, uint32_t first_cluster, uint32_t size) {
     uint32_t lba = cluster_to_lba(cluster) + offset / bytes_per_sector;
@@ -294,6 +321,11 @@ static int split_parent(const char *path, char *parent_out, uint64_t parent_cap,
     return **name_out != '\0';
 }
 
+/* Mounts the FAT32 filesystem: brings up the underlying virtio-blk disk,
+ * reads sector 0 (the "boot sector", which despite the name is really
+ * just a header describing the filesystem's layout -- the BIOS Parameter
+ * Block, or BPB), and pulls out the handful of fields (cluster size,
+ * where the data region starts, etc.) every other function here needs. */
 int fat32_init(void) {
     if (!virtio_blk_init()) {
         return 0;
@@ -334,6 +366,9 @@ int fat32_init(void) {
     return 1;
 }
 
+/* Walks `path` one "/"-separated component at a time, starting at the
+ * root directory, looking each component up in turn (scan_dir_for())
+ * and descending into it if it's a directory and there's more path left. */
 int fat32_lookup(const char *path, struct fat32_file *out) {
     if (!mounted) {
         return 0;
@@ -537,6 +572,12 @@ int64_t fat32_read(struct fat32_file *f, uint64_t offset, void *buf, uint64_t le
     return (int64_t)done;
 }
 
+/* Writes into the file's cluster chain, walking/extending it one cluster
+ * at a time as needed (allocating a fresh cluster whenever the write
+ * reaches past the current end of the chain), then persists the new
+ * size back to disk via update_dirent(). A write that only partially
+ * overwrites a sector reads that sector first (see the "read-modify-
+ * write" comment below) so the untouched bytes in it survive. */
 int64_t fat32_write(struct fat32_file *f, uint64_t offset, const void *buf, uint64_t len) {
     if (!mounted || len == 0) {
         return 0;

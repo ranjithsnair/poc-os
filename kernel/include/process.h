@@ -1,24 +1,14 @@
 /*
- * Preemptive round-robin scheduler for ring3 processes. There's no
- * filesystem yet, so process_create() takes an in-memory code blob
- * rather than loading an ELF from disk -- that's the natural extension
- * point once a filesystem exists (an exec() syscall would read the file
- * into a buffer and hand it to the same primitive this uses internally).
+ * Preemptive round-robin scheduler for ring3 processes. Every process is
+ * created from a real ELF64 image read off the FAT32 disk (fat32.c/vfs.c)
+ * via process_create_from_elf() (the initial boot programs) or
+ * process_execve() (SYS_EXECVE) -- both go through elf.c's loader.
  */
 #ifndef PROCESS_H
 #define PROCESS_H
 
 #include <stdint.h>
 #include "isr.h"
-
-/* Creates a new ring3 process: its own address space, a code page
- * holding a copy of `code[0..code_size)` mapped executable+user at
- * `entry_virt`, and a stack page mapped immediately after it. The code
- * must be position-independent in the sense user_test.S documents (no
- * absolute-address references), since it's copied to a fresh physical
- * frame and mapped somewhere new. Returns the new PID, or 0 on failure
- * (out of memory, or no free process slots). */
-uint64_t process_create(const uint8_t *code, uint64_t code_size, uint64_t entry_virt);
 
 /* Creates a new ring3 process from a real ELF64 image (data[0..size)),
  * via elf.c's loader, with the given argv/envp built onto its initial
@@ -164,7 +154,13 @@ int process_mprotect(uint64_t vaddr, uint64_t size, uint64_t prot);
  * process runs, since FS.base is per-CPU-core state, not per-address-space. */
 void process_set_fs_base(uint64_t value);
 
+/* Copies the calling process's current working directory into `kbuf`.
+ * Returns the path length, or -1 if `kbuf` (of `size` bytes) is too
+ * small to hold it. */
 int process_getcwd(char *kbuf, uint64_t size);
+
+/* Sets the calling process's current working directory to `kpath`
+ * (already resolved into an absolute, normalized path by the caller). */
 int process_chdir(const char *kpath);
 
 /* Creates a directory at `kpath` (resolved against the calling process's

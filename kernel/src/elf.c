@@ -12,6 +12,12 @@
 #include "string.h"
 #include "serial.h"
 
+/* ELF (Executable and Linkable Format) is the file format Linux/BSD/etc.
+ * compilers produce for executables and shared libraries -- it's just a
+ * header describing the file, followed by a table of "program headers"
+ * (Elf64_Phdr, below), each describing one contiguous chunk of the file
+ * that should be loaded into memory at a given address with given
+ * permissions (readable/writable/executable). */
 typedef struct {
     unsigned char e_ident[16];
     uint16_t e_type;
@@ -29,6 +35,9 @@ typedef struct {
     uint16_t e_shstrndx;
 } Elf64_Ehdr;
 
+/* One "program header": describes a single segment to load. p_type
+ * PT_LOAD means "map this"; other types (not handled here) describe
+ * things like PT_INTERP (see below). */
 typedef struct {
     uint32_t p_type;
     uint32_t p_flags;
@@ -52,6 +61,10 @@ typedef struct {
 
 #define PAGE_MASK (~(uint64_t)(PMM_FRAME_SIZE - 1))
 
+/* Sanity-checks the ELF header before trusting anything else in the
+ * file: right magic bytes ("\x7fELF"), 64-bit, little-endian, x86-64,
+ * and either a plain executable (ET_EXEC) or a position-independent one
+ * (ET_DYN). Rejects anything else instead of trying to load it. */
 static int valid_header(const Elf64_Ehdr *eh, uint64_t size) {
     if (size < sizeof(Elf64_Ehdr)) {
         return 0;
@@ -257,6 +270,9 @@ static int write_user_u64(uint64_t pml4_phys, uint64_t va, uint64_t val) {
 
 #define ELF_STACK_MAX_ARGS 16
 
+/* Same job as the standard strlen(): counts characters up to (not
+ * including) the NUL terminator. Reimplemented here since this is a
+ * freestanding build with no libc to link against. */
 static uint64_t elf_strlen(const char *s) {
     uint64_t len = 0;
     while (s[len] != '\0') {

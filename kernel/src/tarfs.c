@@ -47,6 +47,9 @@ struct tar_header {
 static const uint8_t *archive_base;
 static uint64_t archive_size;
 
+/* Remembers where the archive lives in memory -- nothing is parsed or
+ * copied here, every lookup (find_header(), below) just scans the raw
+ * bytes on demand. */
 void tarfs_init(const uint8_t *archive, uint64_t size) {
     archive_base = archive;
     archive_size = size;

@@ -49,6 +49,9 @@ void idt_set_gate(uint8_t vector, void (*handler)(void), uint8_t ist, uint8_t ty
     idt[vector].reserved = 0;
 }
 
+/* Builds the whole IDT and loads it into the CPU. Call once, at boot,
+ * after gdt_init() (every gate below points at a kernel code selector
+ * gdt_init() must have already created). */
 void idt_init(void) {
     isr_install();
     irq_install();

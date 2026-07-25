@@ -20,3 +20,5 @@ toolchain/build-bash/
 toolchain/cross/
 toolchain/sysroot/
 toolchain/sysroot-shared/
+__pycache__/
+*.pyc

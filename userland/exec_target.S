@@ -1,11 +1,10 @@
 /*
- * A real static ELF64 executable (built and linked standalone, unlike
- * kernel/src/user_test.S's in-image flat blob) used to verify SYS_EXECVE:
- * prints "OK\n" via raw int 0x80 SYS_WRITE_CHAR, then exits with a
- * distinctive status. Being a normal linked ELF, it can use absolute
- * addressing freely -- elf_load() maps every PT_LOAD segment at the
- * exact virtual address userland/linker.ld linked it at, so there's none
- * of user_test.S's position-independence constraint here.
+ * A tiny standalone ELF64 executable, installed onto disk.img as
+ * /exectgt, used to verify SYS_EXECVE: prints "OK\n" via raw int 0x80
+ * SYS_WRITE_CHAR, then exits with a distinctive status. Being a normal
+ * linked ELF, it can use absolute addressing freely -- elf_load() maps
+ * every PT_LOAD segment at the exact virtual address userland/linker.ld
+ * linked it at, so there's no position-independence constraint here.
  */
 .section .text
 .global _start
