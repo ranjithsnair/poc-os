@@ -74,6 +74,15 @@
                                 * SYS_OPEN) -> rax = 0, or -1 (parent doesn't exist, name already
                                 * exists, or name isn't 8.3-compatible -- see fat32.h). */
 #define SYS_GETPPID        26 /* -> rax = parent pid, or 0 if boot-spawned (no parent) */
+#define SYS_MPROTECT       27 /* rdi = vaddr, rsi = size, rdx = prot (PROT_* below) -> rax = 0, or -1 if
+                                * any page in [vaddr, vaddr+size) isn't already mapped. Backing for
+                                * mlibc's sys_vm_protect() -- see sysdeps.cpp's VmProtect. */
+#define SYS_ANON_ALLOCATE_FIXED 28 /* rdi = vaddr (must be page-aligned), rsi = size -> rax = vaddr, or 0
+                                * if any page in range is already mapped (never silently overwrites an
+                                * existing mapping), out of memory, or out of VMA-tracking slots. Unlike
+                                * SYS_ANON_ALLOCATE, the caller picks the address -- backing for mlibc's
+                                * sys_vm_map(..., MAP_FIXED, ...), which the dynamic linker uses to place
+                                * each loaded segment/DSO at an address it already computed itself. */
 
 /* Signal numbers -- PoC-OS's own numbering (matches Linux's values, which
  * costs nothing and means a libc sysdeps layer's <bits/signal.h> can reuse
@@ -130,6 +139,16 @@
 #define O_CREAT  0x0040
 #define O_TRUNC  0x0200
 #define O_APPEND 0x0400
+
+/* mmap/mprotect protection bits for SYS_MPROTECT/SYS_ANON_ALLOCATE_FIXED --
+ * deliberately the same values as Linux's PROT_READ/WRITE/EXEC, same
+ * "no translation needed" reasoning as O_* and the signal numbers above.
+ * PROT_READ is implied unconditionally by every mapping this kernel hands
+ * out (there's no unreadable-but-present page state), so it's accepted
+ * but not separately tracked. */
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
 
 /* lseek whence values -- deliberately the same as POSIX's SEEK_SET/CUR/
  * END (0/1/2), so a real libc's sysdeps layer needs no translation. */

@@ -162,6 +162,14 @@ static void sys_anon_free(struct registers *regs) {
     regs->rax = (uint64_t)process_anon_free(regs->rdi, regs->rsi);
 }
 
+static void sys_anon_allocate_fixed(struct registers *regs) {
+    regs->rax = process_anon_allocate_fixed(regs->rdi, regs->rsi);
+}
+
+static void sys_mprotect(struct registers *regs) {
+    regs->rax = (uint64_t)process_mprotect(regs->rdi, regs->rsi, regs->rdx);
+}
+
 static void sys_set_fs_base(struct registers *regs) {
     process_set_fs_base(regs->rdi);
     regs->rax = 0;
@@ -407,6 +415,8 @@ void syscall_dispatch(struct registers *regs) {
         case SYS_KILL:          sys_kill(regs); break;
         case SYS_MKDIR:         sys_mkdir(regs); break;
         case SYS_GETPPID:       sys_getppid(regs); break;
+        case SYS_MPROTECT:      sys_mprotect(regs); break;
+        case SYS_ANON_ALLOCATE_FIXED: sys_anon_allocate_fixed(regs); break;
         default:
             serial_print("PoC-OS: unknown syscall number, ignoring.\n");
             regs->rax = (uint64_t)-1;

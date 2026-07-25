@@ -9,6 +9,7 @@
  */
 #include "mlibc/tcb.hpp"
 #include <abi-bits/errno.h>
+#include <abi-bits/vm-flags.h> /* MAP_FIXED, for Sysdeps<VmMap> below */
 #include <bits/syscall.h>
 #include <errno.h>
 #include <mlibc/all-sysdeps.hpp>
@@ -49,6 +50,8 @@
 #define SYS_KILL          24
 #define SYS_MKDIR         25
 #define SYS_GETPPID       26
+#define SYS_MPROTECT             27
+#define SYS_ANON_ALLOCATE_FIXED  28
 
 /* kernel/src/syscall.h's SYS_IOCTL requests -- console.c is the single
  * global TTY, so these ignore `fd` entirely. */
@@ -231,14 +234,22 @@ int Sysdeps<Open>::operator()(const char *path, int flags, mode_t mode, int *fd)
 }
 
 int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
-	(void)hint;
-	(void)prot;
-	(void)flags;
+	(void)prot; /* every fresh mapping starts RW -- see SYS_ANON_ALLOCATE(_FIXED)'s own doc comment;
+	             * the dynamic linker fixes up the real permissions afterwards via VmProtect. */
 	(void)offset;
 	if (fd != -1) {
 		return ENODEV; /* no file-backed mmap -- only anonymous (kernel/src/process.h) */
 	}
-	long base = syscall(SYS_ANON_ALLOCATE, size);
+	long base;
+	if (flags & MAP_FIXED) {
+		/* The dynamic linker (mlibc/options/rtld) picks its own addresses
+		 * for the interpreter's own DSO bump region -- see linker.cpp's
+		 * libraryBase -- and asks for exactly that address back, never a
+		 * hint it expects us to relocate. */
+		base = syscall(SYS_ANON_ALLOCATE_FIXED, (uintptr_t)hint, size);
+	} else {
+		base = syscall(SYS_ANON_ALLOCATE, size);
+	}
 	if (base == 0) {
 		return ENOMEM;
 	}
@@ -248,6 +259,14 @@ int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int
 
 int Sysdeps<VmUnmap>::operator()(void *pointer, size_t size) {
 	syscall(SYS_ANON_FREE, pointer, size);
+	return 0;
+}
+
+int Sysdeps<VmProtect>::operator()(void *pointer, size_t size, int prot) {
+	long ret = syscall(SYS_MPROTECT, pointer, size, prot);
+	if (ret != 0) {
+		return EINVAL; /* range not (fully) mapped -- see SYS_MPROTECT's doc comment */
+	}
 	return 0;
 }
 
@@ -356,8 +375,20 @@ void (*g_sigaction_shadow[POC_NSIG])(int) = {};
 }
 
 int Sysdeps<Sigaction>::operator()(int signum, const struct sigaction *__restrict act, struct sigaction *__restrict oldact) {
-	if (signum < 0 || signum >= POC_NSIG) {
+	if (signum < 0) {
 		return EINVAL;
+	}
+	if (signum >= POC_NSIG) {
+		/* ENOSYS (not EINVAL): out of range for POC_NSIG's fixed 32
+		 * signals, but not a malformed argument -- SIGCANCEL (32, real-
+		 * time-signal range) is exactly this case. options/posix/generic/
+		 * pthread.cpp's PthreadSignalInstaller global constructor (linked
+		 * into libc.so unconditionally, unlike the static build, where it
+		 * simply never gets pulled in unless something references
+		 * pthreads) specifically treats ENOSYS from here as "this port
+		 * has no cancellation signal support" and opts out gracefully;
+		 * any other errno makes it __ensure()-abort instead. */
+		return ENOSYS;
 	}
 	if (oldact) {
 		memset(oldact, 0, sizeof(*oldact));
@@ -552,6 +583,17 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 	}
 }
 
+/* Bit-tests/clears an fd_set directly (same layout/convention as mlibc's
+ * own __FD_ISSET/__FD_ZERO in options/posix/generic/sys-select.cpp)
+ * instead of calling those functions -- they live in libc_all_sources,
+ * not rtld_sources, so they're simply unavailable to this file when it's
+ * compiled into ld.so (a standalone, fully-resolved `-shared` link,
+ * unlike the static build where every object ends up in one archive
+ * regardless of which "sources" list it came from). */
+static int pocos_fd_isset(int fd, const fd_set *set) {
+	return set->fds_bits[fd / 8] & (1 << (fd % 8));
+}
+
 int Sysdeps<Pselect>::operator()(int num_fds, fd_set *read_set, fd_set *write_set,
                                   fd_set *except_set, const struct timespec *timeout,
                                   const sigset_t *sigmask, int *num_events) {
@@ -568,15 +610,15 @@ int Sysdeps<Pselect>::operator()(int num_fds, fd_set *read_set, fd_set *write_se
 	(void)sigmask;
 	int count = 0;
 	for (int i = 0; i < num_fds; i++) {
-		if (read_set && FD_ISSET(i, read_set)) {
+		if (read_set && pocos_fd_isset(i, read_set)) {
 			count++;
 		}
-		if (write_set && FD_ISSET(i, write_set)) {
+		if (write_set && pocos_fd_isset(i, write_set)) {
 			count++;
 		}
 	}
 	if (except_set) {
-		FD_ZERO(except_set);
+		memset(except_set->fds_bits, 0, sizeof(fd_set));
 	}
 	*num_events = count;
 	return 0;

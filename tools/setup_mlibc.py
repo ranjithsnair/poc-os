@@ -42,6 +42,9 @@ IMPLEMENTED_TAGS = [
     "Tcflush", "Tcflow", "Tcsendbreak", "Fcntl", "Ttyname", "Fchdir",
     "Fsync", "Chmod", "GetHostname", "GetPpid", "Sysconf", "SetPgid",
     "GetGroups", "Pselect",
+    # Dynamic linking (mlibc/options/rtld) -- see toolchain/mlibc-sysdeps-
+    # pocos/sysdeps.cpp's Sysdeps<VmProtect> and elf.c's PT_INTERP support.
+    "VmProtect",
 ]
 
 

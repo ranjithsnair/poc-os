@@ -86,6 +86,40 @@ static void hcf(void) {
     }
 }
 
+/* Boot-spawns `path` off the FAT32 disk as a fresh process (argv = just
+ * `argv0`, a fixed PATH/HOME/TERM envp) -- shared tail for kmain()'s
+ * init and dynamic-linking-verification spawns below, both of which read
+ * a whole ELF image into a kernel buffer for process_create_from_elf()
+ * to copy out of (fat32-backed files aren't already resident in RAM the
+ * way the old tarfs initrd was) and free it once loading is done.
+ * Returns the new pid, or 0 on any failure (not found, read failure,
+ * out of memory, or a malformed/unsupported ELF image). */
+static uint64_t spawn_boot_program(const char *path, const char *argv0) {
+    struct fat32_file file;
+    if (!vfs_open("/", path, O_RDONLY, &file) || file.is_dir) {
+        serial_print("PoC-OS: ");
+        serial_print(path);
+        serial_print(" not found on the FAT32 disk.\n");
+        return 0;
+    }
+    uint8_t *data = (uint8_t *)kmalloc(file.size);
+    if (data == NULL || fat32_read(&file, 0, data, file.size) != (int64_t)file.size) {
+        serial_print("PoC-OS: failed to read ");
+        serial_print(path);
+        serial_print(" off the FAT32 disk.\n");
+        if (data != NULL) {
+            kfree(data);
+        }
+        return 0;
+    }
+
+    const char *argv[] = {argv0};
+    const char *envp[] = {"PATH=/", "HOME=/", "TERM=dumb"};
+    uint64_t pid = process_create_from_elf(data, file.size, 1, argv, 3, envp);
+    kfree(data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+    return pid;
+}
+
 /* Kernel entry point. Named "kmain" to match ENTRY(kmain) in linker.ld. */
 void kmain(void) {
     /* Bring up the serial console first so every step below can log,
@@ -205,22 +239,7 @@ void kmain(void) {
      * copy out of (fat32-backed files aren't already resident in RAM the
      * way the old tarfs initrd was), then free that buffer once loading
      * is done. */
-    struct fat32_file init_file;
-    if (!vfs_open("/", "/hellolib", O_RDONLY, &init_file) || init_file.is_dir) {
-        serial_print("PoC-OS: /hellolib not found on the FAT32 disk -- cannot boot into init.\n");
-        hcf();
-    }
-    uint8_t *init_data = (uint8_t *)kmalloc(init_file.size);
-    if (init_data == NULL || fat32_read(&init_file, 0, init_data, init_file.size) != (int64_t)init_file.size) {
-        serial_print("PoC-OS: failed to read /hellolib off the FAT32 disk.\n");
-        hcf();
-    }
-
-    const char *argv[] = {"hellolib"};
-    const char *envp[] = {"PATH=/", "HOME=/", "TERM=dumb"};
-    uint64_t init_pid = process_create_from_elf(init_data, init_file.size,
-                                                 1, argv, 3, envp);
-    kfree(init_data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+    uint64_t init_pid = spawn_boot_program("/hellolib", "hellolib");
     if (init_pid == 0) {
         serial_print("PoC-OS: failed to start /hellolib as init.\n");
         hcf();
@@ -228,6 +247,29 @@ void kmain(void) {
     /* Ctrl-C should reach init (and whatever it's running), not sit
      * unrouted -- see console.c's single-foreground-pid model. */
     console_set_foreground_pid(init_pid);
+
+    /* Dynamic linking verification: /hellodyn is the same hello_libc.c
+     * source as /hellolib, but linked as a PIE against the shared
+     * libc.so + ld.so (toolchain/sysroot-shared/, see the top-level
+     * Makefile's userland/%.dyn.elf rule and disk.img's /lib/ld.so,
+     * /lib/libc.so installs) instead of statically embedding its own
+     * copy -- exercising elf.c's PT_INTERP support end to end on every
+     * boot, alongside (not instead of) the static path above. */
+    uint64_t dyn_pid = spawn_boot_program("/hellodyn", "hellodyn");
+    if (dyn_pid == 0) {
+        serial_print("PoC-OS: failed to start /hellodyn.\n");
+        hcf();
+    }
+
+    /* dlopen()/dlsym() verification: /hellodl dlopen()s /lib/dlplugin.so
+     * (a standalone shared library, unrelated to libc.so/ld.so, installed
+     * by disk.img's rule) at runtime and calls into it -- see
+     * userland/hello_dlopen.c/dlplugin.c. */
+    uint64_t dl_pid = spawn_boot_program("/hellodl", "hellodl");
+    if (dl_pid == 0) {
+        serial_print("PoC-OS: failed to start /hellodl.\n");
+        hcf();
+    }
 
     pit_set_tick_callback(scheduler_tick);
     serial_print("PoC-OS: scheduler armed, booting into init.\n");

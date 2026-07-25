@@ -18,6 +18,7 @@ rtld_sources += files(
 	'ioctl.cpp',
 	'sigreturn_trampoline.S',
 	'generated/stubs.cpp',
+	'complex_builtins.c',
 )
 rtld_include_dirs += include_directories('include', 'generated/include')
 
@@ -28,6 +29,7 @@ libc_sources += files(
 	'ioctl.cpp',
 	'sigreturn_trampoline.S',
 	'generated/stubs.cpp',
+	'complex_builtins.c',
 )
 libc_include_dirs += include_directories('include', 'generated/include')
 

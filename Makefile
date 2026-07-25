@@ -65,6 +65,43 @@ userland/%.elf: userland/%.c userland/linker.ld mlibc-sysroot
 		$(MLIBC_SYSROOT)/usr/lib/crt1.o $(<:.c=.o) $(MLIBC_SYSROOT)/usr/lib/libc.a \
 		-o $@
 
+# Dynamic linking: a PIE executable linked against the shared libc.so
+# (toolchain/sysroot-shared/, see mlibc-sysroot-shared above) instead of
+# statically embedding its own copy of libc.a -- naming /lib/ld.so (see
+# disk.img's rule below, which installs it there) as its ELF interpreter
+# via PT_INTERP, resolved by kernel/src/elf.c/process.c at load time.
+# Reuses whichever userland/%.c source the plain static userland/%.elf
+# rule above also builds -- only the link itself (position-independent,
+# against libc.so instead of libc.a) differs, so this always builds a
+# same-behavior dynamic sibling of an existing static test program.
+userland/%.dyn.elf: userland/%.c userland/linker-pie.ld mlibc-sysroot-shared
+	clang -target x86_64-unknown-none-elf -ffreestanding -fPIC \
+		-m64 -march=x86-64 -D_GNU_SOURCE \
+		-isystem $(MLIBC_SYSROOT_SHARED)/usr/include \
+		-c $< -o $(<:.c=.dyn.o)
+	ld.lld -m elf_x86_64 -pie --dynamic-linker=/lib/ld.so -nostdlib --gc-sections \
+		-T userland/linker-pie.ld \
+		$(MLIBC_SYSROOT_SHARED)/usr/lib/crt1.o $(<:.c=.dyn.o) \
+		-L$(MLIBC_SYSROOT_SHARED)/usr/lib -lc \
+		-o $@
+
+# dlopen()/dlsym() verification: a standalone shared library with no
+# relation to libc.so/ld.so, dlopen()ed at runtime by hello_dlopen.dyn.elf
+# (built by the userland/%.dyn.elf rule above, same as any other dynamic
+# executable) rather than linked against at build time -- proves the
+# dynamic linker's runtime loading path, not just its PT_INTERP startup
+# path, works. No custom linker script needed here (unlike the PIE
+# executable rule): ld.lld's own default script already synthesizes
+# .init_array/DT_INIT_ARRAY for a plain `-shared` object.
+userland/dlplugin.so: userland/dlplugin.c mlibc-sysroot-shared
+	clang -target x86_64-unknown-none-elf -ffreestanding -fPIC \
+		-m64 -march=x86-64 -D_GNU_SOURCE \
+		-isystem $(MLIBC_SYSROOT_SHARED)/usr/include \
+		-c $< -o userland/dlplugin.o
+	ld.lld -m elf_x86_64 -shared -nostdlib --gc-sections \
+		userland/dlplugin.o -L$(MLIBC_SYSROOT_SHARED)/usr/lib -lc \
+		-o $@
+
 # Builds the writable FAT32 disk image (kernel/src/fat32.c mounts this at
 # boot via kernel/src/virtio_blk.c) from disk_root/, a staging directory
 # populated with whatever userland binaries/files need to be on it.
@@ -73,12 +110,18 @@ userland/%.elf: userland/%.c userland/linker.ld mlibc-sysroot
 # build (mostly zeros past the FAT/data actually used), not 300MiB
 # actually written to the host disk's own filesystem.
 disk.img: userland/exec_target.elf userland/hello_libc.elf userland/hello_libc.gcc.elf \
+		userland/hello_libc.dyn.elf userland/hello_dlopen.dyn.elf userland/dlplugin.so \
 		tools/mkfat32.py
 	rm -rf disk_root
-	mkdir -p disk_root
+	mkdir -p disk_root/lib
 	cp userland/exec_target.elf disk_root/exectgt
 	cp userland/hello_libc.elf disk_root/hellolib
 	cp userland/hello_libc.gcc.elf disk_root/hellogcc
+	cp userland/hello_libc.dyn.elf disk_root/hellodyn
+	cp userland/hello_dlopen.dyn.elf disk_root/hellodl
+	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/ld.so disk_root/lib/ld.so
+	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/libc.so disk_root/lib/libc.so
+	cp userland/dlplugin.so disk_root/lib/dlplugin.so
 	python3 tools/mkfat32.py $@ 300 disk_root
 	rm -rf disk_root
 
@@ -142,6 +185,32 @@ mlibc/.pocos-setup: mlibc/meson.build tools/setup_mlibc.py tools/gen_mlibc_stubs
 mlibc-sysroot: mlibc/.pocos-setup
 	cd mlibc/build-pocos && PATH="$(LLVM_BIN):$$PATH" ninja
 	cd mlibc/build-pocos && PATH="$(LLVM_BIN):$$PATH" meson install --destdir ../../$(MLIBC_SYSROOT)
+
+# --- Dynamic linking: a second, shared build of mlibc (libc.so + ld.so),
+# alongside (not instead of) the static build above -- see
+# toolchain/pocos-shared.cross-file's doc comment and kernel/src/elf.c's
+# PT_INTERP support. Depends on mlibc/.pocos-setup (not just mlibc/
+# meson.build) so the sysdeps/pocos overlay + meson.build patch are always
+# done first, same as the static build; reconfigures only when this
+# cross-file (or anything the overlay depends on) changes.
+# -Ddefault_library_paths=/lib: mlibc's own default (meson.build) is only
+# auto-filled for host systems meson recognizes by name, which 'pocos'
+# isn't -- so ld.so's compiled-in search path has to be set explicitly, and
+# must match wherever disk.img's rule below actually installs libc.so.
+MLIBC_SYSROOT_SHARED := toolchain/sysroot-shared
+mlibc/.pocos-setup-shared: mlibc/.pocos-setup toolchain/pocos-shared.cross-file
+	rm -rf mlibc/build-pocos-shared
+	cd mlibc && PATH="$(LLVM_BIN):$$PATH" meson setup build-pocos-shared \
+		--cross-file ../toolchain/pocos-shared.cross-file -Dprefix=/usr \
+		-Dlinux_option=disabled -Dglibc_option=disabled -Dbsd_option=disabled \
+		-Dlibgcc_dependency=false -Ddefault_library=shared \
+		-Ddefault_library_paths=/lib
+	touch $@
+
+.PHONY: mlibc-sysroot-shared
+mlibc-sysroot-shared: mlibc/.pocos-setup-shared
+	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" ninja
+	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" meson install --destdir ../../$(MLIBC_SYSROOT_SHARED)
 
 # --- Phase 2 of the plan: a real cross binutils + GCC targeting
 # x86_64-elf, built to run on this macOS host. Two-stage-bootstrap-free
@@ -263,10 +332,10 @@ run: $(IMAGE_NAME).iso disk.img
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar disk.img disk_root userland/*.o userland/*.elf
+	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar disk.img disk_root userland/*.o userland/*.elf userland/*.so
 
 # Full clean, including the fetched limine/ and mlibc/ directories and
 # the installed sysroot built from the latter.
 .PHONY: distclean
 distclean: clean
-	rm -rf limine mlibc $(MLIBC_SYSROOT)
+	rm -rf limine mlibc $(MLIBC_SYSROOT) $(MLIBC_SYSROOT_SHARED)

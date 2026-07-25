@@ -9,7 +9,9 @@ disk.img
 disk_root/
 userland/*.o
 userland/*.gcc.o
+userland/*.dyn.o
 userland/*.elf
+userland/*.so
 mlibc/
 toolchain/src/
 toolchain/build-binutils/
@@ -17,3 +19,4 @@ toolchain/build-gcc/
 toolchain/build-bash/
 toolchain/cross/
 toolchain/sysroot/
+toolchain/sysroot-shared/

@@ -11,6 +11,17 @@
 .section .text
 
 .global __pocos_sigreturn_trampoline
+/* Hidden (not just global): only ever address-taken from sysdeps.cpp
+ * within this same DSO -- without this, the linker must assume another
+ * module could preempt it and emits a GLOB_DAT relocation instead of
+ * R_X86_64_RELATIVE, which crashes ld.so outright (relocateSelf(),
+ * options/rtld/generic/main.cpp, deliberately __builtin_trap()s on any
+ * relocation type but RELATIVE during its own bootstrap self-relocation,
+ * since nothing else is safely resolvable that early -- see its own
+ * doc comment). Irrelevant for the static build (no dynamic symbol
+ * table there at all), but required for the shared one.
+ */
+.hidden __pocos_sigreturn_trampoline
 
 __pocos_sigreturn_trampoline:
     mov %rsp, %rdi

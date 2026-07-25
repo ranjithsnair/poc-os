@@ -226,29 +226,111 @@ uint64_t process_create(const uint8_t *code, uint64_t code_size, uint64_t entry_
     return pid;
 }
 
+/* Fixed load-base constants for the two ELF images a PT_INTERP-linked
+ * process needs mapped into one address space -- both chosen well clear
+ * of each other, of VMM_USER_ANON_BASE/VMM_USER_STACK_TOP, and of the
+ * interpreter's own internal DSO placement (mlibc's rtld bump-allocates
+ * further shared libraries it loads starting at 0x41000000 -- see
+ * mlibc/options/rtld/generic/linker.cpp's libraryBase). ELF_PIE_BASE
+ * reuses the same address userland/linker.ld already links plain
+ * ET_EXEC binaries at (0x400000): a PIE main executable's own segments
+ * start at vaddr 0, so this is simply where they land once elf_load()
+ * adds its load_base. */
+#define ELF_PIE_BASE         0x0000000000400000ULL
+#define ELF_INTERP_BASE      0x0000000010000000ULL
+#define ELF_INTERP_PATH_MAX  192
+
+/* Shared tail of process_create_from_elf() and process_execve(): loads
+ * one program image -- the main executable at `data`/`size`, plus (if it
+ * names one via PT_INTERP) the dynamic linker that resolves and
+ * relocates it -- into a single freshly created address space, and
+ * builds its initial stack. `cwd` resolves a relative PT_INTERP path the
+ * same way vfs_open() resolves any other relative path (real PT_INTERP
+ * paths are always absolute, e.g. "/lib/ld.so", but this doesn't assume
+ * that). On success returns the new pml4 with out_entry/out_rsp filled
+ * in (the rip/rsp process_spawn() or a SYS_EXECVE commit should use) --
+ * the caller owns handing that off. Returns 0 on any failure, after
+ * tearing down whatever partial address space was built. */
+static uint64_t load_elf_program(const uint8_t *data, uint64_t size, const char *cwd,
+                                  int argc, const char *const argv[],
+                                  int envc, const char *const envp[],
+                                  uint64_t *out_entry, uint64_t *out_rsp) {
+    uint64_t pml4 = vmm_create_address_space();
+    if (pml4 == 0) {
+        return 0;
+    }
+
+    uint64_t main_base = elf_is_dyn(data, size) ? ELF_PIE_BASE : 0;
+    struct elf_load_result main_elf;
+    if (!elf_load(pml4, data, size, main_base, &main_elf)) {
+        vmm_destroy_address_space(pml4);
+        return 0;
+    }
+
+    uint64_t at_base = 0;
+    uint64_t jump_entry = main_elf.entry;
+    char interp_path[ELF_INTERP_PATH_MAX];
+    if (elf_find_interp(data, size, interp_path, sizeof(interp_path))) {
+        struct fat32_file interp_file;
+        if (!vfs_open(cwd, interp_path, O_RDONLY, &interp_file) || interp_file.is_dir) {
+            serial_print("PoC-OS: load_elf_program: interpreter not found: ");
+            serial_print(interp_path);
+            serial_print("\n");
+            vmm_destroy_address_space(pml4);
+            return 0;
+        }
+        uint8_t *interp_data = (uint8_t *)kmalloc(interp_file.size);
+        if (interp_data == NULL ||
+                fat32_read(&interp_file, 0, interp_data, interp_file.size) != (int64_t)interp_file.size) {
+            serial_print("PoC-OS: load_elf_program: failed to read the interpreter.\n");
+            if (interp_data != NULL) {
+                kfree(interp_data);
+            }
+            vmm_destroy_address_space(pml4);
+            return 0;
+        }
+        struct elf_load_result interp_elf;
+        int loaded = elf_load(pml4, interp_data, interp_file.size, ELF_INTERP_BASE, &interp_elf);
+        kfree(interp_data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+        if (!loaded) {
+            vmm_destroy_address_space(pml4);
+            return 0;
+        }
+        at_base = ELF_INTERP_BASE;
+        jump_entry = interp_elf.entry;
+    }
+
+    if (!elf_map_user_stack(pml4)) {
+        vmm_destroy_address_space(pml4);
+        return 0;
+    }
+    main_elf.stack_top = VMM_USER_STACK_TOP;
+
+    uint64_t rsp = elf_build_user_stack(pml4, &main_elf, at_base, argc, argv, envc, envp);
+    if (rsp == 0) {
+        vmm_destroy_address_space(pml4);
+        return 0;
+    }
+
+    *out_entry = jump_entry;
+    *out_rsp = rsp;
+    return pml4;
+}
+
 uint64_t process_create_from_elf(const uint8_t *data, uint64_t size,
                                   int argc, const char *const argv[],
                                   int envc, const char *const envp[]) {
-    uint64_t pml4 = vmm_create_address_space();
+    uint64_t entry, rsp;
+    /* Boot-spawned init always effectively runs from "/" -- there's no
+     * process context (and so no p->cwd) yet to resolve a relative
+     * PT_INTERP path against. */
+    uint64_t pml4 = load_elf_program(data, size, "/", argc, argv, envc, envp, &entry, &rsp);
     if (pml4 == 0) {
-        serial_print("PoC-OS: process_create_from_elf: out of memory.\n");
+        serial_print("PoC-OS: process_create_from_elf: failed to load the ELF image.\n");
         return 0;
     }
 
-    struct elf_load_result elf;
-    if (!elf_load(pml4, data, size, &elf)) {
-        vmm_destroy_address_space(pml4);
-        return 0;
-    }
-
-    uint64_t rsp = elf_build_user_stack(pml4, &elf, argc, argv, envc, envp);
-    if (rsp == 0) {
-        serial_print("PoC-OS: process_create_from_elf: failed to build the initial stack.\n");
-        vmm_destroy_address_space(pml4);
-        return 0;
-    }
-
-    uint64_t pid = process_spawn(pml4, elf.entry, rsp);
+    uint64_t pid = process_spawn(pml4, entry, rsp);
     if (pid == 0) {
         vmm_destroy_address_space(pml4);
     }
@@ -534,23 +616,10 @@ int process_execve(struct registers *regs, const char *path,
         return 0;
     }
 
-    uint64_t new_pml4 = vmm_create_address_space();
-    if (new_pml4 == 0) {
-        kfree(data);
-        return 0;
-    }
-
-    struct elf_load_result elf;
-    int loaded = elf_load(new_pml4, data, exe.size, &elf);
+    uint64_t entry, rsp;
+    uint64_t new_pml4 = load_elf_program(data, exe.size, p->cwd, argc, argv, envc, envp, &entry, &rsp);
     kfree(data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
-    if (!loaded) {
-        vmm_destroy_address_space(new_pml4);
-        return 0;
-    }
-
-    uint64_t rsp = elf_build_user_stack(new_pml4, &elf, argc, argv, envc, envp);
-    if (rsp == 0) {
-        vmm_destroy_address_space(new_pml4);
+    if (new_pml4 == 0) {
         return 0;
     }
 
@@ -588,7 +657,7 @@ int process_execve(struct registers *regs, const char *path,
     wrmsr(IA32_FS_BASE_MSR, 0);
     vmm_destroy_address_space(old_pml4);
 
-    regs->rip = elf.entry;
+    regs->rip = entry;
     regs->rsp = rsp;
     regs->rax = regs->rbx = regs->rcx = regs->rdx = 0;
     regs->rsi = regs->rdi = regs->rbp = 0;
@@ -982,6 +1051,81 @@ int process_anon_free(uint64_t base, uint64_t size) {
         }
     }
     return -1;
+}
+
+uint64_t process_anon_allocate_fixed(uint64_t vaddr, uint64_t size) {
+    struct process *p = current();
+    if (p == NULL || size == 0 || (vaddr & (PMM_FRAME_SIZE - 1)) != 0) {
+        return 0;
+    }
+    int slot = -1;
+    for (int i = 0; i < PROCESS_VMA_MAX; i++) {
+        if (!p->vmas[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        return 0; /* out of VMA-tracking slots */
+    }
+
+    uint64_t pages = (size + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE;
+    uint64_t mapped_size = pages * PMM_FRAME_SIZE;
+
+    /* Checked as a separate pass before mapping anything -- unlike
+     * process_anon_allocate()'s always-fresh watermark, the caller picked
+     * this address, so a collision with an already-live mapping (another
+     * DSO's segment, the executable, the stack) must fail outright rather
+     * than silently overwriting it partway through. */
+    for (uint64_t i = 0; i < pages; i++) {
+        if (vmm_translate(p->pml4_phys, vaddr + i * PMM_FRAME_SIZE) != UINT64_MAX) {
+            return 0;
+        }
+    }
+
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t frame = pmm_alloc_frame();
+        if (frame == 0) {
+            return 0; /* whatever was mapped so far is leaked -- fine for bring-up */
+        }
+        vmm_map(p->pml4_phys, vaddr + i * PMM_FRAME_SIZE, frame, VMM_USER | VMM_WRITABLE | VMM_NX);
+    }
+
+    p->vmas[slot].in_use = 1;
+    p->vmas[slot].base = vaddr;
+    p->vmas[slot].size = mapped_size;
+    return vaddr;
+}
+
+int process_mprotect(uint64_t vaddr, uint64_t size, uint64_t prot) {
+    struct process *p = current();
+    if (p == NULL || size == 0 || (vaddr & (PMM_FRAME_SIZE - 1)) != 0) {
+        return -1;
+    }
+    uint64_t pages = (size + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE;
+
+    /* Validated up front so a range that's only partially mapped fails
+     * cleanly instead of leaving some pages re-permissioned and others
+     * not. */
+    for (uint64_t i = 0; i < pages; i++) {
+        if (vmm_translate(p->pml4_phys, vaddr + i * PMM_FRAME_SIZE) == UINT64_MAX) {
+            return -1;
+        }
+    }
+
+    uint64_t flags = VMM_USER;
+    if (prot & PROT_WRITE) {
+        flags |= VMM_WRITABLE;
+    }
+    if (!(prot & PROT_EXEC)) {
+        flags |= VMM_NX;
+    }
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t va = vaddr + i * PMM_FRAME_SIZE;
+        uint64_t frame = vmm_translate(p->pml4_phys, va) & ~(uint64_t)0xFFF;
+        vmm_map(p->pml4_phys, va, frame, flags);
+    }
+    return 0;
 }
 
 void process_set_fs_base(uint64_t value) {

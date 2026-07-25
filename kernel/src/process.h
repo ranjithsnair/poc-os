@@ -134,6 +134,29 @@ uint64_t process_anon_allocate(uint64_t size);
  * success, -1 if no such live allocation exists. */
 int process_anon_free(uint64_t base, uint64_t size);
 
+/* Like process_anon_allocate(), but maps the new region starting at
+ * exactly `vaddr` (must be page-aligned) instead of bumping the
+ * watermark forward -- the backing for mlibc's sys_vm_map(..., MAP_FIXED,
+ * ...), which the dynamic linker uses to place a loaded segment/DSO at an
+ * address it already picked itself. Recorded in the same vmas[] tracking
+ * table as process_anon_allocate(), so process_anon_free() also works on
+ * a region returned from here. Returns `vaddr` on success, or 0 if
+ * `vaddr` isn't page-aligned, any page in [vaddr, vaddr+size) is already
+ * mapped (never silently overwrites an existing mapping), or allocation
+ * fails (out of memory / no free VMA-tracking slot). */
+uint64_t process_anon_allocate_fixed(uint64_t vaddr, uint64_t size);
+
+/* Changes the VMM_WRITABLE/VMM_NX permission bits (derived from `prot`,
+ * PROT_* in syscall.h) of every page in [vaddr, vaddr+size) in the
+ * current process's address space, without touching the physical frames
+ * backing them -- the backing for mlibc's sys_vm_protect(), used by the
+ * dynamic linker to lock down a segment's final permissions after
+ * reading its file contents into a RW mapping. Every page in range must
+ * already be mapped (checked up front, before changing anything) or this
+ * fails without partially applying. Returns 0 on success, -1 if any page
+ * in range isn't mapped. */
+int process_mprotect(uint64_t vaddr, uint64_t size, uint64_t prot);
+
 /* Sets the current process's FS.base (used for thread-local storage by
  * a real libc) via wrmsr, and records it on the PCB so schedule() can
  * restore it every time this process is switched back in -- omitting

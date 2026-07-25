@@ -43,8 +43,10 @@ typedef struct {
 #define ELFCLASS64   2
 #define ELFDATA2LSB  1
 #define ET_EXEC      2
+#define ET_DYN       3
 #define EM_X86_64    62
 #define PT_LOAD      1
+#define PT_INTERP    3
 #define PF_X (1u << 0)
 #define PF_W (1u << 1)
 
@@ -67,8 +69,8 @@ static int valid_header(const Elf64_Ehdr *eh, uint64_t size) {
         serial_print("PoC-OS: elf_load: wrong machine type (not x86-64).\n");
         return 0;
     }
-    if (eh->e_type != ET_EXEC) {
-        serial_print("PoC-OS: elf_load: not a static ET_EXEC (PIE/ET_DYN unsupported -- no dynamic loader).\n");
+    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) {
+        serial_print("PoC-OS: elf_load: not an ET_EXEC or ET_DYN image.\n");
         return 0;
     }
     return 1;
@@ -143,7 +145,8 @@ static int map_segment(uint64_t pml4_phys, uint64_t vaddr, uint64_t memsz,
     return 1;
 }
 
-int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, struct elf_load_result *out) {
+int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, uint64_t load_base,
+             struct elf_load_result *out) {
     const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
     if (!valid_header(eh, size)) {
         return 0;
@@ -163,7 +166,7 @@ int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, struct elf_
             serial_print("PoC-OS: elf_load: PT_LOAD segment data out of bounds.\n");
             return 0;
         }
-        if (!map_segment(pml4_phys, ph->p_vaddr, ph->p_memsz, data + ph->p_offset, ph->p_filesz, ph->p_flags)) {
+        if (!map_segment(pml4_phys, load_base + ph->p_vaddr, ph->p_memsz, data + ph->p_offset, ph->p_filesz, ph->p_flags)) {
             return 0;
         }
         /* Whichever PT_LOAD segment's file range covers e_phoff is the
@@ -173,25 +176,58 @@ int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, struct elf_
          * checked rather than assumed. */
         if (eh->e_phoff >= ph->p_offset && eh->e_phoff + (uint64_t)eh->e_phnum * eh->e_phentsize
                                                 <= ph->p_offset + ph->p_filesz) {
-            phdr_vaddr = ph->p_vaddr + (eh->e_phoff - ph->p_offset);
+            phdr_vaddr = load_base + ph->p_vaddr + (eh->e_phoff - ph->p_offset);
         }
     }
 
+    out->entry = load_base + eh->e_entry;
+    out->phdr_vaddr = phdr_vaddr;
+    out->phentsize = eh->e_phentsize;
+    out->phnum = eh->e_phnum;
+    return 1;
+}
+
+int elf_is_dyn(const uint8_t *data, uint64_t size) {
+    if (size < sizeof(Elf64_Ehdr)) {
+        return 0;
+    }
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
+    return eh->e_type == ET_DYN;
+}
+
+int elf_find_interp(const uint8_t *data, uint64_t size, char *out, uint64_t out_cap) {
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
+    if (size < sizeof(Elf64_Ehdr) || eh->e_phoff + (uint64_t)eh->e_phnum * eh->e_phentsize > size) {
+        return 0;
+    }
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + eh->e_phoff + (uint64_t)i * eh->e_phentsize);
+        if (ph->p_type != PT_INTERP) {
+            continue;
+        }
+        if (ph->p_offset + ph->p_filesz > size || ph->p_filesz == 0 || ph->p_filesz > out_cap) {
+            return 0;
+        }
+        memcpy(out, data + ph->p_offset, ph->p_filesz);
+        /* PT_INTERP's data is conventionally already NUL-terminated (its
+         * p_filesz includes the terminator), but that's a convention, not
+         * something worth trusting blindly -- force it. */
+        out[ph->p_filesz - 1] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+int elf_map_user_stack(uint64_t pml4_phys) {
     uint64_t stack_bottom = VMM_USER_STACK_TOP - (uint64_t)VMM_USER_STACK_PAGES * PMM_FRAME_SIZE;
     for (uint64_t page_va = stack_bottom; page_va < VMM_USER_STACK_TOP; page_va += PMM_FRAME_SIZE) {
         uint64_t frame = pmm_alloc_frame();
         if (frame == 0) {
-            serial_print("PoC-OS: elf_load: out of memory mapping the user stack.\n");
+            serial_print("PoC-OS: elf_map_user_stack: out of memory mapping the user stack.\n");
             return 0;
         }
         vmm_map(pml4_phys, page_va, frame, VMM_USER | VMM_WRITABLE | VMM_NX);
     }
-
-    out->entry = eh->e_entry;
-    out->stack_top = VMM_USER_STACK_TOP;
-    out->phdr_vaddr = phdr_vaddr;
-    out->phentsize = eh->e_phentsize;
-    out->phnum = eh->e_phnum;
     return 1;
 }
 
@@ -239,7 +275,7 @@ static uint64_t elf_strlen(const char *s) {
 #define AT_BASE   7
 #define AT_ENTRY  9
 
-uint64_t elf_build_user_stack(uint64_t pml4_phys, const struct elf_load_result *elf,
+uint64_t elf_build_user_stack(uint64_t pml4_phys, const struct elf_load_result *elf, uint64_t at_base,
                                int argc, const char *const argv[],
                                int envc, const char *const envp[]) {
     if (argc < 0 || argc > ELF_STACK_MAX_ARGS || envc < 0 || envc > ELF_STACK_MAX_ARGS) {
@@ -304,7 +340,7 @@ uint64_t elf_build_user_stack(uint64_t pml4_phys, const struct elf_load_result *
      * auxv present or not, so a bare AT_NULL here (as before mlibc
      * existed to care) crashes it. */
     uint64_t pair_types[6] = {AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY};
-    uint64_t pair_values[6] = {elf->phdr_vaddr, elf->phentsize, elf->phnum, PMM_FRAME_SIZE, 0, elf->entry};
+    uint64_t pair_values[6] = {elf->phdr_vaddr, elf->phentsize, elf->phnum, PMM_FRAME_SIZE, at_base, elf->entry};
     for (int i = 0; i < 6; i++) {
         if (!write_user_u64(pml4_phys, p, pair_types[i])) return 0;
         p += 8;
