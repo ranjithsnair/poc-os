@@ -19,6 +19,8 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <unistd.h>
+#include <sys/select.h>
 
 #define POC_NSIG 32
 
@@ -257,8 +259,8 @@ int Sysdeps<ClockGet>::operator()(int clock, time_t *secs, long *nanos) {
 	return 0;
 }
 
-/* --- Phase 3 (bash) additions below: process control, signals, cwd, and
- * the handful of termios/ioctl bits bash/readline actually touch. --- */
+/* --- Phase 3 additions below: process control, signals, cwd, and the
+ * handful of termios/ioctl bits a real shell's readline layer touches. --- */
 
 int Sysdeps<Fork>::operator()(pid_t *child) {
 	/* SYS_FORK's underlying `int $0x80` genuinely "returns twice" at the
@@ -522,6 +524,78 @@ int Sysdeps<GetHostname>::operator()(char *buf, size_t size) {
 		return ENAMETOOLONG;
 	}
 	memcpy(buf, name, sizeof(name));
+	return 0;
+}
+
+int Sysdeps<Sysconf>::operator()(int num, long *ret) {
+	switch (num) {
+	case _SC_CLK_TCK:
+		*ret = 100; /* matches SYS_CLOCK_GET's own 100Hz PIT tick rate */
+		return 0;
+	case _SC_PAGE_SIZE:
+		*ret = 4096;
+		return 0;
+	case _SC_OPEN_MAX:
+		*ret = 64;
+		return 0;
+	case _SC_NPROCESSORS_ONLN:
+		*ret = 1; /* no SMP */
+		return 0;
+	case _SC_ARG_MAX:
+		*ret = 15; /* matches SYS_EXECVE's own argv/envp entry limit */
+		return 0;
+	case _SC_CHILD_MAX:
+		*ret = 25; /* matches PROCESS_MAX-ish; no real per-parent limit enforced */
+		return 0;
+	default:
+		return EINVAL;
+	}
+}
+
+int Sysdeps<Pselect>::operator()(int num_fds, fd_set *read_set, fd_set *write_set,
+                                  fd_set *except_set, const struct timespec *timeout,
+                                  const sigset_t *sigmask, int *num_events) {
+	/* This kernel has no real event-driven I/O wait -- every fd kind
+	 * (console/pipe/file) already reports readiness via its own retry
+	 * convention at the SYS_READ/SYS_WRITE level instead (SYS_PIPE_AGAIN,
+	 * and now the same sentinel for an empty-but-open console -- see
+	 * process_fd_read()'s console_kind==1 case). So rather than actually
+	 * polling here, just report every fd the caller asked about as
+	 * ready immediately; the real "wait until data shows up" happens one
+	 * level down, inside Read/Write's own retry loop, which already
+	 * yields to the scheduler (and keyboard IRQs) between attempts. */
+	(void)timeout;
+	(void)sigmask;
+	int count = 0;
+	for (int i = 0; i < num_fds; i++) {
+		if (read_set && FD_ISSET(i, read_set)) {
+			count++;
+		}
+		if (write_set && FD_ISSET(i, write_set)) {
+			count++;
+		}
+	}
+	if (except_set) {
+		FD_ZERO(except_set);
+	}
+	*num_events = count;
+	return 0;
+}
+
+int Sysdeps<GetGroups>::operator()(size_t, gid_t *, int *ret) {
+	/* No supplementary groups in this kernel's single-user model (see
+	 * GetUid/GetGid above) -- always report zero, regardless of the
+	 * caller's buffer size. */
+	*ret = 0;
+	return 0;
+}
+
+int Sysdeps<SetPgid>::operator()(pid_t, pid_t) {
+	/* No real process groups in this kernel (console.c's single
+	 * foreground-pid concept only -- see the plan's "minimal job
+	 * control" scope) -- called even with JOB_CONTROL off (bash always
+	 * tries to put itself in its own process group at startup), so this
+	 * just succeeds as a no-op rather than aborting. */
 	return 0;
 }
 

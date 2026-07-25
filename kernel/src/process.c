@@ -690,7 +690,15 @@ int64_t process_fd_read(int fd, void *kbuf, uint64_t len) {
         return -1;
     }
     if (f->console_kind == 1) {
-        return (int64_t)console_read_nonblock((uint8_t *)kbuf, len);
+        /* Same "poll again" convention as a pipe with no data but writers
+         * still open (below) -- the keyboard never has a "closed" event
+         * in this kernel, so a bare 0 here would be indistinguishable
+         * from real EOF to a userspace read() wrapper that (correctly)
+         * retries on the pipe's -2 sentinel but not on stdin's own 0,
+         * making it look like stdin closed the instant nothing had been
+         * typed yet. */
+        uint64_t n = console_read_nonblock((uint8_t *)kbuf, len);
+        return (n > 0) ? (int64_t)n : -2;
     }
     if (f->console_kind == 2) {
         return -1; /* stdout/stderr aren't readable */

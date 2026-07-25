@@ -82,6 +82,15 @@ static void sys_read(struct registers *regs) {
     }
 
     int64_t n = process_fd_read(fd, kbuf, len);
+    if (fd == 0 && n != -2) {
+        serial_print("DBG[t=");
+        serial_print_dec(pit_get_ticks());
+        serial_print("]: read(fd=0, len=");
+        serial_print_dec(len);
+        serial_print(") = ");
+        serial_print_dec((uint64_t)n);
+        serial_print("\n");
+    }
     if (n > 0 && !copy_to_user(process_current_pml4(), user_buf, kbuf, (uint64_t)n)) {
         n = -1;
     }
@@ -165,6 +174,9 @@ static void sys_ioctl(struct registers *regs) {
     switch (request) {
         case TCGETS: {
             uint32_t lflag = console_get_lflag();
+            serial_print("DBG: TCGETS -> lflag=0x");
+            serial_print_dec(lflag);
+            serial_print("\n");
             regs->rax = copy_to_user(process_current_pml4(), arg, &lflag, sizeof(lflag)) ? 0 : (uint64_t)-1;
             return;
         }
@@ -174,6 +186,9 @@ static void sys_ioctl(struct registers *regs) {
                 regs->rax = (uint64_t)-1;
                 return;
             }
+            serial_print("DBG: TCSETS lflag=0x");
+            serial_print_dec(lflag);
+            serial_print("\n");
             console_set_lflag(lflag);
             regs->rax = 0;
             return;

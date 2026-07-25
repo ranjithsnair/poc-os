@@ -5,6 +5,9 @@
  * see log output in QEMU (via `-serial stdio`) before/alongside video.
  */
 #include "serial.h"
+#include "isr.h"
+#include "pic.h"
+#include "console.h"
 
 /* Standard x86 I/O port base address for the first serial port (COM1). */
 #define COM1 0x3f8
@@ -56,6 +59,41 @@ void serial_print(const char *str) {
         }
         serial_putc(str[i]);
     }
+}
+
+/* Line Status Register bit 0 (0x01) is set whenever a received byte is
+ * sitting in the receive buffer register, waiting to be read. */
+static int receive_ready(void) {
+    return inb(COM1 + 5) & 0x01;
+}
+
+/* IRQ4 handler (COM1 on a legacy PC): drains every byte the FIFO has
+ * buffered and feeds each one to console.c's line discipline, exactly
+ * like keyboard.c's IRQ1 handler does for PS/2 scancodes -- from
+ * console.c's point of view these are just two different sources of the
+ * same kind of byte. Two translations happen here, not in console.c,
+ * since they're specific to *this* input path: a host terminal typically
+ * sends '\r' for Enter (console.c's canonical-mode line finalization
+ * checks for '\n') and 0x7f/DEL for Backspace (console.c checks for
+ * '\b'/0x08) -- keyboard.c's scancode table already produces '\n'/'\b'
+ * directly, so it never needed this. */
+static void serial_rx_handler(struct registers *regs) {
+    (void)regs;
+    while (receive_ready()) {
+        char c = (char)inb(COM1);
+        if (c == '\r') {
+            c = '\n';
+        } else if (c == 0x7f) {
+            c = '\b';
+        }
+        console_feed_char(c);
+    }
+}
+
+void serial_input_init(void) {
+    outb(COM1 + 1, 0x01); /* IER: enable "data available" interrupt (was 0x00 -- polling only) */
+    irq_register_handler(4, serial_rx_handler);
+    pic_clear_mask(4);
 }
 
 void serial_print_dec(uint64_t v) {

@@ -14,5 +14,6 @@ mlibc/
 toolchain/src/
 toolchain/build-binutils/
 toolchain/build-gcc/
+toolchain/build-bash/
 toolchain/cross/
 toolchain/sysroot/

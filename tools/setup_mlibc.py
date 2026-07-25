@@ -35,12 +35,13 @@ IMPLEMENTED_TAGS = [
     "LibcPanic", "LibcLog", "Isatty", "Write", "TcbSet", "AnonAllocate",
     "AnonFree", "Seek", "Exit", "Close", "FutexWake", "FutexWait", "Read",
     "Open", "VmMap", "VmUnmap", "ClockGet", "Stat", "FutexTid",
-    # Phase 3 (bash) additions -- process control, signals, cwd, termios.
+    # Phase 3 additions -- process control, signals, cwd, termios.
     "Fork", "Waitpid", "Execve", "GetPid", "GetTid", "GetUid", "GetEuid",
     "GetGid", "GetEgid", "Kill", "Dup2", "Pipe", "GetCwd", "Chdir", "Mkdir",
     "Sigaction", "Sigprocmask", "Ioctl", "Tcgetattr", "Tcsetattr", "Tcdrain",
     "Tcflush", "Tcflow", "Tcsendbreak", "Fcntl", "Ttyname", "Fchdir",
-    "Fsync", "Chmod", "GetHostname", "GetPpid",
+    "Fsync", "Chmod", "GetHostname", "GetPpid", "Sysconf", "SetPgid",
+    "GetGroups", "Pselect",
 ]
 
 
@@ -103,6 +104,38 @@ def main():
     else:
         types_h.write_text(types_text.replace(old_guard, new_guard, 1))
         print(f"patched {types_h} to also skip the fast-type check for GCC")
+
+    # mlibc's ifuncs_supported detection (meson.build) is a pure *compile*
+    # check -- it only verifies the C++ compiler accepts
+    # __attribute__((ifunc(...))) syntax, not that anything will ever
+    # *process* the resulting R_X86_64_IRELATIVE relocations at runtime.
+    # On a real OS that's the dynamic linker's job; PoC-OS has none (no
+    # PT_INTERP, no dynamic linker at all -- see elf.h's own doc comment),
+    # so an ifunc's GOT slot is never patched and calling it jumps to
+    # whatever the linker left there statically, silently corrupting the
+    # call instead of crashing outright. Found via mlibc/options/ansi/
+    # x86_64/strcmp.cpp's CPU-dispatching ifunc: strcmp("PS1","PS1") was
+    # returning -1 (unequal) for identical strings, which cascaded into
+    # every hash-table lookup in anything linking against libc.a (bash's
+    # own variable table, in this case) silently failing. Forcing this to
+    # false makes mlibc fall back to its plain portable implementations
+    # everywhere ifuncs would otherwise have been used.
+    meson_text = meson_build.read_text()
+    old_ifunc = "ifuncs_supported = false\n"
+    if "ifuncs_supported = false  # pocos:" in meson_text:
+        print("meson.build already patched to force-disable ifuncs")
+    elif old_ifunc not in meson_text:
+        print(f"error: couldn't find 'ifuncs_supported = false' default in {meson_build} "
+              "-- mlibc's meson.build layout may have changed upstream", file=sys.stderr)
+        sys.exit(1)
+    else:
+        meson_text = meson_text.replace(
+            "ifuncs_supported = cpp_compiler.compiles(ifunc_check, name: 'C++ compiler supports ifunc')",
+            "ifuncs_supported = false  # pocos: no dynamic linker to process IRELATIVE relocations -- see tools/setup_mlibc.py",
+            1,
+        )
+        meson_build.write_text(meson_text)
+        print(f"patched {meson_build} to force-disable ifuncs_supported")
 
 
 if __name__ == "__main__":

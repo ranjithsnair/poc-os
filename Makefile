@@ -16,7 +16,10 @@ TOOLCHAIN_SYSROOT := $(abspath toolchain/sysroot)
 # serial_print() output (see kernel/src/serial.c) is visible when running,
 # and attach disk.img as a virtio-blk drive (kernel/src/virtio_blk.c /
 # fat32.c) -- the writable filesystem process-visible files live on.
-QEMUFLAGS := -m 256M -serial stdio \
+# -display none: PoC-OS is a plain serial/terminal console (no framebuffer
+# console, no mouse) -- there's nothing to show in a graphical window, so
+# skip opening one at all.
+QEMUFLAGS := -m 256M -serial stdio -display none \
 	-drive file=disk.img,if=none,format=raw,id=disk0 \
 	-device virtio-blk-pci,drive=disk0
 
@@ -70,13 +73,12 @@ userland/%.elf: userland/%.c userland/linker.ld mlibc-sysroot
 # build (mostly zeros past the FAT/data actually used), not 300MiB
 # actually written to the host disk's own filesystem.
 disk.img: userland/exec_target.elf userland/hello_libc.elf userland/hello_libc.gcc.elf \
-		toolchain/build-bash/bash tools/mkfat32.py
+		tools/mkfat32.py
 	rm -rf disk_root
 	mkdir -p disk_root
 	cp userland/exec_target.elf disk_root/exectgt
 	cp userland/hello_libc.elf disk_root/hellolib
 	cp userland/hello_libc.gcc.elf disk_root/hellogcc
-	$(CROSS_BIN)/x86_64-elf-strip toolchain/build-bash/bash -o disk_root/bash
 	python3 tools/mkfat32.py $@ 300 disk_root
 	rm -rf disk_root
 
@@ -98,7 +100,7 @@ userland/%.gcc.elf: userland/%.c userland/linker.ld mlibc-sysroot cross-gcc
 		-lc $(GCC_CRTDIR)/crtend.o $(MLIBC_SYSROOT)/usr/lib/crtn.o \
 		-o $@
 
-# --- mlibc (Phase 1 of the plan: "Bring up bash on PoC-OS") ---
+# --- mlibc (Phase 1 of the plan: bring up a real userspace on PoC-OS) ---
 #
 # Fetches mlibc (not committed, like limine/), overlays our own sysdeps
 # port (toolchain/mlibc-sysdeps-pocos/ -- persistent, version-controlled)
@@ -214,70 +216,6 @@ toolchain/cross/bin/x86_64-elf-gcc: toolchain/cross/bin/x86_64-elf-ld toolchain/
 		--disable-decimal-float --disable-bootstrap
 	$(MAKE) -C toolchain/build-gcc -j$$(sysctl -n hw.ncpu) all-gcc all-target-libgcc
 	$(MAKE) -C toolchain/build-gcc install-gcc install-target-libgcc
-
-# --- Phase 3 of the plan: cross-compile GNU bash itself against the
-# Phase-2 toolchain + Phase-1 mlibc sysroot.
-#
-# --enable-job-control=no: this kernel only has "minimal" job control
-# (kernel/src/console.c's single foreground-pid concept, no real process
-# groups/setpgid/tcsetpgrp) -- bash's real JOB_CONTROL code path calls
-# those directly, which this kernel has no syscalls for at all, so this
-# keeps bash on its portable nojobs.c fallback instead.
-#
-# The three bash_cv_* cache variables below all control whether bash
-# bundles its own compat replacement for a function mlibc already
-# provides for real -- autoconf can't safely probe any of these by
-# *running* a test program while cross-compiling, so each one falls back
-# to a conservative default that (for us) wrongly concludes "bundle my
-# own", which then collides at link time with mlibc's real symbol of the
-# same name (see the bash_build.log iteration this was debugged from):
-#   - bash_cv_getenv_redef=no    -- keeps lib/sh/getenv.c's body compiled
-#     out (CAN_REDEFINE_GETENV), deferring to mlibc's real getenv/putenv/
-#     setenv/unsetenv instead of bash's own internal-variable-backed ones.
-#   - bash_cv_getcwd_malloc=yes  -- skips AC_LIBOBJ(getcwd); mlibc's
-#     getcwd() already exists and works.
-#   - bash_cv_func_strtoimax=no  -- skips AC_LIBOBJ(strtoimax) (yes,
-#     inverted -- see aclocal.m4/m4/strtoimax.m4: this macro only bundles
-#     bash's own copy when it decided the *system's* is fully usable).
-#
-# -DNEED_EXTERN_PC: lib/readline/terminal.c only skips defining its own
-# `char PC, *BC, *UP` globals under `!defined(__linux__)` (we aren't
-# __linux__, so it would otherwise); lib/termcap's tparam.c/termcap.c
-# already provide the real storage for these (via a macro that happens to
-# only suppress the duplicate on Darwin) -- this flag turns readline's
-# copy into a mere `extern` declaration instead.
-BASH_VERSION := 5.2
-toolchain/src/bash-$(BASH_VERSION).tar.gz:
-	mkdir -p toolchain/src
-	curl -L -o $@ https://ftp.gnu.org/gnu/bash/bash-$(BASH_VERSION).tar.gz
-
-toolchain/src/bash-$(BASH_VERSION)/configure: | toolchain/src/bash-$(BASH_VERSION).tar.gz
-	tar -C toolchain/src -xzf toolchain/src/bash-$(BASH_VERSION).tar.gz
-	touch $@
-
-GCC_CRTDIR_ABS := $(abspath toolchain/cross/lib/gcc/x86_64-elf/$(GCC_VERSION))
-# $(MLIBC_SYSROOT)/usr/lib/libc.a rather than the mlibc-sysroot phony
-# target itself: bash's autotools build takes minutes, so this
-# deliberately does *not* re-run every time -- unlike the userland/%.elf
-# pattern rules above (where re-checking is a fast ninja no-op), forcing
-# it on every unrelated Makefile change would make iterating on bash
-# itself painfully slow. Run `make mlibc-sysroot` by hand first whenever
-# the sysdeps port actually changes.
-toolchain/build-bash/bash: toolchain/cross/bin/x86_64-elf-gcc $(MLIBC_SYSROOT)/usr/lib/libc.a \
-		toolchain/src/bash-$(BASH_VERSION)/configure userland/linker.ld
-	rm -rf toolchain/build-bash
-	mkdir -p toolchain/build-bash
-	cd toolchain/build-bash && PATH="$(abspath $(CROSS_BIN)):$$PATH" \
-		bash_cv_getenv_redef=no bash_cv_getcwd_malloc=yes bash_cv_func_strtoimax=no \
-		../src/bash-$(BASH_VERSION)/configure \
-		--host=x86_64-elf --without-bash-malloc --disable-nls \
-		--disable-rpath --without-libintl-prefix --without-libiconv-prefix \
-		--enable-job-control=no \
-		CC=x86_64-elf-gcc \
-		CFLAGS="-ffreestanding -fno-pic -fno-pie -m64 -O2 -Wno-implicit-function-declaration -DNEED_EXTERN_PC" \
-		LDFLAGS="-nostdlib -static -T $(abspath userland/linker.ld) $(TOOLCHAIN_SYSROOT)/usr/lib/crt1.o $(TOOLCHAIN_SYSROOT)/usr/lib/crti.o $(GCC_CRTDIR_ABS)/crtbegin.o" \
-		LIBS="-lc $(GCC_CRTDIR_ABS)/crtend.o $(TOOLCHAIN_SYSROOT)/usr/lib/crtn.o"
-	cd toolchain/build-bash && PATH="$(abspath $(CROSS_BIN)):$$PATH" $(MAKE) bash
 
 # Fetches and builds the Limine bootloader tooling (the `limine` binary
 # used below to install the BIOS boot record) if it isn't present yet.

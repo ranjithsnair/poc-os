@@ -7,7 +7,7 @@ management, a kernel heap, and a preemptive round-robin scheduler that runs
 ring-3 processes in their own address spaces via an `int 0x80` syscall gate.
 There's no filesystem beyond a read-only initrd, no ELF loader, and no
 `fork`/`exec` yet — see "Extending this kernel" below for what's still
-missing on the way to running a real userspace (mlibc, a cross GCC, bash).
+missing on the way to running a real userspace (mlibc, a cross GCC).
 
 ```
 +----------------------------------------+
@@ -145,7 +145,7 @@ Still missing, roughly in the order it'd make sense to build them:
   designed for exactly this kind of hobby-OS bring-up) implementing its
   sysdeps layer against this kernel's syscalls.
 - A cross-compiled GCC/binutils targeting this kernel (sysroot = the
-  libc port above), then a port of bash on top of it.
+  libc port above).
 
 Anywhere you add a new Limine request, declare it the same way
 `framebuffer_request` is declared in `main.c` — `static volatile`, in the

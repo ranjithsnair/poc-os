@@ -191,7 +191,7 @@ def main():
         " * below, same approach sysdeps/demo takes for the handful it stubs.\n"
         " * sysdeps.cpp implements the ones PoC-OS actually has real syscalls for;\n"
         " * this file exists so *compiling* mlibc doesn't require implementing the\n"
-        " * other ~130 POSIX functions bash/gcc will likely never call. */\n"
+        " * other ~130 POSIX functions userland programs will likely never call. */\n"
         "#include <bits/ensure.h>\n"
         "#include <mlibc/all-sysdeps.hpp>\n\n"
         "#define STUB() ({ __ensure(!\"STUB function was called\"); __builtin_unreachable(); })\n\n"
