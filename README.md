@@ -7,8 +7,13 @@ virtual memory management, a kernel heap, and a preemptive round-robin
 scheduler running ring-3 processes via an `int 0x80` syscall gate. It mounts
 a writable FAT32 disk over a virtio-blk device, loads real ELF64 executables
 off it (static or dynamically linked), and supports `fork`/`execve`/
-`waitpid`, pipes, signals, and a line-discipline console -- enough to boot
-a [mlibc](https://github.com/managarm/mlibc)-linked userland as `init`.
+`waitpid`, pipes, signals, directory listing/unlink/rmdir/rename, and a
+line-discipline console -- enough to boot a real, dynamically-linked
+[busybox](https://busybox.net/) as `init`, running its `ash` shell as an
+interactive terminal (`ls`/`cd`/`pwd`/`cat`/`mkdir`/`rm`/`mv`/`grep`/`find`/
+... -- see [toolchain/busybox-pocos.config](toolchain/busybox-pocos.config)
+for the exact applet list) over
+[mlibc](https://github.com/managarm/mlibc).
 
 ## How it boots
 
@@ -23,12 +28,16 @@ a [mlibc](https://github.com/managarm/mlibc)-linked userland as `init`.
    (see below), and jumps to `kmain` in [kernel/src/main.c](kernel/src/main.c).
 4. `kmain` brings up the serial console, its own GDT/TSS/IDT, the 8259
    PIC, PIT timer, PS/2 keyboard and serial input, and the FPU/SSE state,
-   then the physical/virtual memory managers and kernel heap. It reads a
-   known file back out of the initrd as a boot-time smoke test, mounts
-   the writable FAT32 disk, and loads three mlibc-linked ELF binaries off
-   it as the first processes (`/hellolib` as `init`, plus `/hellodyn` and
-   `/hellodl` to exercise dynamic linking and `dlopen()`), before handing
-   off to the scheduler.
+   then the physical/virtual memory managers and kernel heap. It mounts
+   the writable FAT32 disk and loads `/busybox` (a real, dynamically-linked
+   busybox binary -- see the top-level `Makefile`'s `busybox/busybox` rule)
+   off it as the first process, invoked with `argv[0] = "sh"` so busybox's
+   own applet dispatch runs its `ash` shell directly, before handing off to
+   the scheduler. `ash`'s standalone-shell feature means every other
+   configured applet (`ls`, `cat`, `mkdir`, ...) is also just this one
+   binary -- there's no symlink support in `fat32.c` to install one file
+   per applet name (see `fat32.h`'s doc comment), so `busybox` is the only
+   binary on `disk.img`.
 
 ### Limine requests
 
@@ -82,18 +91,20 @@ lucy-os/
 │       ├── fat32.c             read-write FAT32 driver over virtio_blk.h
 │       ├── vfs.c               cwd-relative path resolution over fat32.c
 │       └── string.c            freestanding memcpy/memset/memmove/memcmp
-├── userland/               small ELF64 programs installed onto disk.img (see the Makefile)
+├── userland/               linker.ld/linker-pie.ld shared by anything linked against mlibc
 ├── tools/                  mkfat32.py (disk image builder), setup_mlibc.py/gen_mlibc_stubs.py
 ├── mlibc/                  fetched by `make` on demand, not committed (managarm/mlibc checkout)
-├── toolchain/               cross GCC/binutils build + mlibc-sysdeps-pocos/ (our sysdeps port,
-│                            the one part of toolchain/ that IS version-controlled)
+├── busybox/                fetched by `make` on demand, not committed (busybox.net release tarball)
+├── toolchain/               cross GCC/binutils build + mlibc-sysdeps-pocos/ (our sysdeps port) +
+│                            busybox-pocos.config/pocos-gcc.specs -- the parts of toolchain/ that
+│                            ARE version-controlled
 └── limine/                 fetched by `make` on demand, not committed
 ```
 
 `kernel/bin/`, `kernel/obj/`, `hello-os.iso`, `disk.img`, `initrd.tar`,
-`limine/`, `mlibc/`, and most of `toolchain/` are all build outputs / fetched
-dependencies — none of them are checked into version control (see
-`.gitignore`); `make` regenerates them from source.
+`limine/`, `mlibc/`, `busybox/`, and most of `toolchain/` are all build
+outputs / fetched dependencies — none of them are checked into version
+control (see `.gitignore`); `make` regenerates them from source.
 
 ## Requirements
 
@@ -106,6 +117,11 @@ dependencies — none of them are checked into version control (see
 - `git` — used by the top-level Makefile to fetch Limine and mlibc.
 - `meson`/`ninja`, `python3` — used to build the mlibc port (see the
   Makefile's `mlibc-sysroot`/`mlibc-sysroot-shared` targets).
+- A real cross GCC + binutils targeting `x86_64-elf` — built from source by
+  the Makefile's `cross-gcc`/`toolchain/cross/bin/x86_64-elf-ld` targets
+  (needs `gmp`/`mpfr`/`libmpc`/`zlib` on the host); used to build busybox,
+  which expects a normal `$(CROSS_COMPILE)gcc` rather than clang's
+  `-target` spelling.
 - `qemu-system-x86_64` — to run the kernel in a virtual machine (not
   required just to build it).
 
@@ -121,21 +137,23 @@ make run    # build (if needed) and boot hello-os.iso in QEMU
 ```
 
 `make run` passes `-serial stdio`, so kernel log lines (see `serial_print`
-calls throughout `kernel/src/`) print in the same terminal alongside the
-(disabled) QEMU window. A working boot should log GDT/IDT/PIC/PIT/keyboard,
-PMM/VMM/heap initialization, a successful initrd read, the FAT32 disk
-mounting, and then process-creation messages as `/hellolib`, `/hellodyn`,
-and `/hellodl` each print their line via mlibc's `printf()`.
+calls throughout `kernel/src/`) print in the same terminal as busybox's own
+`ash` prompt. A working boot should log GDT/IDT/PIC/PIT/keyboard,
+PMM/VMM/heap initialization, the FAT32 disk mounting, and then a
+`BusyBox v1.36.1 ... built-in shell (ash)` banner followed by a `$` prompt
+you can type into directly (`ls`, `mkdir foo`, `cd foo`, `echo hi > a.txt`,
+`cat a.txt`, `mv`/`rm`/`rmdir`, `grep`, `find`, ... — see
+`toolchain/busybox-pocos.config` for the full applet list).
 
 ### Cleaning
 
 ```sh
 make clean       # remove kernel/bin, kernel/obj, hello-os.iso, disk.img, initrd.tar
-make distclean   # clean, plus remove the fetched limine/ and mlibc/ directories
+make distclean   # clean, plus remove the fetched limine/, mlibc/, busybox/ directories
 ```
 
 `make distclean` requires network access on the next build, since it
-re-clones Limine and mlibc from GitHub.
+re-clones/re-downloads Limine, mlibc, and busybox.
 
 ## Extending this kernel
 
@@ -145,11 +163,19 @@ Some ideas for what's next, roughly in increasing order of effort:
   header comment) since `int 0x80` is a DPL3 *interrupt* gate, which
   clears IF on entry — a real block/wake scheduler primitive would let
   userspace stop polling.
-- VFAT long filenames (fat32.c only understands 8.3 short names today).
+- VFAT long filenames (fat32.c only understands 8.3 short names today,
+  which caps every path component busybox creates/renames at 8.3).
 - A real TLB-shootdown-aware SMP scheduler (this one assumes a single
   CPU).
 - Process groups / a real job-control model (console.c tracks a single
-  foreground pid, not process groups).
+  foreground pid, not process groups) — `ash`'s own job control
+  (`CONFIG_ASH_JOB_CONTROL`) is deliberately left off in
+  `toolchain/busybox-pocos.config` for exactly this reason, so `bg`/`fg`/
+  `jobs`/^Z don't work yet.
+- More busybox applets: anything needing `mount`/`/proc`/networking/a
+  passwd database won't work without real kernel support behind it (see
+  `toolchain/busybox-pocos.config`'s own doc comment for what's
+  deliberately left off and why).
 
 Anywhere you add a new Limine request, declare it the same way
 `module_request` is declared in `main.c` — `static volatile`, in the

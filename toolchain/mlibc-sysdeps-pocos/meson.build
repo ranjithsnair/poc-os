@@ -92,7 +92,17 @@ if not no_headers
 	# expects a real <sys/ioctl.h> to exist, the way it does on any Unix.
 	install_headers(
 		'include/sys/ioctl.h',
+		'include/sys/sysmacros.h',
 		subdir: 'sys'
+	)
+
+	# Same reasoning, top-level this time (real <paths.h>/<malloc.h> live
+	# directly under /usr/include, not a subdir) -- see their own doc
+	# comments.
+	install_headers(
+		'include/paths.h',
+		'include/malloc.h',
+		'include/features.h',
 	)
 endif
 

@@ -52,6 +52,41 @@ int fat32_create(const char *path, struct fat32_file *out);
  * 8.3-compatible, out of clusters). */
 int fat32_mkdir(const char *path);
 
+/* fat32_readdir()'s per-call outcome: FAT32_DIRENT_END means the
+ * directory has no entry at or past `index` (index 0 lands past the
+ * last one); FAT32_DIRENT_SKIP means slot `index` used to hold an entry
+ * that's since been deleted -- the directory isn't over, just try
+ * index + 1; FAT32_DIRENT_VALID means `name_out`/`size_out`/`is_dir_out`
+ * were filled in. */
+enum fat32_dirent_status { FAT32_DIRENT_END = 0, FAT32_DIRENT_VALID = 1, FAT32_DIRENT_SKIP = 2 };
+
+/* Reads the directory-entry slot at position `index` (0-based, counting
+ * every 32-byte slot in `dir`'s cluster chain in order, including
+ * deleted ones) into `name_out` (must have room for 13 bytes),
+ * `size_out`, `is_dir_out`. `dir` must itself be a directory (from a
+ * prior fat32_lookup()/the root). Callers walk a whole directory by
+ * calling this with index = 0, 1, 2, ... until FAT32_DIRENT_END. */
+int fat32_readdir(struct fat32_file *dir, uint32_t index, char *name_out,
+                   uint32_t *size_out, int *is_dir_out);
+
+/* Deletes the regular file at `path`: frees its cluster chain (if any)
+ * and marks its directory entry deleted. Returns 1 on success, 0 on
+ * failure (doesn't exist, or names a directory -- use fat32_rmdir()). */
+int fat32_unlink(const char *path);
+
+/* Deletes the empty directory at `path`: frees its (single, still-zeroed)
+ * cluster and marks its directory entry deleted. Returns 1 on success, 0
+ * on failure (doesn't exist, names a file, isn't empty, or is the root
+ * directory). */
+int fat32_rmdir(const char *path);
+
+/* Moves/renames whatever's at `old_path` to `new_path` (parent directory
+ * of `new_path` must already exist). If `new_path` already names a
+ * regular file, it's deleted first (rename-over-existing-file
+ * semantics); if it names a directory, this fails instead of merging or
+ * overwriting. Returns 1 on success, 0 on failure. */
+int fat32_rename(const char *old_path, const char *new_path);
+
 /* Reads up to `len` bytes starting at `offset` into `buf`, clamped to
  * f->size (reading at/past EOF returns 0). Returns the number of bytes
  * read, or -1 on an I/O error. */

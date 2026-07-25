@@ -1,0 +1,36 @@
+# GCC spec override for linking real programs against PoC-OS's mlibc
+# port with the cross GCC (toolchain/cross/bin/x86_64-elf-gcc, built
+# --without-headers, --target=x86_64-elf -- see the top-level Makefile's
+# cross-gcc rule). A bare *-elf target's own built-in *startfile/*endfile
+# specs assume a freestanding/embedded convention (crt0.o, no crti.o/
+# crtn.o split -- confirmed via `x86_64-elf-gcc -dumpspecs`) since it was
+# never told about a hosted libc at configure time; our mlibc port
+# instead follows the normal hosted convention -- crt1.o's _start calling
+# into libc startup, wrapped by crti.o/crtn.o's _init/_fini prologue/
+# epilogue (see toolchain/mlibc-sysdeps-pocos/crti.S's doc comment) -- so
+# this replaces the two specs that pick which CRT object files get linked
+# in, and in what order, with that convention. `%s` means "resolve via
+# the same -B/library search path as -l would" -- pass
+# -B$(MLIBC_SYSROOT_SHARED)/usr/lib alongside -specs=this-file so it
+# resolves to our own crt1.o/crti.o/crtn.o.
+#
+# GCC's own crtbegin.o/crtend.o (which a hosted target's startfile/endfile
+# would normally also include, wrapping the _init/_fini bodies further --
+# see crti.S's own doc comment) are deliberately left out: this toolchain
+# was configured --disable-shared (see the cross-gcc Makefile target), so
+# libgcc only ever built the non-PIC crtbegin.o/crtend.o variant, whose
+# __TMC_END__ relocation isn't PIE-safe (verified empirically -- linking
+# a -pie binary against it fails with "relocation R_X86_64_32 against
+# hidden symbol `__TMC_END__' can not be used when making a PIE object").
+# Every consumer here is plain C built with -fno-unwind-tables
+# -fno-asynchronous-unwind-tables (busybox's own Makefile.flags) with no
+# __attribute__((constructor)) globals needing crtbegin/crtend's
+# eh-frame/init-array registration, so dropping them doesn't lose
+# anything real programs here would exercise.
+%rename startfile old_startfile
+*startfile:
+crt1.o%s crti.o%s
+
+%rename endfile old_endfile
+*endfile:
+crtn.o%s

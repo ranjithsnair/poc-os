@@ -83,6 +83,21 @@
                                 * SYS_ANON_ALLOCATE, the caller picks the address -- backing for mlibc's
                                 * sys_vm_map(..., MAP_FIXED, ...), which the dynamic linker uses to place
                                 * each loaded segment/DSO at an address it already computed itself. */
+#define SYS_GETDENTS       29 /* rdi = fd (must be a directory), rsi = user struct poc_dirent[] ptr,
+                                * rdx = capacity (max entries the buffer can hold) -> rax = number of
+                                * entries written (0 = end of directory), or -1 on failure (bad fd, or
+                                * fd isn't a directory). Each call resumes from wherever the fd's
+                                * previous SYS_GETDENTS/SYS_LSEEK left off -- see process_fd_getdents(). */
+#define SYS_UNLINK         30 /* rdi = user path ptr (relative paths resolve against cwd, same as
+                                * SYS_OPEN) -> rax = 0, or -1 (doesn't exist, or names a directory --
+                                * use SYS_RMDIR for those). */
+#define SYS_RMDIR          31 /* rdi = user path ptr -> rax = 0, or -1 (doesn't exist, names a file,
+                                * isn't empty, or is the root directory). */
+#define SYS_RENAME         32 /* rdi = user old-path ptr, rsi = user new-path ptr -> rax = 0, or -1
+                                * (old path doesn't exist, new path's parent doesn't exist, or new
+                                * path already names a non-empty/directory entry). Overwrites an
+                                * existing plain file at the destination; never overwrites a
+                                * directory. */
 
 /* Signal numbers -- PoC-OS's own numbering (matches Linux's values, which
  * costs nothing and means a libc sysdeps layer's <bits/signal.h> can reuse
@@ -165,6 +180,16 @@
 struct poc_stat {
     uint64_t st_size;
     uint32_t st_mode;
+};
+
+/* One directory entry for SYS_GETDENTS -- fixed-size (unlike a real
+ * variable-length struct dirent) since fat32.c's 8.3 names are already
+ * bounded to 12 characters; a libc sysdeps layer translates these into
+ * whatever variable-length dirent format it actually exposes to
+ * userspace, the same way Sysdeps<Stat> translates struct poc_stat. */
+struct poc_dirent {
+    uint32_t mode; /* S_IFDIR or S_IFREG, same format bits as poc_stat.st_mode */
+    char name[13]; /* NUL-terminated, lowercased 8.3 name ("name.ext" or "name") */
 };
 
 /* Installs the vector-0x80 IDT gate. Called from idt_init(). */

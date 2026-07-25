@@ -289,6 +289,48 @@ static void update_dirent(uint32_t cluster, uint32_t offset, uint32_t first_clus
     virtio_blk_write_sector(lba, sector);
 }
 
+/* Converts a raw packed 8.3 name (11 bytes, space-padded, uppercase --
+ * see pack_short_name()) back into a NUL-terminated "name.ext" string
+ * (lowercased, purely for a friendlier directory listing -- fat32_lookup()
+ * always uppercases a path component before comparing, so this doesn't
+ * change what any lookup resolves to). Writes at most 13 bytes (8 + '.' +
+ * 3 + NUL) to `out`. */
+static void unpack_short_name(const uint8_t name11[11], char *out) {
+    uint64_t len = 0;
+    for (int i = 0; i < 8 && name11[i] != ' '; i++) {
+        char c = (char)name11[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        out[len++] = c;
+    }
+    if (name11[8] != ' ') {
+        out[len++] = '.';
+        for (int i = 8; i < 11 && name11[i] != ' '; i++) {
+            char c = (char)name11[i];
+            if (c >= 'A' && c <= 'Z') {
+                c = (char)(c - 'A' + 'a');
+            }
+            out[len++] = c;
+        }
+    }
+    out[len] = '\0';
+}
+
+/* Overwrites just the first name byte of an existing entry with 0xE5
+ * (FAT32's "deleted" marker) -- what fat32_unlink()/fat32_rmdir()/
+ * fat32_rename() use to remove an old entry without disturbing any
+ * entry after it in the same directory (unlike zeroing it, which would
+ * incorrectly look like "end of directory" to scan_dir_for()/
+ * fat32_readdir() for every entry that follows). */
+static void mark_dirent_deleted(uint32_t cluster, uint32_t offset) {
+    uint32_t lba = cluster_to_lba(cluster) + offset / bytes_per_sector;
+    uint8_t sector[512];
+    virtio_blk_read_sector(lba, sector);
+    sector[offset % bytes_per_sector] = 0xE5;
+    virtio_blk_write_sector(lba, sector);
+}
+
 /* Splits an absolute path into its parent directory path (never empty --
  * "/" if the file is directly under root) and final component. Returns 0
  * if `path` has no '/' at all (fat32.c only ever deals in absolute
@@ -653,4 +695,138 @@ int64_t fat32_write(struct fat32_file *f, uint64_t offset, const void *buf, uint
     }
     update_dirent(f->dirent_cluster, f->dirent_offset, f->first_cluster, (uint32_t)f->size);
     return (int64_t)done;
+}
+
+int fat32_readdir(struct fat32_file *dir, uint32_t index, char *name_out,
+                   uint32_t *size_out, int *is_dir_out) {
+    if (!mounted || !dir->is_dir) {
+        return FAT32_DIRENT_END;
+    }
+
+    uint32_t slots_per_cluster = (bytes_per_sector / DIRENT_SIZE) * sectors_per_cluster;
+    uint32_t cluster_index = index / slots_per_cluster;
+    uint32_t slot_in_cluster = index % slots_per_cluster;
+
+    uint32_t cluster = dir->first_cluster;
+    for (uint32_t i = 0; i < cluster_index; i++) {
+        if (cluster < 2 || cluster >= FAT_EOC_MIN) {
+            return FAT32_DIRENT_END;
+        }
+        cluster = fat_read_entry(cluster);
+    }
+    if (cluster < 2 || cluster >= FAT_EOC_MIN) {
+        return FAT32_DIRENT_END;
+    }
+
+    uint32_t lba = cluster_to_lba(cluster) + (slot_in_cluster * DIRENT_SIZE) / bytes_per_sector;
+    uint32_t byte_off = (slot_in_cluster * DIRENT_SIZE) % bytes_per_sector;
+    uint8_t sector[512];
+    virtio_blk_read_sector(lba, sector);
+    struct fat_dirent_raw *d = (struct fat_dirent_raw *)(sector + byte_off);
+
+    if (d->name[0] == 0x00) {
+        return FAT32_DIRENT_END;
+    }
+    if (d->name[0] == 0xE5) {
+        return FAT32_DIRENT_SKIP;
+    }
+
+    unpack_short_name(d->name, name_out);
+    *size_out = d->file_size;
+    *is_dir_out = (d->attr & ATTR_DIRECTORY) != 0;
+    return FAT32_DIRENT_VALID;
+}
+
+int fat32_unlink(const char *path) {
+    if (!mounted) {
+        return 0;
+    }
+    struct fat32_file f;
+    if (!fat32_lookup(path, &f) || f.is_dir) {
+        return 0;
+    }
+    if (f.first_cluster != 0) {
+        free_chain(f.first_cluster);
+    }
+    mark_dirent_deleted(f.dirent_cluster, f.dirent_offset);
+    return 1;
+}
+
+int fat32_rmdir(const char *path) {
+    if (!mounted) {
+        return 0;
+    }
+    struct fat32_file f;
+    if (!fat32_lookup(path, &f) || !f.is_dir || f.first_cluster == root_cluster) {
+        return 0; /* not a directory, or the root directory itself */
+    }
+
+    if (f.first_cluster != 0) {
+        uint8_t sector[512];
+        uint32_t cluster = f.first_cluster;
+        while (cluster >= 2 && cluster < FAT_EOC_MIN) {
+            uint32_t lba = cluster_to_lba(cluster);
+            for (uint8_t s = 0; s < sectors_per_cluster; s++) {
+                virtio_blk_read_sector(lba + s, sector);
+                for (uint32_t e = 0; e < bytes_per_sector / DIRENT_SIZE; e++) {
+                    uint8_t first_byte = sector[e * DIRENT_SIZE];
+                    if (first_byte != 0x00 && first_byte != 0xE5) {
+                        return 0; /* not empty */
+                    }
+                }
+            }
+            cluster = fat_read_entry(cluster);
+        }
+        free_chain(f.first_cluster);
+    }
+
+    mark_dirent_deleted(f.dirent_cluster, f.dirent_offset);
+    return 1;
+}
+
+int fat32_rename(const char *old_path, const char *new_path) {
+    if (!mounted) {
+        return 0;
+    }
+    struct fat32_file src;
+    if (!fat32_lookup(old_path, &src) || src.first_cluster == root_cluster) {
+        return 0; /* doesn't exist, or is the root directory */
+    }
+
+    char parent_path[128];
+    const char *name;
+    if (!split_parent(new_path, parent_path, sizeof(parent_path), &name)) {
+        return 0;
+    }
+    struct fat32_file parent;
+    if (!fat32_lookup(parent_path, &parent) || !parent.is_dir) {
+        return 0;
+    }
+    uint8_t name11[11];
+    if (!pack_short_name(name, name11)) {
+        return 0;
+    }
+
+    struct scan_result existing;
+    if (scan_dir_for(parent.first_cluster, name11, &existing)) {
+        if (existing.entry_cluster == src.dirent_cluster && existing.entry_offset == src.dirent_offset) {
+            return 1; /* renaming a path onto itself -- nothing to do */
+        }
+        if (existing.is_dir) {
+            return 0; /* never overwrite a directory */
+        }
+        if (existing.first_cluster != 0) {
+            free_chain(existing.first_cluster);
+        }
+        mark_dirent_deleted(existing.entry_cluster, existing.entry_offset);
+    }
+
+    uint32_t slot_cluster, slot_offset;
+    if (!find_free_slot(parent.first_cluster, &slot_cluster, &slot_offset)) {
+        return 0;
+    }
+    uint8_t attr = src.is_dir ? ATTR_DIRECTORY : ATTR_ARCHIVE;
+    create_dirent_at(slot_cluster, slot_offset, name11, attr, src.first_cluster, src.size);
+    mark_dirent_deleted(src.dirent_cluster, src.dirent_offset);
+    return 1;
 }

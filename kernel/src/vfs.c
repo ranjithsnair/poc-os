@@ -59,11 +59,65 @@ static int make_absolute(const char *cwd, const char *path, char *out, uint64_t 
     return 1;
 }
 
+/* Collapses "." and ".." components out of an already-absolute path, in
+ * place -- fat32_lookup() has no idea what either one means (see
+ * fat32.h's doc comment), so anything that reaches it must already be
+ * fully resolved. ".." past root is simply clamped to root (same as
+ * every real OS: "/.." == "/"), and a bare "/" always survives as
+ * itself. Bounded by VFS_PATH_MAX-sized inputs, so the rebuilt path can
+ * never be longer than what came in. */
+#define VFS_MAX_COMPONENTS 32
+static void normalize_path(char *path) {
+    const char *seg_starts[VFS_MAX_COMPONENTS];
+    uint64_t seg_lens[VFS_MAX_COMPONENTS];
+    int depth = 0;
+
+    const char *p = path;
+    while (*p == '/') {
+        p++;
+    }
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != '/') {
+            p++;
+        }
+        uint64_t len = (uint64_t)(p - start);
+        if (len == 1 && start[0] == '.') {
+            /* skip */
+        } else if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (depth > 0) {
+                depth--;
+            }
+        } else if (len > 0 && depth < VFS_MAX_COMPONENTS) {
+            seg_starts[depth] = start;
+            seg_lens[depth] = len;
+            depth++;
+        }
+        while (*p == '/') {
+            p++;
+        }
+    }
+
+    char result[VFS_PATH_MAX];
+    uint64_t out_len = 0;
+    result[out_len++] = '/';
+    for (int i = 0; i < depth; i++) {
+        if (i > 0) {
+            result[out_len++] = '/';
+        }
+        memcpy(result + out_len, seg_starts[i], seg_lens[i]);
+        out_len += seg_lens[i];
+    }
+    result[out_len] = '\0';
+    memcpy(path, result, out_len + 1);
+}
+
 int vfs_open(const char *cwd, const char *path, int flags, struct fat32_file *out) {
     char abs[VFS_PATH_MAX];
     if (!make_absolute(cwd, path, abs, sizeof(abs))) {
         return 0;
     }
+    normalize_path(abs);
 
     if (fat32_lookup(abs, out)) {
         if ((flags & O_TRUNC) && !out->is_dir) {
@@ -82,5 +136,36 @@ int vfs_mkdir(const char *cwd, const char *path) {
     if (!make_absolute(cwd, path, abs, sizeof(abs))) {
         return 0;
     }
+    normalize_path(abs);
     return fat32_mkdir(abs);
+}
+
+int vfs_unlink(const char *cwd, const char *path) {
+    char abs[VFS_PATH_MAX];
+    if (!make_absolute(cwd, path, abs, sizeof(abs))) {
+        return 0;
+    }
+    normalize_path(abs);
+    return fat32_unlink(abs);
+}
+
+int vfs_rmdir(const char *cwd, const char *path) {
+    char abs[VFS_PATH_MAX];
+    if (!make_absolute(cwd, path, abs, sizeof(abs))) {
+        return 0;
+    }
+    normalize_path(abs);
+    return fat32_rmdir(abs);
+}
+
+int vfs_rename(const char *cwd, const char *old_path, const char *new_path) {
+    char abs_old[VFS_PATH_MAX];
+    char abs_new[VFS_PATH_MAX];
+    if (!make_absolute(cwd, old_path, abs_old, sizeof(abs_old)) ||
+        !make_absolute(cwd, new_path, abs_new, sizeof(abs_new))) {
+        return 0;
+    }
+    normalize_path(abs_old);
+    normalize_path(abs_new);
+    return fat32_rename(abs_old, abs_new);
 }

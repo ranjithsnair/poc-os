@@ -95,6 +95,15 @@ int process_fd_close(int fd);
 int64_t process_fd_lseek(int fd, int64_t offset, int whence);
 int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode);
 
+/* Reads up to `max_entries` directory entries out of `fd` (must have
+ * been opened on a directory) into `kbuf` (an array of `struct
+ * poc_dirent`, syscall.h), resuming from wherever the fd's previous
+ * SYS_GETDENTS call (or an explicit SYS_LSEEK) left off -- see
+ * fat32_readdir()'s index convention, which fd->offset doubles as here
+ * instead of a byte offset. Returns the number of entries written (0 =
+ * end of directory), or -1 if `fd` isn't open or isn't a directory. */
+int64_t process_fd_getdents(int fd, void *kbuf, uint64_t max_entries);
+
 /* Creates a pipe: two new fds in the calling process, *out_read_fd and
  * *out_write_fd, sharing one in-kernel ring buffer. Returns 0, or -1 on
  * failure (out of memory or fewer than 2 free fd slots). */
@@ -167,6 +176,18 @@ int process_chdir(const char *kpath);
  * cwd the same way process_fd_open() resolves relative paths). Returns
  * 0 on success, -1 on failure (see vfs_mkdir()/fat32_mkdir()). */
 int process_mkdir(const char *kpath);
+
+/* Deletes the regular file at `kpath` (resolved against the calling
+ * process's cwd). Returns 0 on success, -1 on failure. */
+int process_unlink(const char *kpath);
+
+/* Deletes the empty directory at `kpath` (resolved against the calling
+ * process's cwd). Returns 0 on success, -1 on failure. */
+int process_rmdir(const char *kpath);
+
+/* Moves/renames `kold` to `knew` (both resolved against the calling
+ * process's cwd). Returns 0 on success, -1 on failure. */
+int process_rename(const char *kold, const char *knew);
 
 /* Sets the calling process's disposition for `sig` to `handler`
  * (POC_SIG_DFL/POC_SIG_IGN/a real handler address) and records

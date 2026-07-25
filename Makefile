@@ -5,8 +5,8 @@
 override IMAGE_NAME := hello-os
 
 # Cross toolchain versions/paths (see the cross-binutils/cross-gcc rules
-# below) -- defined up top since the userland/%.gcc.elf rule references
-# GCC_CRTDIR before make would otherwise have seen GCC_VERSION assigned.
+# below) -- defined up top since busybox's own build rule references
+# CROSS_GCC before make would otherwise have seen GCC_VERSION assigned.
 BINUTILS_VERSION := 2.44
 GCC_VERSION := 14.2.0
 TOOLCHAIN_PREFIX := $(abspath toolchain/cross)
@@ -40,109 +40,41 @@ INITRD_FILES := $(wildcard initrd/*)
 initrd.tar: $(INITRD_FILES)
 	tar --format=ustar -cf $@ -C initrd $(notdir $(INITRD_FILES))
 
-# Builds standalone userland test ELFs (real, independently linked
-# executables) used to exercise SYS_EXECVE. See exec_target.S's own
-# doc comment.
-userland/%.elf: userland/%.S userland/linker.ld
-	clang -target x86_64-unknown-none-elf -ffreestanding -fno-stack-protector \
-		-fno-stack-check -fno-pic -fno-pie -m64 -march=x86-64 \
-		-mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone \
-		-c $< -o $(<:.S=.o)
-	ld.lld -m elf_x86_64 -nostdlib -static -T userland/linker.ld $(<:.S=.o) -o $@
-
-# Same, but for a C program linked against our mlibc port (see
-# "mlibc-sysroot" below) instead of being a hand-written flat/raw-ELF
-# blob -- this is Phase 1's actual deliverable: proof a normal C program
-# using mlibc's printf() runs on PoC-OS.
 MLIBC_SYSROOT := toolchain/sysroot
-userland/%.elf: userland/%.c userland/linker.ld mlibc-sysroot
-	clang -target x86_64-unknown-none-elf -ffreestanding -fno-pic -fno-pie \
-		-m64 -march=x86-64 -D_GNU_SOURCE \
-		-isystem $(MLIBC_SYSROOT)/usr/include \
-		-c $< -o $(<:.c=.o)
-	ld.lld -m elf_x86_64 -nostdlib -static --gc-sections -T userland/linker.ld \
-		$(MLIBC_SYSROOT)/usr/lib/crt1.o $(<:.c=.o) $(MLIBC_SYSROOT)/usr/lib/libc.a \
-		-o $@
 
-# Dynamic linking: a PIE executable linked against the shared libc.so
-# (toolchain/sysroot-shared/, see mlibc-sysroot-shared above) instead of
-# statically embedding its own copy of libc.a -- naming /lib/ld.so (see
-# disk.img's rule below, which installs it there) as its ELF interpreter
-# via PT_INTERP, resolved by kernel/src/elf.c/process.c at load time.
-# Reuses whichever userland/%.c source the plain static userland/%.elf
-# rule above also builds -- only the link itself (position-independent,
-# against libc.so instead of libc.a) differs, so this always builds a
-# same-behavior dynamic sibling of an existing static test program.
-userland/%.dyn.elf: userland/%.c userland/linker-pie.ld mlibc-sysroot-shared
-	clang -target x86_64-unknown-none-elf -ffreestanding -fPIC \
-		-m64 -march=x86-64 -D_GNU_SOURCE \
-		-isystem $(MLIBC_SYSROOT_SHARED)/usr/include \
-		-c $< -o $(<:.c=.dyn.o)
-	ld.lld -m elf_x86_64 -pie --dynamic-linker=/lib/ld.so -nostdlib --gc-sections \
-		-T userland/linker-pie.ld \
-		$(MLIBC_SYSROOT_SHARED)/usr/lib/crt1.o $(<:.c=.dyn.o) \
-		-L$(MLIBC_SYSROOT_SHARED)/usr/lib -lc \
-		-o $@
-
-# dlopen()/dlsym() verification: a standalone shared library with no
-# relation to libc.so/ld.so, dlopen()ed at runtime by hello_dlopen.dyn.elf
-# (built by the userland/%.dyn.elf rule above, same as any other dynamic
-# executable) rather than linked against at build time -- proves the
-# dynamic linker's runtime loading path, not just its PT_INTERP startup
-# path, works. No custom linker script needed here (unlike the PIE
-# executable rule): ld.lld's own default script already synthesizes
-# .init_array/DT_INIT_ARRAY for a plain `-shared` object.
-userland/dlplugin.so: userland/dlplugin.c mlibc-sysroot-shared
-	clang -target x86_64-unknown-none-elf -ffreestanding -fPIC \
-		-m64 -march=x86-64 -D_GNU_SOURCE \
-		-isystem $(MLIBC_SYSROOT_SHARED)/usr/include \
-		-c $< -o userland/dlplugin.o
-	ld.lld -m elf_x86_64 -shared -nostdlib --gc-sections \
-		userland/dlplugin.o -L$(MLIBC_SYSROOT_SHARED)/usr/lib -lc \
-		-o $@
+# The real cross GCC (built below) -- busybox's own build system expects
+# a normal $(CROSS_COMPILE)gcc, not clang's `-target` spelling. GCC's own
+# --with-sysroot bakes in $(MLIBC_SYSROOT) (the *static* sysroot) at
+# configure time (see the `cross-gcc` target below); busybox overrides
+# that per-invocation with an explicit --sysroot=$(MLIBC_SYSROOT_SHARED)
+# so it links against the shared libc.so/ld.so instead.
+CROSS_BIN := $(abspath toolchain/cross/bin)
+CROSS_GCC := $(CROSS_BIN)/x86_64-elf-gcc
 
 # Builds the writable FAT32 disk image (kernel/src/fat32.c mounts this at
 # boot via kernel/src/virtio_blk.c) from disk_root/, a staging directory
-# populated with whatever userland binaries/files need to be on it.
-# 300MiB is comfortably over FAT32's 65525-cluster minimum at the image
-# builder's 4KiB clusters (see tools/mkfat32.py) -- it's a sparse-ish
-# build (mostly zeros past the FAT/data actually used), not 300MiB
-# actually written to the host disk's own filesystem.
-disk.img: userland/exec_target.elf userland/hello_libc.elf userland/hello_libc.gcc.elf \
-		userland/hello_libc.dyn.elf userland/hello_dlopen.dyn.elf userland/dlplugin.so \
-		tools/mkfat32.py
+# populated with whatever binaries/files need to be on it. 300MiB is
+# comfortably over FAT32's 65525-cluster minimum at the image builder's
+# 4KiB clusters (see tools/mkfat32.py) -- it's a sparse-ish build (mostly
+# zeros past the FAT/data actually used), not 300MiB actually written to
+# the host disk's own filesystem.
+#
+# Just one binary (busybox itself) plus /lib/ld.so and /lib/libc.so: no
+# per-applet files/symlinks are needed since busybox's own standalone-
+# shell feature (see busybox.config) makes ash dispatch every configured
+# applet as a built-in call, and fat32.c has no symlink support anyway
+# (see fat32.h's doc comment) -- kernel/src/main.c's spawn_boot_program()
+# invokes this same file with argv[0] = "sh" to select the ash applet.
+disk.img: busybox/busybox tools/mkfat32.py
 	rm -rf disk_root
 	mkdir -p disk_root/lib
-	cp userland/exec_target.elf disk_root/exectgt
-	cp userland/hello_libc.elf disk_root/hellolib
-	cp userland/hello_libc.gcc.elf disk_root/hellogcc
-	cp userland/hello_libc.dyn.elf disk_root/hellodyn
-	cp userland/hello_dlopen.dyn.elf disk_root/hellodl
+	cp busybox/busybox disk_root/busybox
 	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/ld.so disk_root/lib/ld.so
 	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/libc.so disk_root/lib/libc.so
-	cp userland/dlplugin.so disk_root/lib/dlplugin.so
 	python3 tools/mkfat32.py $@ 300 disk_root
 	rm -rf disk_root
 
-# --- Phase 2 verification: the same Phase-1 hello_libc.c program, but
-# compiled+linked with the real cross GCC (below) instead of clang,
-# confirming --with-sysroot/libgcc specs wiring is correct end to end.
-# GCC's own --with-sysroot bakes in $(MLIBC_SYSROOT) already (see
-# `cross-gcc` target's configure line), so -lc/-lgcc resolve on their own
-# -- no -isystem/-L needed the way the clang rule above requires.
-CROSS_BIN := toolchain/cross/bin
-CROSS_GCC := $(CROSS_BIN)/x86_64-elf-gcc
-GCC_CRTDIR := toolchain/cross/lib/gcc/x86_64-elf/$(GCC_VERSION)
-userland/%.gcc.elf: userland/%.c userland/linker.ld mlibc-sysroot cross-gcc
-	$(CROSS_GCC) -ffreestanding -fno-pic -fno-pie -m64 \
-		-c $< -o $(<:.c=.gcc.o)
-	$(CROSS_GCC) -T userland/linker.ld -nostdlib -static \
-		$(MLIBC_SYSROOT)/usr/lib/crt1.o $(MLIBC_SYSROOT)/usr/lib/crti.o \
-		$(GCC_CRTDIR)/crtbegin.o $(<:.c=.gcc.o) \
-		-lc $(GCC_CRTDIR)/crtend.o $(MLIBC_SYSROOT)/usr/lib/crtn.o \
-		-o $@
-
-# --- mlibc (Phase 1 of the plan: bring up a real userspace on PoC-OS) ---
+# --- mlibc (bring up a real userspace on PoC-OS) ---
 #
 # Fetches mlibc (not committed, like limine/), overlays our own sysdeps
 # port (toolchain/mlibc-sysdeps-pocos/ -- persistent, version-controlled)
@@ -210,6 +142,70 @@ mlibc/.pocos-setup-shared: mlibc/.pocos-setup toolchain/pocos-shared.cross-file
 mlibc-sysroot-shared: mlibc/.pocos-setup-shared
 	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" ninja
 	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" meson install --destdir ../../$(MLIBC_SYSROOT_SHARED)
+
+# --- busybox: a real shell + coreutils userland, dynamically linked
+# against mlibc (mlibc-sysroot-shared above) with the real cross GCC
+# (below) instead of clang -- busybox's own Kbuild expects a normal
+# $(CROSS_COMPILE)gcc it can probe flags against, not clang's `-target`
+# spelling. Installed onto disk.img as PoC-OS's init (kernel/src/main.c's
+# spawn_boot_program("/busybox", "sh")).
+BUSYBOX_VERSION := 1.36.1
+
+toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2:
+	mkdir -p toolchain/src
+	curl -L -o $@ https://busybox.net/downloads/busybox-$(BUSYBOX_VERSION).tar.bz2
+
+# Fetched like limine/mlibc (not committed -- see .gitignore); unpacked
+# straight into busybox/ (--strip-components=1 drops the tarball's own
+# busybox-$(BUSYBOX_VERSION)/ wrapper directory) rather than into
+# toolchain/src/ alongside binutils/gcc, since this one is built in
+# place rather than configured into a separate toolchain/build-*/ tree.
+busybox/Makefile: | toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2
+	rm -rf busybox
+	mkdir -p busybox
+	tar -C busybox --strip-components=1 -xf toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2
+	./tools/patch-busybox-platform.sh busybox/include/platform.h
+	touch $@
+
+# Applies toolchain/busybox-pocos.config (a small, version-controlled
+# fragment naming exactly the applets/features we want -- see its own
+# doc comment) over allnoconfig's "everything off" baseline: sed replaces
+# each fragment symbol's "# CONFIG_X is not set"/"CONFIG_X=..." line in
+# busybox/.config with "CONFIG_X=y" in place (KCONFIG_ALLCONFIG would be
+# the more obvious way to do this, but busybox's own Kconfig fork doesn't
+# honor its override values -- verified empirically: every symbol landed
+# 'n' regardless). `oldconfig` then resolves whatever dependent prompts
+# those selections newly expose; piping "" answers each with its
+# Kconfig-computed default instead of blocking on a terminal.
+busybox/.config: busybox/Makefile toolchain/busybox-pocos.config
+	$(MAKE) -C busybox ARCH=x86_64 allnoconfig
+	while IFS='=' read -r sym val; do \
+		case "$$sym" in \#*|"") continue ;; esac; \
+		if grep -q "^$${sym}=" busybox/.config; then \
+			sed -i '' "s|^$${sym}=.*|$${sym}=$${val}|" busybox/.config; \
+		elif [ "$$val" = "y" ]; then \
+			sed -i '' "s|^# $${sym} is not set\$$|$${sym}=y|" busybox/.config; \
+		fi; \
+	done < toolchain/busybox-pocos.config
+	yes "" | $(MAKE) -C busybox ARCH=x86_64 oldconfig
+
+# CC embeds --sysroot/-fPIC as extra words (Make just runs "$(CC)
+# ...args...", so leading flags work the same as if they were on every
+# compile line) so busybox links against the *shared* mlibc build
+# (toolchain/sysroot-shared/) instead of whatever --with-sysroot the
+# cross-gcc target below baked in at its own configure time (the
+# *static* one, toolchain/sysroot/) -- mirroring the removed
+# userland/%.dyn.elf rule's PT_INTERP-facing flags. CROSS_COMPILE=
+# x86_64-elf- (with $(CROSS_BIN) on PATH) is enough for busybox's Kbuild
+# to also find x86_64-elf-ar/nm/objcopy/strip on its own -- binutils
+# installs the whole suite under that target prefix, so only CC itself
+# needs to be overridden with the extra sysroot/PIC flags.
+busybox/busybox: busybox/.config cross-gcc mlibc-sysroot-shared toolchain/pocos-gcc.specs
+	$(MAKE) -C busybox ARCH=x86_64 CROSS_COMPILE=x86_64-elf- PATH="$(CROSS_BIN):$$PATH" \
+		HOSTCC=cc SKIP_STRIP=y \
+		CC="$(CROSS_GCC) --sysroot=$(abspath $(MLIBC_SYSROOT_SHARED)) -fPIC \
+			-specs=$(abspath toolchain/pocos-gcc.specs) -B$(abspath $(MLIBC_SYSROOT_SHARED))/usr/lib" \
+		EXTRA_LDFLAGS="-pie -Wl,--dynamic-linker=/lib/ld.so"
 
 # --- Phase 2 of the plan: a real cross binutils + GCC targeting
 # x86_64-elf, built to run on this macOS host. Two-stage-bootstrap-free
@@ -326,15 +322,16 @@ $(IMAGE_NAME).iso: kernel limine/limine initrd.tar
 run: $(IMAGE_NAME).iso disk.img
 	qemu-system-x86_64 -cdrom $(IMAGE_NAME).iso -boot d $(QEMUFLAGS)
 
-# Remove build outputs but keep the fetched limine/ toolchain (avoids
-# re-cloning it on every rebuild).
+# Remove build outputs but keep the fetched limine/mlibc/busybox
+# toolchain trees (avoids re-cloning/re-extracting/re-building them on
+# every rebuild).
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar disk.img disk_root userland/*.o userland/*.elf userland/*.so
+	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar disk.img disk_root
 
-# Full clean, including the fetched limine/ and mlibc/ directories and
-# the installed sysroot built from the latter.
+# Full clean, including the fetched limine/, mlibc/, busybox/
+# directories and the installed sysroots built from them.
 .PHONY: distclean
 distclean: clean
-	rm -rf limine mlibc $(MLIBC_SYSROOT) $(MLIBC_SYSROOT_SHARED)
+	rm -rf limine mlibc busybox $(MLIBC_SYSROOT) $(MLIBC_SYSROOT_SHARED)

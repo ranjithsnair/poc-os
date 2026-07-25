@@ -34,7 +34,18 @@
 
 #define PROCESS_MAX 16
 #define PROCESS_KERNEL_STACK_SIZE 16384
-#define PROCESS_FD_MAX 8
+/* Matches sysdeps.cpp's Sysconf(_SC_OPEN_MAX) answer of 64 -- a real
+ * shell's own redirection bookkeeping (saving the original fd 1 via
+ * fcntl(1, F_DUPFD, 10)-style calls before a temporary dup2() redirect,
+ * then restoring it afterward) routinely uses fd numbers well above the
+ * 0/1/2 stdio range, so an fd table sized only for a handful of
+ * explicitly-opened files (this used to be 8, back when the only
+ * processes here were the hello_libc-style boot examples) silently
+ * breaks that save/restore dance -- the save-to-fd-10 dup2() itself
+ * would fail (newfd out of range), and the shell never notices before
+ * trying to restore from it, leaving fd 1 wherever the last redirected
+ * command's dup2() left it. */
+#define PROCESS_FD_MAX 64
 #define PROCESS_VMA_MAX 32
 
 #define IA32_FS_BASE_MSR 0xC0000100u
@@ -977,6 +988,41 @@ int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode) {
     return 0;
 }
 
+/* fd->offset (normally a byte offset -- see process_fd_read()/
+ * process_fd_lseek()) doubles as fat32_readdir()'s slot index for a
+ * directory fd instead: there's nothing to "read" from a directory in
+ * the regular-file sense, and reusing the same field means SYS_LSEEK's
+ * existing SEEK_SET/SEEK_CUR/SEEK_END handling (clamped to f->size,
+ * which vfs_open()/fat32_lookup() always report as 0 for a directory)
+ * already gives rewinddir()-via-lseek(fd,0,SEEK_SET) for free, without
+ * a second piece of per-fd state. */
+int64_t process_fd_getdents(int fd, void *kbuf, uint64_t max_entries) {
+    struct process_fd *f = fd_lookup(current(), fd);
+    if (f == NULL || f->console_kind != 0 || !f->fatfile.is_dir) {
+        return -1;
+    }
+
+    struct poc_dirent *out = (struct poc_dirent *)kbuf;
+    uint64_t count = 0;
+    while (count < max_entries) {
+        char name[13];
+        uint32_t size;
+        int is_dir;
+        int status = fat32_readdir(&f->fatfile, (uint32_t)f->offset, name, &size, &is_dir);
+        f->offset++;
+        if (status == FAT32_DIRENT_END) {
+            break;
+        }
+        if (status == FAT32_DIRENT_SKIP) {
+            continue;
+        }
+        out[count].mode = is_dir ? 0040000u /* S_IFDIR */ : 0100000u /* S_IFREG */;
+        memcpy(out[count].name, name, sizeof(name));
+        count++;
+    }
+    return (int64_t)count;
+}
+
 uint64_t process_anon_allocate(uint64_t size) {
     struct process *p = current();
     if (p == NULL || size == 0) {
@@ -1223,4 +1269,28 @@ int process_mkdir(const char *kpath) {
         return -1;
     }
     return vfs_mkdir(p->cwd, kpath) ? 0 : -1;
+}
+
+int process_unlink(const char *kpath) {
+    struct process *p = current();
+    if (p == NULL) {
+        return -1;
+    }
+    return vfs_unlink(p->cwd, kpath) ? 0 : -1;
+}
+
+int process_rmdir(const char *kpath) {
+    struct process *p = current();
+    if (p == NULL) {
+        return -1;
+    }
+    return vfs_rmdir(p->cwd, kpath) ? 0 : -1;
+}
+
+int process_rename(const char *kold, const char *knew) {
+    struct process *p = current();
+    if (p == NULL) {
+        return -1;
+    }
+    return vfs_rename(p->cwd, kold, knew) ? 0 : -1;
 }

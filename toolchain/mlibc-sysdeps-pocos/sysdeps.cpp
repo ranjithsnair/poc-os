@@ -22,6 +22,9 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <cstddef> /* offsetof, for Sysdeps<ReadEntries> below */
 
 #define POC_NSIG 32
 
@@ -52,6 +55,10 @@
 #define SYS_GETPPID       26
 #define SYS_MPROTECT             27
 #define SYS_ANON_ALLOCATE_FIXED  28
+#define SYS_GETDENTS             29
+#define SYS_UNLINK               30
+#define SYS_RMDIR                31
+#define SYS_RENAME               32
 
 /* kernel/src/syscall.h's SYS_IOCTL requests -- console.c is the single
  * global TTY, so these ignore `fd` entirely. */
@@ -362,6 +369,108 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
 	(void)mode; /* fat32.c has no Unix permission bits to set -- see fat32.h */
 	return (syscall(SYS_MKDIR, path) == 0) ? 0 : EIO;
+}
+
+int Sysdeps<Rmdir>::operator()(const char *path) {
+	return (syscall(SYS_RMDIR, path) == 0) ? 0 : ENOTEMPTY;
+}
+
+int Sysdeps<Unlinkat>::operator()(int dirfd, const char *path, int flags) {
+	(void)dirfd; /* no dirfd-relative opens in fat32.c/vfs.c -- see Sysdeps<Stat>'s fd_path handling */
+	if (flags & AT_REMOVEDIR) {
+		return (syscall(SYS_RMDIR, path) == 0) ? 0 : ENOTEMPTY;
+	}
+	return (syscall(SYS_UNLINK, path) == 0) ? 0 : ENOENT;
+}
+
+int Sysdeps<Rename>::operator()(const char *path, const char *new_path) {
+	return (syscall(SYS_RENAME, path, new_path) == 0) ? 0 : ENOENT;
+}
+
+/* fat32.c has no Unix permission bits to check (see Chmod's own doc
+ * comment) -- existence is all `mode` can mean here regardless of
+ * whether it's F_OK or some combination of R_OK/W_OK/X_OK, so this
+ * just opens and immediately closes the path, same existence-check
+ * idiom Sysdeps<Stat> already uses for a path-based query. */
+int Sysdeps<Access>::operator()(const char *path, int mode) {
+	(void)mode;
+	long ret = syscall(SYS_OPEN, path, 0 /* O_RDONLY */);
+	if (ret < 0) {
+		return ENOENT;
+	}
+	syscall(SYS_CLOSE, ret);
+	return 0;
+}
+
+int Sysdeps<Faccessat>::operator()(int dirfd, const char *path, int mode, int flags) {
+	(void)dirfd; /* no dirfd-relative opens in fat32.c/vfs.c -- see Sysdeps<Stat>'s fd_path handling */
+	(void)flags;
+	return Sysdeps<Access>{}(path, mode);
+}
+
+/* The raw SYS_GETDENTS reply (kernel/src/syscall.h's struct poc_dirent)
+ * -- a fixed-size record (fat32.c's 8.3 names are already bounded to 12
+ * characters), unlike the variable-length struct dirent below that this
+ * gets translated into. Kept as a plain copy of the kernel header's
+ * struct rather than a shared include, same reasoning as poc_stat above. */
+struct poc_dirent {
+	uint32_t mode;
+	char name[13];
+};
+
+int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
+	long ret = syscall(SYS_OPEN, path, 0 /* O_RDONLY */);
+	if (ret < 0) {
+		return ENOENT;
+	}
+	poc_stat pst;
+	if (syscall(SYS_FSTAT, ret, &pst) != 0) {
+		syscall(SYS_CLOSE, ret);
+		return ENOENT;
+	}
+	if (!(pst.st_mode & 0040000u) /* S_IFDIR */) {
+		syscall(SYS_CLOSE, ret);
+		return ENOTDIR;
+	}
+	*handle = (int)ret;
+	return 0;
+}
+
+/* Translates up to 32 raw poc_dirent records per call (comfortably under
+ * dirent.cpp's own 2048-byte __ent_buffer even at the worst case of every
+ * name being the full 12 characters: 32 * (offsetof(dirent,d_name) + 13)
+ * is still well under 2048) into real, variable-length struct dirent
+ * records -- d_off is set to the *next* record's index (matching
+ * readdir()'s "resume from d_off" convention with the SYS_GETDENTS
+ * index this same fd's `offset` field already tracks kernel-side, so a
+ * subsequent lseek(fd, d_off, SEEK_SET) would resume in the right place,
+ * to the (limited -- see process_fd_getdents()'s own doc comment) extent
+ * this kernel's directory-fd lseek supports arbitrary offsets at all). */
+int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size, size_t *bytes_read) {
+	poc_dirent stage[32];
+	long n = syscall(SYS_GETDENTS, handle, stage, 32);
+	if (n < 0) {
+		return EBADF;
+	}
+
+	uint8_t *out = (uint8_t *)buffer;
+	size_t used = 0;
+	for (long i = 0; i < n; i++) {
+		size_t name_len = strlen(stage[i].name);
+		size_t reclen = offsetof(struct dirent, d_name) + name_len + 1;
+		if (used + reclen > max_size) {
+			break;
+		}
+		struct dirent *entp = reinterpret_cast<struct dirent *>(out + used);
+		entp->d_ino = 1; /* fat32.c has no inode numbers -- any nonzero value keeps callers that skip d_ino == 0 happy */
+		entp->d_off = (off_t)(used + reclen);
+		entp->d_reclen = (reclen_t)reclen;
+		entp->d_type = (stage[i].mode & 0040000u) ? DT_DIR : DT_REG;
+		memcpy(entp->d_name, stage[i].name, name_len + 1);
+		used += reclen;
+	}
+	*bytes_read = used;
+	return 0;
 }
 
 /* Shadow copy of installed handlers, since kernel/src/syscall.h's

@@ -32,4 +32,15 @@ int vfs_open(const char *cwd, const char *path, int flags, struct fat32_file *ou
 /* Same cwd-relative resolution as vfs_open(), then fat32_mkdir(). */
 int vfs_mkdir(const char *cwd, const char *path);
 
+/* Same cwd-relative resolution as vfs_open(), then fat32_unlink(). */
+int vfs_unlink(const char *cwd, const char *path);
+
+/* Same cwd-relative resolution as vfs_open(), then fat32_rmdir(). */
+int vfs_rmdir(const char *cwd, const char *path);
+
+/* Resolves both `old_path` and `new_path` against `cwd` (independently --
+ * a relative `new_path` is not resolved relative to `old_path`'s
+ * directory), then fat32_rename(). */
+int vfs_rename(const char *cwd, const char *old_path, const char *new_path);
+
 #endif

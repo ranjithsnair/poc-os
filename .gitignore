@@ -13,6 +13,7 @@ userland/*.dyn.o
 userland/*.elf
 userland/*.so
 mlibc/
+busybox/
 toolchain/src/
 toolchain/build-binutils/
 toolchain/build-gcc/

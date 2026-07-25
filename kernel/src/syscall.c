@@ -284,6 +284,53 @@ static void sys_clock_get(struct registers *regs) {
     regs->rax = pit_get_ticks();
 }
 
+static void sys_getdents(struct registers *regs) {
+    int fd = (int)regs->rdi;
+    uint64_t user_buf = regs->rsi;
+    uint64_t max_entries = regs->rdx;
+
+    uint8_t *kbuf = (uint8_t *)kmalloc(max_entries * sizeof(struct poc_dirent));
+    if (kbuf == NULL) {
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    int64_t n = process_fd_getdents(fd, kbuf, max_entries);
+    if (n > 0 && !copy_to_user(process_current_pml4(), user_buf, kbuf, (uint64_t)n * sizeof(struct poc_dirent))) {
+        n = -1;
+    }
+    kfree(kbuf);
+    regs->rax = (uint64_t)n;
+}
+
+static void sys_unlink(struct registers *regs) {
+    char path[SYS_PATH_MAX];
+    if (!copy_user_cstr(process_current_pml4(), regs->rdi, path, sizeof(path))) {
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    regs->rax = (uint64_t)process_unlink(path);
+}
+
+static void sys_rmdir(struct registers *regs) {
+    char path[SYS_PATH_MAX];
+    if (!copy_user_cstr(process_current_pml4(), regs->rdi, path, sizeof(path))) {
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    regs->rax = (uint64_t)process_rmdir(path);
+}
+
+static void sys_rename(struct registers *regs) {
+    char old_path[SYS_PATH_MAX];
+    char new_path[SYS_PATH_MAX];
+    if (!copy_user_cstr(process_current_pml4(), regs->rdi, old_path, sizeof(old_path)) ||
+        !copy_user_cstr(process_current_pml4(), regs->rsi, new_path, sizeof(new_path))) {
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    regs->rax = (uint64_t)process_rename(old_path, new_path);
+}
+
 static void sys_fork(struct registers *regs) {
     regs->rax = process_fork(regs);
 }
@@ -417,6 +464,10 @@ void syscall_dispatch(struct registers *regs) {
         case SYS_GETPPID:       sys_getppid(regs); break;
         case SYS_MPROTECT:      sys_mprotect(regs); break;
         case SYS_ANON_ALLOCATE_FIXED: sys_anon_allocate_fixed(regs); break;
+        case SYS_GETDENTS:      sys_getdents(regs); break;
+        case SYS_UNLINK:        sys_unlink(regs); break;
+        case SYS_RMDIR:         sys_rmdir(regs); break;
+        case SYS_RENAME:        sys_rename(regs); break;
         default:
             serial_print("PoC-OS: unknown syscall number, ignoring.\n");
             regs->rax = (uint64_t)-1;

@@ -26,7 +26,7 @@
 #include "process.h"    /* preemptive round-robin scheduler */
 #include "tarfs.h"      /* initrd (ustar archive) reader */
 #include "vfs.h"        /* writable FAT32 disk (virtio_blk.c/fat32.c) mount */
-#include "fat32.h"      /* fat32_read() -- loading /hellolib's ELF image off disk */
+#include "fat32.h"      /* fat32_read() -- loading /busybox's ELF image off disk */
 #include "syscall.h"    /* O_RDONLY */
 #include "fpu.h"        /* x87/SSE state (enable at boot, save/restore per process) */
 
@@ -184,29 +184,16 @@ void kmain(void) {
         serial_print("PoC-OS: heap allocator initialized (test allocation FAILED).\n");
     }
 
-    /* Reads a known file back out of the initrd as a smoke test -- purely
-     * a kernel-internal check now (process-visible files live on the
-     * FAT32 disk below; see vfs_init()). module_request.response->modules[0]
-     * (an initrd.tar built from initrd/ contents by the top-level Makefile). */
+    /* tarfs_init() still needs to run so tarfs.c's own internal state is
+     * consistent (nothing reads from it today -- initrd/ carries no
+     * files anymore now that the boot-time smoke test file is gone --
+     * but leaving this out would mean module_request's module, if
+     * present, is simply never parsed at all). */
     if (module_request.response == NULL || module_request.response->module_count < 1) {
         serial_print("PoC-OS: no initrd module available.\n");
     } else {
         struct limine_file *initrd = module_request.response->modules[0];
         tarfs_init((const uint8_t *)initrd->address, initrd->size);
-
-        uint64_t file_size = 0;
-        const uint8_t *file_data = tarfs_read("hello.txt", &file_size);
-        if (file_data != NULL) {
-            serial_print("PoC-OS: initrd: read hello.txt (");
-            serial_print_dec(file_size);
-            serial_print(" bytes): ");
-            for (uint64_t i = 0; i < file_size; i++) {
-                serial_putc((char)file_data[i]);
-            }
-            serial_print("\n");
-        } else {
-            serial_print("PoC-OS: initrd: hello.txt not found.\n");
-        }
     }
 
     /* Mounts the writable FAT32 disk (virtio_blk.c/fat32.c) that
@@ -229,47 +216,27 @@ void kmain(void) {
      * echo characters to this serial log via keyboard.c. */
     asm volatile ("sti");
 
-    /* Phase 4: boot straight into /hellolib as init -- the mlibc-linked
-     * hello_libc.elf built by the top-level Makefile's disk.img rule,
-     * installed onto the FAT32 disk by the same build. Loading it here
-     * (rather than execve()-ing into it from a tiny trampoline blob, the
-     * way every earlier phase's verification programs did) means
-     * process_create_from_elf() itself has to do what SYS_EXECVE normally
-     * does: read the whole file into a kernel buffer for elf_load() to
-     * copy out of (fat32-backed files aren't already resident in RAM the
-     * way the old tarfs initrd was), then free that buffer once loading
-     * is done. */
-    uint64_t init_pid = spawn_boot_program("/hellolib", "hellolib");
+    /* Boot straight into busybox as init: a single dynamically-linked
+     * PIE binary (see the top-level Makefile's busybox build + disk.img
+     * rule) invoked with argv[0] = "sh" rather than its own on-disk name
+     * -- busybox's applet dispatch keys off argv[0]'s basename, not the
+     * file it was actually exec'd from, so this runs its ash shell
+     * directly without needing a per-applet symlink (fat32.c has no
+     * symlink support at all -- see fat32.h's doc comment). Loading it
+     * here (rather than execve()-ing into it from a tiny trampoline blob)
+     * means process_create_from_elf() itself has to do what SYS_EXECVE
+     * normally does: read the whole file into a kernel buffer for
+     * elf_load() to copy out of (fat32-backed files aren't already
+     * resident in RAM the way the old tarfs initrd was), then free that
+     * buffer once loading is done. */
+    uint64_t init_pid = spawn_boot_program("/busybox", "sh");
     if (init_pid == 0) {
-        serial_print("PoC-OS: failed to start /hellolib as init.\n");
+        serial_print("PoC-OS: failed to start /busybox as init.\n");
         hcf();
     }
     /* Ctrl-C should reach init (and whatever it's running), not sit
      * unrouted -- see console.c's single-foreground-pid model. */
     console_set_foreground_pid(init_pid);
-
-    /* Dynamic linking verification: /hellodyn is the same hello_libc.c
-     * source as /hellolib, but linked as a PIE against the shared
-     * libc.so + ld.so (toolchain/sysroot-shared/, see the top-level
-     * Makefile's userland/%.dyn.elf rule and disk.img's /lib/ld.so,
-     * /lib/libc.so installs) instead of statically embedding its own
-     * copy -- exercising elf.c's PT_INTERP support end to end on every
-     * boot, alongside (not instead of) the static path above. */
-    uint64_t dyn_pid = spawn_boot_program("/hellodyn", "hellodyn");
-    if (dyn_pid == 0) {
-        serial_print("PoC-OS: failed to start /hellodyn.\n");
-        hcf();
-    }
-
-    /* dlopen()/dlsym() verification: /hellodl dlopen()s /lib/dlplugin.so
-     * (a standalone shared library, unrelated to libc.so/ld.so, installed
-     * by disk.img's rule) at runtime and calls into it -- see
-     * userland/hello_dlopen.c/dlplugin.c. */
-    uint64_t dl_pid = spawn_boot_program("/hellodl", "hellodl");
-    if (dl_pid == 0) {
-        serial_print("PoC-OS: failed to start /hellodl.\n");
-        hcf();
-    }
 
     pit_set_tick_callback(scheduler_tick);
     serial_print("PoC-OS: scheduler armed, booting into init.\n");

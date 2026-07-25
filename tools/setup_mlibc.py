@@ -45,6 +45,11 @@ IMPLEMENTED_TAGS = [
     # Dynamic linking (mlibc/options/rtld) -- see toolchain/mlibc-sysdeps-
     # pocos/sysdeps.cpp's Sysdeps<VmProtect> and elf.c's PT_INTERP support.
     "VmProtect",
+    # Directory listing + delete/rename -- see kernel/src/fat32.c's
+    # fat32_readdir()/fat32_unlink()/fat32_rmdir()/fat32_rename().
+    "OpenDir", "ReadEntries", "Rmdir", "Unlinkat", "Rename",
+    # access()/faccessat() -- busybox's rm calls access() before unlinking.
+    "Access", "Faccessat",
 ]
 
 
