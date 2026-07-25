@@ -37,11 +37,6 @@ static void sys_write_char(struct registers *regs) {
  * gets overwritten with whatever process.c picks next, so the caller's
  * POP_ALL+iretq (syscall_common_stub) never resumes the exited one. */
 static void sys_exit(struct registers *regs) {
-    serial_print("PoC-OS: process pid=");
-    serial_print_dec(process_current_pid());
-    serial_print(" exited with status ");
-    serial_print_dec(regs->rdi);
-    serial_print(".\n");
     process_exit_current(regs, (int)regs->rdi);
 }
 
@@ -82,15 +77,6 @@ static void sys_read(struct registers *regs) {
     }
 
     int64_t n = process_fd_read(fd, kbuf, len);
-    if (fd == 0 && n != -2) {
-        serial_print("DBG[t=");
-        serial_print_dec(pit_get_ticks());
-        serial_print("]: read(fd=0, len=");
-        serial_print_dec(len);
-        serial_print(") = ");
-        serial_print_dec((uint64_t)n);
-        serial_print("\n");
-    }
     if (n > 0 && !copy_to_user(process_current_pml4(), user_buf, kbuf, (uint64_t)n)) {
         n = -1;
     }
