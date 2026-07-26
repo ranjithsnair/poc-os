@@ -30,8 +30,9 @@ CFLAGS := -Wall -Wextra -std=gnu11 -O2 -g \
 #                        (matches the link address in linker.ld)
 # -target ...-none-elf:  cross-compile for bare-metal x86-64, no OS ABI
 
-# Only search src/ for #included project headers (limine.h, serial.h, font8x8.h).
-CPPFLAGS := -I src
+# Only search include/ for #included project headers (limine.h, serial.h, etc.)
+# -- headers live separately from src/'s .c/.S implementation files.
+CPPFLAGS := -I include
 
 LDFLAGS := -m elf_x86_64 -nostdlib -static \
     -z max-page-size=0x1000 --gc-sections \
@@ -42,9 +43,10 @@ LDFLAGS := -m elf_x86_64 -nostdlib -static \
 # --gc-sections:    drop unused sections (keeps the image lean)
 # -T linker.ld:     use our layout instead of the default linker script
 
-# Compile every .c file under src/ into a matching .o file under obj/.
+# Compile every .c and .S file under src/ into a matching .o file under obj/.
 SRCS := $(wildcard src/*.c)
-OBJS := $(SRCS:src/%.c=obj/%.o)
+ASMS := $(wildcard src/*.S)
+OBJS := $(SRCS:src/%.c=obj/%.o) $(ASMS:src/%.S=obj/%.o)
 
 .PHONY: all clean
 all: bin/$(OUTPUT)
@@ -59,6 +61,13 @@ bin/$(OUTPUT): $(OBJS) linker.ld
 obj/%.o: src/%.c
 	mkdir -p obj
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+# Pattern rule: assemble any src/X.S into obj/X.o (same target/cross flags
+# as the C rule, minus the C-only warnings, so inline `push`/`lgdt`/etc.
+# assemble the same way regardless of which file invokes them).
+obj/%.o: src/%.S
+	mkdir -p obj
+	$(CC) -m64 -march=x86-64 -target x86_64-unknown-none-elf -c $< -o $@
 
 clean:
 	rm -rf bin obj
