@@ -13,7 +13,7 @@
 #include "io.h"
 #include "pmm.h"
 #include "vmm.h"
-#include "serial.h"
+#include "framebuffer.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -161,7 +161,7 @@ static int find_virtio_blk(uint8_t *out_dev, uint8_t *out_fn) {
 int virtio_blk_init(void) {
     uint8_t dev, fn;
     if (!find_virtio_blk(&dev, &fn)) {
-        serial_print("virtio-blk: no device found on PCI bus 0.\n");
+        fb_print("virtio-blk: no device found on PCI bus 0.\n");
         return 0;
     }
 
@@ -173,7 +173,7 @@ int virtio_blk_init(void) {
 
     uint32_t bar0 = pci_read32(0, dev, fn, 0x10);
     if (!(bar0 & 1)) {
-        serial_print("virtio-blk: BAR0 is not an I/O-space BAR, giving up.\n");
+        fb_print("virtio-blk: BAR0 is not an I/O-space BAR, giving up.\n");
         return 0;
     }
     io_base = (uint16_t)(bar0 & ~0x3u);
@@ -190,7 +190,7 @@ int virtio_blk_init(void) {
     outw(io_base + VIRTIO_REG_QUEUE_SELECT, 0);
     queue_size = inw(io_base + VIRTIO_REG_QUEUE_SIZE);
     if (queue_size == 0) {
-        serial_print("virtio-blk: device reports queue size 0, giving up.\n");
+        fb_print("virtio-blk: device reports queue size 0, giving up.\n");
         return 0;
     }
 
@@ -211,13 +211,13 @@ int virtio_blk_init(void) {
      * pmm_init(), nothing has freed anything yet to fragment the bitmap). */
     uint64_t queue_phys = pmm_alloc_frame();
     if (queue_phys == 0) {
-        serial_print("virtio-blk: out of memory allocating the virtqueue.\n");
+        fb_print("virtio-blk: out of memory allocating the virtqueue.\n");
         return 0;
     }
     for (uint64_t i = 1; i < total_pages; i++) {
         uint64_t next = pmm_alloc_frame();
         if (next != queue_phys + i * PMM_FRAME_SIZE) {
-            serial_print("virtio-blk: virtqueue frames weren't contiguous, giving up.\n");
+            fb_print("virtio-blk: virtqueue frames weren't contiguous, giving up.\n");
             return 0;
         }
     }
@@ -234,7 +234,7 @@ int virtio_blk_init(void) {
 
     scratch_phys = pmm_alloc_frame();
     if (scratch_phys == 0) {
-        serial_print("virtio-blk: out of memory allocating the request scratch frame.\n");
+        fb_print("virtio-blk: out of memory allocating the request scratch frame.\n");
         return 0;
     }
     scratch_virt = (uint8_t *)vmm_phys_to_virt(scratch_phys);
@@ -243,9 +243,9 @@ int virtio_blk_init(void) {
     uint32_t cap_hi = inl(io_base + VIRTIO_REG_CONFIG + 4);
     capacity_sectors = ((uint64_t)cap_hi << 32) | cap_lo;
 
-    serial_print("virtio-blk: initialized, capacity ");
-    serial_print_dec(capacity_sectors * 512 / (1024 * 1024));
-    serial_print(" MiB.\n");
+    fb_print("virtio-blk: initialized, capacity ");
+    fb_print_dec(capacity_sectors * 512 / (1024 * 1024));
+    fb_print(" MiB.\n");
 
     device_present = 1;
     return 1;

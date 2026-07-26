@@ -18,11 +18,13 @@ void console_init(void);
  * regardless of canonical/raw mode: it's never buffered as input, and
  * instead raises SIGINT on the foreground pid (see
  * console_set_foreground_pid()), same as a real terminal driver.
- * Otherwise: in canonical mode (the default), handles backspace and
- * buffers a line at a time, available to console_read_nonblock() once
- * Enter is pressed; in raw mode (POC_ICANON clear), every byte is
- * available immediately. Echoes what it buffers/consumes iff POC_ECHO is
- * set (also the default). */
+ * Otherwise: in canonical mode (the default), handles backspace, treats
+ * 0x04 (EOT, Ctrl-D) as the EOF character (see console_consume_eof()),
+ * and buffers a line at a time, available to console_read_nonblock()
+ * once Enter is pressed; in raw mode (POC_ICANON clear), every byte is
+ * available immediately (including 0x04 -- EOF is a canonical-mode-only
+ * concept, same as a real tty). Echoes what it buffers/consumes iff
+ * POC_ECHO is set (also the default). */
 void console_feed_char(char c);
 
 /* The pid Ctrl-C's SIGINT is delivered to (0 = none -- Ctrl-C is
@@ -48,5 +50,16 @@ void console_set_lflag(uint32_t lflag);
  * from SYS_READ's syscall-context handler (see the comment in
  * syscall.c about why a blocking read would deadlock there). */
 uint64_t console_read_nonblock(uint8_t *buf, uint64_t len);
+
+/* Consumes one pending Ctrl-D-on-an-empty-line EOF marker (see
+ * console_feed_char()), if any: returns 1 and clears it, or 0 if none is
+ * pending. process_fd_read() calls this only once console_read_nonblock()
+ * has confirmed there's no real buffered data left, so any earlier
+ * finalized line is always drained first -- an EOF marker only ever
+ * reports *after* everything typed before it. Each Ctrl-D-on-empty-line
+ * press queues one more marker (mirroring a real tty: EOF ends whatever
+ * read() call is waiting, not the fd itself, so typing can resume
+ * afterward and a later read() call will just wait for it normally). */
+int console_consume_eof(void);
 
 #endif

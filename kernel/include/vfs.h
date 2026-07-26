@@ -1,24 +1,36 @@
 /*
- * Thin path-resolution layer over fat32.h: turns a possibly-relative
- * path plus a process's cwd into the single absolute-path form
- * fat32_lookup()/fat32_create() understand, and applies SYS_OPEN's
- * O_CREAT/O_TRUNC semantics. There's exactly one filesystem mounted
- * (fat32.c's), so this doesn't do multi-filesystem mount-point
- * dispatch -- it exists so process.c's fd code and fat32.c's on-disk
- * format code don't have to each know the other's conventions (cwd
- * handling on one side, 8.3/cluster-chain details on the other).
- */
+ * Thin path-resolution and backend-dispatch layer: turns a possibly-
+ * relative path plus a process's cwd into the single absolute-path form
+ * fat32_lookup()/ramfs_lookup() (etc.) understand, applies SYS_OPEN's
+ * O_CREAT/O_TRUNC semantics, and picks whichever one writable filesystem
+ * is actually mounted -- fat32.c's real (persistent) disk if
+ * fat32_init() found one, or ramfs.c's in-memory (non-persistent) one
+ * otherwise (see vfs_init()). Exactly one is ever active at a time, so
+ * this doesn't do real multi-filesystem mount-point dispatch -- it
+ * exists so process.c's fd code doesn't have to know which backend is
+ * live, on-disk format/node-table details on the other. */
 #ifndef VFS_H
 #define VFS_H
 
 #include <stdint.h>
 #include "fat32.h"
 
-/* Must be called once at boot, before vfs_open()/vfs_mkdir(). Returns 1
- * on success, 0 if there's no writable disk available (see
- * fat32_init()) -- callers must treat 0 as "no filesystem", same as a
- * missing initrd module already means for tarfs. */
+/* Must be called once at boot, before vfs_open()/vfs_mkdir(). Tries the
+ * real disk (fat32_init()) first; if none is found, falls back to an
+ * in-memory filesystem (ramfs_init()) so file-backed syscalls still work
+ * with no disk attached at all -- at the cost of nothing persisting
+ * across a reboot. Always returns 1: there is always at least the ramfs
+ * fallback. */
 int vfs_init(void);
+
+/* Reads/writes/lists whatever backend vfs_init() picked -- same
+ * contracts as fat32_read()/fat32_write()/fat32_readdir() (or ramfs.h's
+ * mirror of them). process.c's fd code calls these instead of the
+ * fat32_*()/ramfs_*() functions directly so it never needs to know
+ * which backend a given fd's handle came from. */
+int64_t vfs_read(struct fat32_file *f, uint64_t offset, void *buf, uint64_t len);
+int64_t vfs_write(struct fat32_file *f, uint64_t offset, const void *buf, uint64_t len);
+int vfs_readdir(struct fat32_file *dir, uint32_t index, char *name_out, uint32_t *size_out, int *is_dir_out);
 
 /* Resolves `path` against `cwd` (used as-is if `path` starts with '/';
  * otherwise joined as "cwd/path") and looks it up. If it doesn't exist

@@ -50,6 +50,10 @@ IMPLEMENTED_TAGS = [
     "OpenDir", "ReadEntries", "Rmdir", "Unlinkat", "Rename",
     # access()/faccessat() -- busybox's rm calls access() before unlinking.
     "Access", "Faccessat",
+    # utimensat() -- busybox's touch calls this after creating/opening its
+    # target; a no-op (see sysdeps.cpp's own doc comment) since fat32.c
+    # has no mtime/atime fields to set.
+    "Utimensat",
 ]
 
 

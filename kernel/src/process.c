@@ -23,7 +23,7 @@
 #include "pmm.h"
 #include "gdt.h"
 #include "heap.h"
-#include "serial.h"
+#include "framebuffer.h"
 #include "string.h"
 #include "elf.h"
 #include "console.h"
@@ -31,6 +31,7 @@
 #include "usercopy.h"
 #include "vfs.h"
 #include "fpu.h"
+#include "tarfs.h"
 
 #define PROCESS_MAX 16
 #define PROCESS_KERNEL_STACK_SIZE 16384
@@ -77,12 +78,17 @@ struct pipe {
 };
 
 /* console_kind: 0 = fat32-backed file/directory, 1 = stdin, 2 = stdout/
- * stderr, 3 = pipe read end, 4 = pipe write end. `pipe` is only valid
- * (non-NULL) for kinds 3/4; `fatfile`/`writable` only for kind 0. */
+ * stderr, 3 = pipe read end, 4 = pipe write end, 5 = tarfs-backed
+ * read-only file (initrd.tar, see tarfs.c -- e.g. mlibc's rtld resolving
+ * /lib/libc.so at runtime, same as /busybox and its own PT_INTERP at
+ * boot). `pipe` is only valid (non-NULL) for kinds 3/4; `fatfile`/
+ * `writable` only for kind 0; `tarfs_data` only for kind 5 (always
+ * read-only, so `writable` is left 0 there too). */
 struct process_fd {
     int in_use;
     int console_kind;
     struct fat32_file fatfile;
+    const uint8_t *tarfs_data;
     uint64_t size;
     uint64_t offset;
     uint32_t mode;
@@ -144,13 +150,13 @@ static uint64_t process_spawn(uint64_t pml4, uint64_t entry, uint64_t stack_top)
         }
     }
     if (slot == -1) {
-        serial_print("PoC-OS: process_spawn: no free process slots.\n");
+        fb_print("PoC-OS: process_spawn: no free process slots.\n");
         return 0;
     }
 
     uint8_t *kernel_stack = (uint8_t *)kmalloc(PROCESS_KERNEL_STACK_SIZE);
     if (kernel_stack == NULL) {
-        serial_print("PoC-OS: process_spawn: out of memory.\n");
+        fb_print("PoC-OS: process_spawn: out of memory.\n");
         return 0;
     }
 
@@ -205,7 +211,7 @@ static uint64_t process_spawn(uint64_t pml4, uint64_t entry, uint64_t stack_top)
      * field it needs is already valid. */
     p->state = PROCESS_READY;
 
-    serial_print("PoC-OS: process created.\n");
+    fb_print("PoC-OS: process created.\n");
     return p->pid;
 }
 
@@ -254,27 +260,45 @@ static uint64_t load_elf_program(const uint8_t *data, uint64_t size, const char 
     uint64_t jump_entry = main_elf.entry;
     char interp_path[ELF_INTERP_PATH_MAX];
     if (elf_find_interp(data, size, interp_path, sizeof(interp_path))) {
-        struct fat32_file interp_file;
-        if (!vfs_open(cwd, interp_path, O_RDONLY, &interp_file) || interp_file.is_dir) {
-            serial_print("PoC-OS: load_elf_program: interpreter not found: ");
-            serial_print(interp_path);
-            serial_print("\n");
-            vmm_destroy_address_space(pml4);
-            return 0;
-        }
-        uint8_t *interp_data = (uint8_t *)kmalloc(interp_file.size);
-        if (interp_data == NULL ||
-                fat32_read(&interp_file, 0, interp_data, interp_file.size) != (int64_t)interp_file.size) {
-            serial_print("PoC-OS: load_elf_program: failed to read the interpreter.\n");
-            if (interp_data != NULL) {
-                kfree(interp_data);
+        /* Tried first, same as spawn_boot_program()'s own /busybox
+         * lookup in main.c: tarfs.c's initrd is already resident in RAM
+         * (no leading '/' in its own file names), so a hit here needs no
+         * kmalloc/free at all. Only if it's not there does this fall
+         * back to the writable FAT32 disk. */
+        const char *tarfs_name = (interp_path[0] == '/') ? interp_path + 1 : interp_path;
+        uint64_t interp_size;
+        const uint8_t *interp_data = tarfs_read(tarfs_name, &interp_size);
+        int owns_interp_data = 0;
+
+        if (interp_data == NULL) {
+            struct fat32_file interp_file;
+            if (!vfs_open(cwd, interp_path, O_RDONLY, &interp_file) || interp_file.is_dir) {
+                fb_print("PoC-OS: load_elf_program: interpreter not found: ");
+                fb_print(interp_path);
+                fb_print("\n");
+                vmm_destroy_address_space(pml4);
+                return 0;
             }
-            vmm_destroy_address_space(pml4);
-            return 0;
+            uint8_t *disk_data = (uint8_t *)kmalloc(interp_file.size);
+            if (disk_data == NULL ||
+                    vfs_read(&interp_file, 0, disk_data, interp_file.size) != (int64_t)interp_file.size) {
+                fb_print("PoC-OS: load_elf_program: failed to read the interpreter.\n");
+                if (disk_data != NULL) {
+                    kfree(disk_data);
+                }
+                vmm_destroy_address_space(pml4);
+                return 0;
+            }
+            interp_data = disk_data;
+            interp_size = interp_file.size;
+            owns_interp_data = 1;
         }
+
         struct elf_load_result interp_elf;
-        int loaded = elf_load(pml4, interp_data, interp_file.size, ELF_INTERP_BASE, &interp_elf);
-        kfree(interp_data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+        int loaded = elf_load(pml4, interp_data, interp_size, ELF_INTERP_BASE, &interp_elf);
+        if (owns_interp_data) {
+            kfree((void *)interp_data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+        }
         if (!loaded) {
             vmm_destroy_address_space(pml4);
             return 0;
@@ -309,7 +333,7 @@ uint64_t process_create_from_elf(const uint8_t *data, uint64_t size,
      * PT_INTERP path against. */
     uint64_t pml4 = load_elf_program(data, size, "/", argc, argv, envc, envp, &entry, &rsp);
     if (pml4 == 0) {
-        serial_print("PoC-OS: process_create_from_elf: failed to load the ELF image.\n");
+        fb_print("PoC-OS: process_create_from_elf: failed to load the ELF image.\n");
         return 0;
     }
 
@@ -480,7 +504,7 @@ static void schedule(struct registers *regs) {
      * run normally) would run that freed address space, not idle
      * safely. Halting here instead, on this same kernel stack, avoids
      * ever returning into that stale context. */
-    serial_print("PoC-OS: no runnable processes left -- halting.\n");
+    fb_print("PoC-OS: no runnable processes left -- halting.\n");
     for (;;) {
         asm volatile ("hlt");
     }
@@ -584,26 +608,50 @@ int process_execve(struct registers *regs, const char *path,
         return 0;
     }
 
-    struct fat32_file exe;
-    if (!vfs_open(p->cwd, path, O_RDONLY, &exe) || exe.is_dir) {
-        return 0;
-    }
-    /* elf_load() needs the whole image as one contiguous in-memory
-     * buffer (it memcpy()s straight out of it into each PT_LOAD
-     * segment's frames) -- unlike tarfs's old already-in-RAM initrd,
-     * fat32-backed files have to actually be read off disk first. */
-    uint8_t *data = (uint8_t *)kmalloc(exe.size);
-    if (data == NULL) {
-        return 0;
-    }
-    if (fat32_read(&exe, 0, data, exe.size) != (int64_t)exe.size) {
-        kfree(data);
-        return 0;
+    /* Tried first, same as spawn_boot_program()'s /busybox lookup in
+     * main.c: BusyBox's own standalone-shell dispatch re-execs "/busybox"
+     * itself (with a different argv[0]) for every applet that isn't
+     * NOFORK, so this path gets hit constantly, not just at boot -- and
+     * unlike vfs_open()'s backend (the real FAT32 disk, or ramfs.c with
+     * no disk attached), tarfs's initrd is guaranteed to actually have
+     * it. Only if it's not there does this fall back to vfs_open()/
+     * vfs_read(), same as any other path. */
+    uint64_t size;
+    const uint8_t *data;
+    int owns_data;
+
+    const char *tarfs_name = (path[0] == '/') ? path + 1 : path;
+    data = tarfs_read(tarfs_name, &size);
+    if (data != NULL) {
+        owns_data = 0;
+    } else {
+        struct fat32_file exe;
+        if (!vfs_open(p->cwd, path, O_RDONLY, &exe) || exe.is_dir) {
+            return 0;
+        }
+        /* elf_load() needs the whole image as one contiguous in-memory
+         * buffer (it memcpy()s straight out of it into each PT_LOAD
+         * segment's frames) -- unlike tarfs's already-in-RAM initrd, a
+         * fat32-/ramfs-backed file has to actually be read out via
+         * vfs_read() first. */
+        uint8_t *disk_data = (uint8_t *)kmalloc(exe.size);
+        if (disk_data == NULL) {
+            return 0;
+        }
+        if (vfs_read(&exe, 0, disk_data, exe.size) != (int64_t)exe.size) {
+            kfree(disk_data);
+            return 0;
+        }
+        data = disk_data;
+        size = exe.size;
+        owns_data = 1;
     }
 
     uint64_t entry, rsp;
-    uint64_t new_pml4 = load_elf_program(data, exe.size, p->cwd, argc, argv, envc, envp, &entry, &rsp);
-    kfree(data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+    uint64_t new_pml4 = load_elf_program(data, size, p->cwd, argc, argv, envc, envp, &entry, &rsp);
+    if (owns_data) {
+        kfree((void *)data); /* elf_load() has already copied whatever it needs into the new address space's own frames */
+    }
     if (new_pml4 == 0) {
         return 0;
     }
@@ -706,13 +754,42 @@ uint64_t process_current_pml4(void) {
 }
 
 /* Opens `path` (resolved against the current process's cwd) and installs
- * it as a fat32-backed fd in the first free slot. Returns the new fd
- * number, or -1 (file not found, or no free fd slots). */
+ * it as a fat32-backed fd in the first free slot. A plain read-only open
+ * of an absolute path is tried against the initrd (tarfs.c) first --
+ * same fallback main.c's spawn_boot_program()/this file's
+ * load_elf_program() already apply to /busybox and its own PT_INTERP at
+ * boot, needed here too since mlibc's rtld resolves further DT_NEEDED
+ * dependencies (e.g. /lib/libc.so) via ordinary open() calls at runtime,
+ * not through the kernel's own ELF loader. Anything that wants to
+ * write/create/truncate always goes straight to the real (FAT32)
+ * filesystem, since tarfs.c is read-only. Returns the new fd number, or
+ * -1 (file not found, or no free fd slots). */
 int process_fd_open(const char *path, int flags) {
     struct process *p = current();
     if (p == NULL) {
         return -1;
     }
+
+    if (path[0] == '/' && !(flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+        uint64_t tar_size;
+        const uint8_t *tar_data = tarfs_read(path + 1, &tar_size);
+        if (tar_data != NULL) {
+            for (int i = 0; i < PROCESS_FD_MAX; i++) {
+                if (!p->fds[i].in_use) {
+                    p->fds[i].in_use = 1;
+                    p->fds[i].console_kind = 5;
+                    p->fds[i].tarfs_data = tar_data;
+                    p->fds[i].size = tar_size;
+                    p->fds[i].offset = 0;
+                    p->fds[i].mode = 0100000u; /* S_IFREG */
+                    p->fds[i].writable = 0;
+                    return i;
+                }
+            }
+            return -1;
+        }
+    }
+
     struct fat32_file file;
     if (!vfs_open(p->cwd, path, flags, &file)) {
         return -1;
@@ -723,7 +800,12 @@ int process_fd_open(const char *path, int flags) {
             p->fds[i].console_kind = 0;
             p->fds[i].fatfile = file;
             p->fds[i].size = file.size;
-            p->fds[i].offset = 0;
+            /* O_APPEND: start writing at the file's current end rather
+             * than its start -- there's only one writer per fd in this
+             * kernel (no concurrent-append race to worry about), so
+             * setting this once at open time is enough; process_fd_write()
+             * advances it normally from here on. */
+            p->fds[i].offset = (flags & O_APPEND) ? file.size : 0;
             p->fds[i].mode = file.is_dir ? 0040000u /* S_IFDIR */ : 0100000u /* S_IFREG */;
             p->fds[i].writable = (flags & (O_WRONLY | O_RDWR)) != 0;
             return i;
@@ -754,14 +836,17 @@ int64_t process_fd_read(int fd, void *kbuf, uint64_t len) {
     }
     if (f->console_kind == 1) {
         /* Same "poll again" convention as a pipe with no data but writers
-         * still open (below) -- the keyboard never has a "closed" event
-         * in this kernel, so a bare 0 here would be indistinguishable
-         * from real EOF to a userspace read() wrapper that (correctly)
-         * retries on the pipe's -2 sentinel but not on stdin's own 0,
-         * making it look like stdin closed the instant nothing had been
-         * typed yet. */
+         * still open (below): a bare 0 would be indistinguishable from
+         * real EOF to a userspace read() wrapper that (correctly) retries
+         * on the pipe's -2 sentinel but not on stdin's own 0. Real EOF
+         * only ever happens via Ctrl-D on an empty line (see
+         * console_consume_eof()) -- otherwise (nothing typed, and no
+         * pending Ctrl-D) this is "poll again", not EOF. */
         uint64_t n = console_read_nonblock((uint8_t *)kbuf, len);
-        return (n > 0) ? (int64_t)n : -2;
+        if (n > 0) {
+            return (int64_t)n;
+        }
+        return console_consume_eof() ? 0 : -2;
     }
     if (f->console_kind == 2) {
         return -1; /* stdout/stderr aren't readable */
@@ -783,7 +868,14 @@ int64_t process_fd_read(int fd, void *kbuf, uint64_t len) {
         p->count -= n;
         return (int64_t)n;
     }
-    int64_t n = fat32_read(&f->fatfile, f->offset, kbuf, len);
+    if (f->console_kind == 5) {
+        uint64_t remaining = f->size - f->offset;
+        uint64_t n = (len < remaining) ? len : remaining;
+        memcpy(kbuf, f->tarfs_data + f->offset, n);
+        f->offset += n;
+        return (int64_t)n;
+    }
+    int64_t n = vfs_read(&f->fatfile, f->offset, kbuf, len);
     if (n > 0) {
         f->offset += (uint64_t)n;
     }
@@ -798,7 +890,7 @@ int64_t process_fd_write(int fd, const void *kbuf, uint64_t len) {
     if (f->console_kind == 2) {
         const uint8_t *bytes = (const uint8_t *)kbuf;
         for (uint64_t i = 0; i < len; i++) {
-            serial_putc((char)bytes[i]);
+            fb_putc((char)bytes[i]);
         }
         return (int64_t)len;
     }
@@ -821,9 +913,9 @@ int64_t process_fd_write(int fd, const void *kbuf, uint64_t len) {
         return (int64_t)n;
     }
     if (!f->writable) {
-        return -1; /* stdin and pipe read ends are always read-only; a fat32 fd only if opened that way */
+        return -1; /* stdin and pipe read ends are always read-only; a fat32/ramfs fd only if opened that way */
     }
-    int64_t n = fat32_write(&f->fatfile, f->offset, kbuf, len);
+    int64_t n = vfs_write(&f->fatfile, f->offset, kbuf, len);
     if (n > 0) {
         f->offset += (uint64_t)n;
         f->size = f->fatfile.size;
@@ -939,11 +1031,12 @@ int process_fd_dup2(int oldfd, int newfd) {
 
 /* Moves fd's read/write offset, POSIX lseek()-style: SEEK_SET is
  * relative to the start of the file, SEEK_CUR to the current offset,
- * SEEK_END to the file's current size. Only fat32-backed fds support
- * seeking. Returns the new offset, or -1 on an invalid fd/whence/result. */
+ * SEEK_END to the file's current size. Only fat32-backed (0) and
+ * tarfs-backed (5) fds support seeking. Returns the new offset, or -1 on
+ * an invalid fd/whence/result. */
 int64_t process_fd_lseek(int fd, int64_t offset, int whence) {
     struct process_fd *f = fd_lookup(current(), fd);
-    if (f == NULL || f->console_kind != 0) {
+    if (f == NULL || (f->console_kind != 0 && f->console_kind != 5)) {
         return -1;
     }
     int64_t base;
@@ -966,8 +1059,8 @@ int64_t process_fd_lseek(int fd, int64_t offset, int whence) {
 
 /* Reports fd's size and mode bits, the way fstat() needs to: a pipe
  * reports its buffered byte count and S_IFIFO, a console fd (stdin/
- * stdout/stderr) reports S_IFCHR with size 0, and a real fat32 fd
- * reports its actual file size/mode. */
+ * stdout/stderr) reports S_IFCHR with size 0, and a real fat32 fd or a
+ * tarfs-backed fd (5) reports its actual file size/mode. */
 int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode) {
     struct process_fd *f = fd_lookup(current(), fd);
     if (f == NULL) {
@@ -978,7 +1071,7 @@ int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode) {
         *out_mode = 0010000; /* S_IFIFO */
         return 0;
     }
-    if (f->console_kind != 0) {
+    if (f->console_kind == 1 || f->console_kind == 2) {
         *out_size = 0;
         *out_mode = 0020000; /* S_IFCHR */
         return 0;
@@ -989,13 +1082,13 @@ int process_fd_fstat(int fd, uint64_t *out_size, uint32_t *out_mode) {
 }
 
 /* fd->offset (normally a byte offset -- see process_fd_read()/
- * process_fd_lseek()) doubles as fat32_readdir()'s slot index for a
+ * process_fd_lseek()) doubles as vfs_readdir()'s slot index for a
  * directory fd instead: there's nothing to "read" from a directory in
  * the regular-file sense, and reusing the same field means SYS_LSEEK's
  * existing SEEK_SET/SEEK_CUR/SEEK_END handling (clamped to f->size,
- * which vfs_open()/fat32_lookup() always report as 0 for a directory)
- * already gives rewinddir()-via-lseek(fd,0,SEEK_SET) for free, without
- * a second piece of per-fd state. */
+ * which vfs_open() always reports as 0 for a directory) already gives
+ * rewinddir()-via-lseek(fd,0,SEEK_SET) for free, without a second piece
+ * of per-fd state. */
 int64_t process_fd_getdents(int fd, void *kbuf, uint64_t max_entries) {
     struct process_fd *f = fd_lookup(current(), fd);
     if (f == NULL || f->console_kind != 0 || !f->fatfile.is_dir) {
@@ -1008,7 +1101,7 @@ int64_t process_fd_getdents(int fd, void *kbuf, uint64_t max_entries) {
         char name[13];
         uint32_t size;
         int is_dir;
-        int status = fat32_readdir(&f->fatfile, (uint32_t)f->offset, name, &size, &is_dir);
+        int status = vfs_readdir(&f->fatfile, (uint32_t)f->offset, name, &size, &is_dir);
         f->offset++;
         if (status == FAT32_DIRENT_END) {
             break;

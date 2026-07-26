@@ -1,7 +1,7 @@
 /* See console.h. */
 #include <stdint.h>
 #include "console.h"
-#include "serial.h"
+#include "framebuffer.h"
 #include "process.h"
 #include "syscall.h"
 
@@ -27,6 +27,10 @@ static uint8_t ring[CONSOLE_RING_SIZE];
 static uint64_t ring_head = 0;
 static uint64_t ring_count = 0;
 
+/* How many Ctrl-D-on-an-empty-line EOF markers are pending -- see
+ * console_consume_eof(). */
+static uint64_t eof_pending = 0;
+
 /* Appends one byte to the tail of the ring buffer, ready for
  * console_read_nonblock() to consume. */
 static void ring_push(uint8_t byte) {
@@ -44,13 +48,14 @@ void console_init(void) {
     line_len = 0;
     ring_head = 0;
     ring_count = 0;
+    eof_pending = 0;
 }
 
 void console_feed_char(char c) {
     if (c == 0x03) { /* ETX / Ctrl-C: the interrupt character, in any mode */
         line_len = 0; /* a real tty discards whatever was mid-line too */
         if (lflag & POC_ECHO) {
-            serial_print("^C\n");
+            fb_print("^C\n");
         }
         if (foreground_pid != 0) {
             process_send_signal(foreground_pid, SIGINT);
@@ -62,7 +67,7 @@ void console_feed_char(char c) {
         /* Raw mode: every byte is available immediately, never buffered
          * until a newline. */
         if (lflag & POC_ECHO) {
-            serial_putc(c);
+            fb_putc(c);
         }
         ring_push((uint8_t)c);
         return;
@@ -72,10 +77,29 @@ void console_feed_char(char c) {
         if (line_len > 0) {
             line_len--;
             if (lflag & POC_ECHO) {
-                serial_putc('\b');
-                serial_putc(' ');
-                serial_putc('\b');
+                fb_putc('\b'); /* fb_putc() erases the cell and backs the cursor up itself */
             }
+        }
+        return;
+    }
+
+    if (c == 0x04) { /* EOT / Ctrl-D: the EOF character, canonical mode only */
+        if (line_len > 0) {
+            /* Flushes whatever's been typed so far as its own "line" --
+             * unlike '\n' below, without a trailing newline byte, same
+             * as a real tty delivering a Ctrl-D-terminated partial line
+             * to a blocked read(). Never echoed (matches a real tty:
+             * Ctrl-D itself never appears on screen). */
+            for (uint64_t i = 0; i < line_len; i++) {
+                ring_push(line_buf[i]);
+            }
+            line_len = 0;
+        } else {
+            /* Nothing typed yet on this line: queue one EOF marker
+             * instead, so the next SYS_READ on stdin sees a true EOF (0)
+             * rather than the usual "no data yet, poll again" (-2) --
+             * see console_consume_eof(). */
+            eof_pending++;
         }
         return;
     }
@@ -84,7 +108,7 @@ void console_feed_char(char c) {
         line_buf[line_len++] = (uint8_t)c;
     }
     if (lflag & POC_ECHO) {
-        serial_putc(c);
+        fb_putc(c);
     }
 
     if (c == '\n') {
@@ -103,4 +127,12 @@ uint64_t console_read_nonblock(uint8_t *buf, uint64_t len) {
         ring_count--;
     }
     return n;
+}
+
+int console_consume_eof(void) {
+    if (eof_pending > 0) {
+        eof_pending--;
+        return 1;
+    }
+    return 0;
 }

@@ -12,7 +12,7 @@
  */
 #include <stddef.h>
 #include "pmm.h"
-#include "serial.h"
+#include "framebuffer.h"
 
 static uint8_t *bitmap;
 static uint64_t bitmap_size_bytes;
@@ -83,7 +83,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
         }
     }
     if (bitmap == NULL) {
-        serial_print("PMM: no usable region large enough for the frame bitmap, halting.\n");
+        fb_print("PMM: no usable region large enough for the frame bitmap, halting.\n");
         for (;;) {
             asm volatile ("cli; hlt");
         }
@@ -133,7 +133,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
     search_hint = 0;
 
-    serial_print("PMM: initialized.\n");
+    fb_print("PMM: initialized.\n");
 }
 
 /* Finds one free frame, marks it used, zeroes it, and returns its

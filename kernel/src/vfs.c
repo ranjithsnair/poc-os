@@ -3,18 +3,52 @@
 #include <stddef.h>
 #include "vfs.h"
 #include "fat32.h"
+#include "ramfs.h"
 #include "syscall.h"
 #include "string.h"
-#include "serial.h"
+#include "framebuffer.h"
 
 #define VFS_PATH_MAX 192
 
+/* Which backend every vfs_* call below dispatches to -- decided once at
+ * boot by vfs_init() and never changed afterward (there's exactly one
+ * writable filesystem mounted for the life of the kernel, same as
+ * before this file had two backends to choose between at all). */
+enum vfs_backend { VFS_BACKEND_NONE, VFS_BACKEND_FAT32, VFS_BACKEND_RAMFS };
+static enum vfs_backend backend = VFS_BACKEND_NONE;
+
+/* Real disk (fat32.c/virtio_blk.c) if one's attached and formatted --
+ * that's the persistent choice, meant for once PoC-OS is actually
+ * installed to a disk instead of just booted as a live CD. Falls back to
+ * an in-memory filesystem (ramfs.c) otherwise, so SYS_OPEN's O_CREAT/
+ * SYS_WRITE/etc. all still work with zero disk setup -- e.g. this ISO
+ * booted directly with no disk attached at all, or under a hypervisor
+ * that doesn't emulate virtio-blk -- at the cost of every change being
+ * lost on the next reboot. Always succeeds: ramfs_init() has no hardware
+ * to fail against, just static state. */
 int vfs_init(void) {
-    if (!fat32_init()) {
-        serial_print("vfs: no writable filesystem available.\n");
-        return 0;
+    if (fat32_init()) {
+        backend = VFS_BACKEND_FAT32;
+        return 1;
     }
+    fb_print("vfs: no disk found -- using an in-memory filesystem (changes will not persist across reboots).\n");
+    ramfs_init();
+    backend = VFS_BACKEND_RAMFS;
     return 1;
+}
+
+int64_t vfs_read(struct fat32_file *f, uint64_t offset, void *buf, uint64_t len) {
+    return (backend == VFS_BACKEND_FAT32) ? fat32_read(f, offset, buf, len) : ramfs_read(f, offset, buf, len);
+}
+
+int64_t vfs_write(struct fat32_file *f, uint64_t offset, const void *buf, uint64_t len) {
+    return (backend == VFS_BACKEND_FAT32) ? fat32_write(f, offset, buf, len) : ramfs_write(f, offset, buf, len);
+}
+
+int vfs_readdir(struct fat32_file *dir, uint32_t index, char *name_out, uint32_t *size_out, int *is_dir_out) {
+    return (backend == VFS_BACKEND_FAT32)
+        ? fat32_readdir(dir, index, name_out, size_out, is_dir_out)
+        : ramfs_readdir(dir, index, name_out, size_out, is_dir_out);
 }
 
 /* Joins `cwd` and `path` into a single absolute path in `out` (bounded
@@ -119,14 +153,16 @@ int vfs_open(const char *cwd, const char *path, int flags, struct fat32_file *ou
     }
     normalize_path(abs);
 
-    if (fat32_lookup(abs, out)) {
+    int found = (backend == VFS_BACKEND_FAT32) ? fat32_lookup(abs, out) : ramfs_lookup(abs, out);
+    if (found) {
         if ((flags & O_TRUNC) && !out->is_dir) {
-            return fat32_create(abs, out); /* fat32_create() truncates an existing file */
+            /* fat32_create()/ramfs_create() truncate an existing file. */
+            return (backend == VFS_BACKEND_FAT32) ? fat32_create(abs, out) : ramfs_create(abs, out);
         }
         return 1;
     }
     if (flags & O_CREAT) {
-        return fat32_create(abs, out);
+        return (backend == VFS_BACKEND_FAT32) ? fat32_create(abs, out) : ramfs_create(abs, out);
     }
     return 0;
 }
@@ -137,7 +173,7 @@ int vfs_mkdir(const char *cwd, const char *path) {
         return 0;
     }
     normalize_path(abs);
-    return fat32_mkdir(abs);
+    return (backend == VFS_BACKEND_FAT32) ? fat32_mkdir(abs) : ramfs_mkdir(abs);
 }
 
 int vfs_unlink(const char *cwd, const char *path) {
@@ -146,7 +182,7 @@ int vfs_unlink(const char *cwd, const char *path) {
         return 0;
     }
     normalize_path(abs);
-    return fat32_unlink(abs);
+    return (backend == VFS_BACKEND_FAT32) ? fat32_unlink(abs) : ramfs_unlink(abs);
 }
 
 int vfs_rmdir(const char *cwd, const char *path) {
@@ -155,7 +191,7 @@ int vfs_rmdir(const char *cwd, const char *path) {
         return 0;
     }
     normalize_path(abs);
-    return fat32_rmdir(abs);
+    return (backend == VFS_BACKEND_FAT32) ? fat32_rmdir(abs) : ramfs_rmdir(abs);
 }
 
 int vfs_rename(const char *cwd, const char *old_path, const char *new_path) {
@@ -167,5 +203,5 @@ int vfs_rename(const char *cwd, const char *old_path, const char *new_path) {
     }
     normalize_path(abs_old);
     normalize_path(abs_new);
-    return fat32_rename(abs_old, abs_new);
+    return (backend == VFS_BACKEND_FAT32) ? fat32_rename(abs_old, abs_new) : ramfs_rename(abs_old, abs_new);
 }

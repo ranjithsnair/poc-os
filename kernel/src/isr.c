@@ -9,7 +9,7 @@
 #include "isr.h"
 #include "idt.h"
 #include "pic.h"
-#include "serial.h"
+#include "framebuffer.h"
 
 extern void isr0(void); extern void isr1(void); extern void isr2(void); extern void isr3(void);
 extern void isr4(void); extern void isr5(void); extern void isr6(void); extern void isr7(void);
@@ -42,14 +42,14 @@ static const char *exception_names[32] = {
  * irq_common_handler() below just skips over. */
 static irq_handler_t irq_handlers[16];
 
-/* Lets a driver (pit.c, keyboard.c, serial.c) claim one IRQ line so its
- * own handler gets called whenever that interrupt fires. */
+/* Lets a driver (pit.c, keyboard.c) claim one IRQ line so its own handler
+ * gets called whenever that interrupt fires. */
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
     irq_handlers[irq] = handler;
 }
 
-/* Prints a 64-bit value as "0xdeadbeefdeadbeef" over serial -- used for
- * crash reports, where we can't trust any fancier formatting code. */
+/* Prints a 64-bit value as "0xdeadbeefdeadbeef" to the console -- used
+ * for crash reports, where we can't trust any fancier formatting code. */
 static void print_hex64(uint64_t v) {
     static const char *hex = "0123456789abcdef";
     /* buf[0..1] = "0x", buf[2..17] = 16 hex digits, buf[18] = '\0'. */
@@ -57,32 +57,32 @@ static void print_hex64(uint64_t v) {
     for (int i = 0; i < 16; i++) {
         buf[17 - i] = hex[(v >> (i * 4)) & 0xF];
     }
-    serial_print(buf);
+    fb_print(buf);
 }
 
 /* Called by isr_common_stub for every CPU exception. There's no recovery
  * path yet -- no process to kill, no signal to deliver -- so this just
- * reports what happened over serial and halts for good. */
+ * reports what happened to the console and halts for good. */
 void isr_common_handler(struct registers *regs) {
     const char *name = regs->vector < 32 ? exception_names[regs->vector] : "Unknown";
-    serial_print("\n*** CPU EXCEPTION: ");
-    serial_print(name);
-    serial_print(" (vector "); print_hex64(regs->vector);
-    serial_print(", error "); print_hex64(regs->error_code);
-    serial_print(")\nrip="); print_hex64(regs->rip);
-    serial_print(" cs="); print_hex64(regs->cs);
-    serial_print(" rflags="); print_hex64(regs->rflags);
-    serial_print(" rsp="); print_hex64(regs->rsp);
-    serial_print(" ss="); print_hex64(regs->ss);
+    fb_print("\n*** CPU EXCEPTION: ");
+    fb_print(name);
+    fb_print(" (vector "); print_hex64(regs->vector);
+    fb_print(", error "); print_hex64(regs->error_code);
+    fb_print(")\nrip="); print_hex64(regs->rip);
+    fb_print(" cs="); print_hex64(regs->cs);
+    fb_print(" rflags="); print_hex64(regs->rflags);
+    fb_print(" rsp="); print_hex64(regs->rsp);
+    fb_print(" ss="); print_hex64(regs->ss);
     if (regs->vector == 14) {
         /* CR2 -- the faulting linear address -- is only meaningful for a
          * page fault (#PF); every other vector leaves it stale from
          * whatever last faulted. */
         uint64_t cr2;
         asm volatile ("mov %%cr2, %0" : "=r"(cr2));
-        serial_print("\ncr2="); print_hex64(cr2);
+        fb_print("\ncr2="); print_hex64(cr2);
     }
-    serial_print("\nSystem halted.\n");
+    fb_print("\nSystem halted.\n");
     for (;;) {
         asm volatile ("cli; hlt");
     }

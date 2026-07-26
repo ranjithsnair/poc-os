@@ -18,7 +18,7 @@
 #include "isr.h"
 #include "process.h"
 #include "usercopy.h"
-#include "serial.h"
+#include "framebuffer.h"
 #include "heap.h"
 #include "pit.h"
 #include "console.h"
@@ -29,7 +29,7 @@ extern void syscall_stub(void);
 #define SYS_PATH_MAX 256
 
 static void sys_write_char(struct registers *regs) {
-    serial_putc((char)regs->rdi);
+    fb_putc((char)regs->rdi);
     regs->rax = 0;
 }
 
@@ -168,9 +168,9 @@ static void sys_ioctl(struct registers *regs) {
     switch (request) {
         case TCGETS: {
             uint32_t lflag = console_get_lflag();
-            serial_print("DBG: TCGETS -> lflag=0x");
-            serial_print_dec(lflag);
-            serial_print("\n");
+            fb_print("DBG: TCGETS -> lflag=0x");
+            fb_print_dec(lflag);
+            fb_print("\n");
             regs->rax = copy_to_user(process_current_pml4(), arg, &lflag, sizeof(lflag)) ? 0 : (uint64_t)-1;
             return;
         }
@@ -180,9 +180,9 @@ static void sys_ioctl(struct registers *regs) {
                 regs->rax = (uint64_t)-1;
                 return;
             }
-            serial_print("DBG: TCSETS lflag=0x");
-            serial_print_dec(lflag);
-            serial_print("\n");
+            fb_print("DBG: TCSETS lflag=0x");
+            fb_print_dec(lflag);
+            fb_print("\n");
             console_set_lflag(lflag);
             regs->rax = 0;
             return;
@@ -455,7 +455,7 @@ void syscall_dispatch(struct registers *regs) {
         case SYS_RMDIR:         sys_rmdir(regs); break;
         case SYS_RENAME:        sys_rename(regs); break;
         default:
-            serial_print("PoC-OS: unknown syscall number, ignoring.\n");
+            fb_print("PoC-OS: unknown syscall number, ignoring.\n");
             regs->rax = (uint64_t)-1;
             break;
     }

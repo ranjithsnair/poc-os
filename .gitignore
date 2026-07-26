@@ -5,6 +5,7 @@ limine/
 *.iso
 *.hdd
 initrd.tar
+initrd_root/
 disk.img
 disk_root/
 userland/*.o

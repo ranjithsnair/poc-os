@@ -1,6 +1,6 @@
 /* Shared x86 port I/O helpers, used by every driver that talks to
  * hardware over `in`/`out` instead of memory-mapped registers (PIC, PIT,
- * PS/2 keyboard). serial.c predates this file and keeps its own copies. */
+ * PS/2 keyboard). */
 #ifndef IO_H
 #define IO_H
 

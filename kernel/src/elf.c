@@ -10,7 +10,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "string.h"
-#include "serial.h"
+#include "framebuffer.h"
 
 /* ELF (Executable and Linkable Format) is the file format Linux/BSD/etc.
  * compilers produce for executables and shared libraries -- it's just a
@@ -71,19 +71,19 @@ static int valid_header(const Elf64_Ehdr *eh, uint64_t size) {
     }
     if (eh->e_ident[0] != 0x7f || eh->e_ident[1] != 'E' ||
         eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F') {
-        serial_print("PoC-OS: elf_load: not an ELF file.\n");
+        fb_print("PoC-OS: elf_load: not an ELF file.\n");
         return 0;
     }
     if (eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB) {
-        serial_print("PoC-OS: elf_load: not a 64-bit little-endian ELF.\n");
+        fb_print("PoC-OS: elf_load: not a 64-bit little-endian ELF.\n");
         return 0;
     }
     if (eh->e_machine != EM_X86_64) {
-        serial_print("PoC-OS: elf_load: wrong machine type (not x86-64).\n");
+        fb_print("PoC-OS: elf_load: wrong machine type (not x86-64).\n");
         return 0;
     }
     if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) {
-        serial_print("PoC-OS: elf_load: not an ET_EXEC or ET_DYN image.\n");
+        fb_print("PoC-OS: elf_load: not an ET_EXEC or ET_DYN image.\n");
         return 0;
     }
     return 1;
@@ -136,7 +136,7 @@ static int map_segment(uint64_t pml4_phys, uint64_t vaddr, uint64_t memsz,
         } else {
             frame = pmm_alloc_frame();
             if (frame == 0) {
-                serial_print("PoC-OS: elf_load: out of memory mapping a PT_LOAD segment.\n");
+                fb_print("PoC-OS: elf_load: out of memory mapping a PT_LOAD segment.\n");
                 return 0;
             }
             vmm_map(pml4_phys, page_va, frame, flags);
@@ -165,7 +165,7 @@ int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, uint64_t lo
         return 0;
     }
     if (eh->e_phoff + (uint64_t)eh->e_phnum * eh->e_phentsize > size) {
-        serial_print("PoC-OS: elf_load: program header table out of bounds.\n");
+        fb_print("PoC-OS: elf_load: program header table out of bounds.\n");
         return 0;
     }
 
@@ -176,7 +176,7 @@ int elf_load(uint64_t pml4_phys, const uint8_t *data, uint64_t size, uint64_t lo
             continue;
         }
         if (ph->p_offset + ph->p_filesz > size) {
-            serial_print("PoC-OS: elf_load: PT_LOAD segment data out of bounds.\n");
+            fb_print("PoC-OS: elf_load: PT_LOAD segment data out of bounds.\n");
             return 0;
         }
         if (!map_segment(pml4_phys, load_base + ph->p_vaddr, ph->p_memsz, data + ph->p_offset, ph->p_filesz, ph->p_flags)) {
@@ -236,7 +236,7 @@ int elf_map_user_stack(uint64_t pml4_phys) {
     for (uint64_t page_va = stack_bottom; page_va < VMM_USER_STACK_TOP; page_va += PMM_FRAME_SIZE) {
         uint64_t frame = pmm_alloc_frame();
         if (frame == 0) {
-            serial_print("PoC-OS: elf_map_user_stack: out of memory mapping the user stack.\n");
+            fb_print("PoC-OS: elf_map_user_stack: out of memory mapping the user stack.\n");
             return 0;
         }
         vmm_map(pml4_phys, page_va, frame, VMM_USER | VMM_WRITABLE | VMM_NX);

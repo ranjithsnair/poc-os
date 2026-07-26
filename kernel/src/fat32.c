@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include "fat32.h"
 #include "virtio_blk.h"
-#include "serial.h"
+#include "framebuffer.h"
 #include "string.h"
 
 #define DIRENT_SIZE 32
@@ -375,17 +375,17 @@ int fat32_init(void) {
 
     uint8_t sector[512];
     if (virtio_blk_read_sector(0, sector) != 0) {
-        serial_print("fat32: failed to read the boot sector.\n");
+        fb_print("fat32: failed to read the boot sector.\n");
         return 0;
     }
     if (sector[0x1FE] != 0x55 || sector[0x1FF] != 0xAA) {
-        serial_print("fat32: bad boot sector signature -- not formatted?\n");
+        fb_print("fat32: bad boot sector signature -- not formatted?\n");
         return 0;
     }
 
     bytes_per_sector = read_u16(sector, 0x0B);
     if (bytes_per_sector != 512) {
-        serial_print("fat32: unsupported bytes_per_sector (must be 512).\n");
+        fb_print("fat32: unsupported bytes_per_sector (must be 512).\n");
         return 0;
     }
     sectors_per_cluster = sector[0x0D];
@@ -400,11 +400,11 @@ int fat32_init(void) {
     next_free_hint = 2;
     mounted = 1;
 
-    serial_print("fat32: mounted, ");
-    serial_print_dec(total_clusters);
-    serial_print(" clusters of ");
-    serial_print_dec((uint64_t)sectors_per_cluster * bytes_per_sector);
-    serial_print(" bytes each.\n");
+    fb_print("fat32: mounted, ");
+    fb_print_dec(total_clusters);
+    fb_print(" clusters of ");
+    fb_print_dec((uint64_t)sectors_per_cluster * bytes_per_sector);
+    fb_print(" bytes each.\n");
     return 1;
 }
 

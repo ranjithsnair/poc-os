@@ -12,14 +12,13 @@ GCC_VERSION := 14.2.0
 TOOLCHAIN_PREFIX := $(abspath toolchain/cross)
 TOOLCHAIN_SYSROOT := $(abspath toolchain/sysroot)
 
-# 256MB of guest RAM, route the serial port to this terminal so
-# serial_print() output (see kernel/src/serial.c) is visible when running,
-# and attach disk.img as a virtio-blk drive (kernel/src/virtio_blk.c /
-# fat32.c) -- the writable filesystem process-visible files live on.
-# -display none: PoC-OS is a plain serial/terminal console (no framebuffer
-# console, no mouse) -- there's nothing to show in a graphical window, so
-# skip opening one at all.
-QEMUFLAGS := -m 256M -serial stdio -display none \
+# 256MB of guest RAM, and attach disk.img as a virtio-blk drive
+# (kernel/src/virtio_blk.c / fat32.c) -- the writable filesystem
+# process-visible files live on. No -display/-serial flags: PoC-OS's only
+# console is the graphical framebuffer (kernel/src/framebuffer.c) plus the
+# PS/2 keyboard (kernel/src/keyboard.c), so QEMU's default graphical
+# window is exactly what's needed -- open it and give it keyboard focus.
+QEMUFLAGS := -m 256M \
 	-drive file=disk.img,if=none,format=raw,id=disk0 \
 	-device virtio-blk-pci,drive=disk0
 
@@ -31,14 +30,23 @@ all: $(IMAGE_NAME).iso
 kernel:
 	$(MAKE) -C kernel
 
-# Builds the initrd: a USTAR archive bundling every file under initrd/,
-# which kernel/src/tarfs.c reads at boot (see the module_path directive
-# in limine.conf). --format=ustar pins the exact on-disk layout tarfs.c's
-# parser was written and tested against — GNU tar's default format
-# differs in some header fields, so this flag isn't optional.
-INITRD_FILES := $(wildcard initrd/*)
-initrd.tar: $(INITRD_FILES)
-	tar --format=ustar -cf $@ -C initrd $(notdir $(INITRD_FILES))
+# Builds the initrd: a USTAR archive holding busybox itself plus
+# /lib/ld.so and /lib/libc.so, staged into initrd_root/ the same way
+# disk.img's disk_root/ is (see disk.img's rule below) -- kernel/src/
+# tarfs.c reads this at boot (module_path in limine.conf) as the
+# self-contained rootfs kmain()'s spawn_boot_program() loads /busybox
+# from (main.c), so the ISO boots standalone with no disk attached at
+# all. --format=ustar pins the exact on-disk layout tarfs.c's parser was
+# written and tested against — GNU tar's default format differs in some
+# header fields, so this flag isn't optional.
+initrd.tar: busybox/busybox
+	rm -rf initrd_root
+	mkdir -p initrd_root/lib
+	cp busybox/busybox initrd_root/busybox
+	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/ld.so initrd_root/lib/ld.so
+	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/libc.so initrd_root/lib/libc.so
+	tar --format=ustar -cf $@ -C initrd_root busybox lib
+	rm -rf initrd_root
 
 MLIBC_SYSROOT := toolchain/sysroot
 
@@ -328,7 +336,7 @@ run: $(IMAGE_NAME).iso disk.img
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar disk.img disk_root
+	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar initrd_root disk.img disk_root
 
 # Full clean, including the fetched limine/, mlibc/, busybox/
 # directories and the installed sysroots built from them.

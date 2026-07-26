@@ -408,6 +408,25 @@ int Sysdeps<Faccessat>::operator()(int dirfd, const char *path, int mode, int fl
 	return Sysdeps<Access>{}(path, mode);
 }
 
+/* fat32.c has no mtime/atime fields to set (see Chmod's own doc comment
+ * for the same gap with permission bits), so once the target exists
+ * this is a silent no-op. But busybox's touch calls this *before*
+ * trying to create anything, and only falls back to open(O_CREAT) if
+ * it sees ENOENT (see touch.c's own utimensat-then-open logic) -- so
+ * unlike Chmod, this can't unconditionally return success: that would
+ * make touch believe every nonexistent path already exists and skip
+ * creating it. Same open-and-immediately-close existence check
+ * Sysdeps<Access> already uses for the same reason. */
+int Sysdeps<Utimensat>::operator()(int, const char *path, const struct timespec times[2], int) {
+	(void)times;
+	long ret = syscall(SYS_OPEN, path, 0 /* O_RDONLY */);
+	if (ret < 0) {
+		return ENOENT;
+	}
+	syscall(SYS_CLOSE, ret);
+	return 0;
+}
+
 /* The raw SYS_GETDENTS reply (kernel/src/syscall.h's struct poc_dirent)
  * -- a fixed-size record (fat32.c's 8.3 names are already bounded to 12
  * characters), unlike the variable-length struct dirent below that this
