@@ -269,6 +269,29 @@ toolchain/cross/bin/x86_64-elf-ld: toolchain/src/binutils-$(BINUTILS_VERSION)/co
 # empty) since --with-sysroot is baked into the configure line so the
 # *installed*, final x86_64-elf-gcc resolves -lc/-isystem against
 # toolchain/sysroot/usr automatically once mlibc-sysroot populates it.
+#
+# --disable-fixincludes: since --with-sysroot is a non-empty path here,
+# configure's inhibit_libc check never trips (it only fires when
+# with_sysroot is unset), so fixincludes still runs and tries to fix up
+# headers under toolchain/sysroot/usr/include -- which doesn't exist yet
+# at this point in the build (mlibc-sysroot populates it later). Not
+# needed anyway: fixincludes patches broken *host* system headers, and
+# this compiler never sees any (--without-headers, freestanding libgcc
+# only).
+#
+# --with-newlib: same root cause as the fixincludes issue above --
+# configure's `inhibit_libc` (gcc/configure, the check gating tsystem.h's
+# `#ifdef inhibit_libc`) only turns on when `--with-sysroot` is *empty*,
+# so with our baked-in, not-yet-populated sysroot path it stays off and
+# libgcc2.c's build reaches for a real <stdio.h>/<stdlib.h>/etc that
+# doesn't exist yet, aborting all-target-libgcc with "stdio.h: No such
+# file or directory". `--with-newlib` is the other half of that same
+# configure condition (`... || test x$with_newlib = xyes`) and forces
+# inhibit_libc on regardless of --with-sysroot. This is the standard,
+# idiomatic flag for this exact target too -- x86_64-*-elf*'s own
+# tm_file (gcc/config.gcc) always includes newlib-stdint.h, unconditionally,
+# newlib or not: this generic elf target is built to assume a
+# newlib-shaped bare-metal libc all along.
 .PHONY: cross-gcc
 cross-gcc: toolchain/cross/bin/x86_64-elf-gcc
 toolchain/cross/bin/x86_64-elf-gcc: toolchain/cross/bin/x86_64-elf-ld toolchain/src/gcc-$(GCC_VERSION)/configure
@@ -281,11 +304,11 @@ toolchain/cross/bin/x86_64-elf-gcc: toolchain/cross/bin/x86_64-elf-ld toolchain/
 		--with-sysroot=$(TOOLCHAIN_SYSROOT) \
 		--with-gmp=/usr/local/opt/gmp --with-mpfr=/usr/local/opt/mpfr \
 		--with-mpc=/usr/local/opt/libmpc --with-system-zlib \
-		--disable-nls --enable-languages=c --without-headers \
+		--disable-nls --enable-languages=c --without-headers --with-newlib \
 		--disable-shared --disable-threads --disable-libssp \
 		--disable-libquadmath --disable-libgomp --disable-libatomic \
 		--disable-libitm --disable-libvtv --disable-libstdcxx \
-		--disable-decimal-float --disable-bootstrap
+		--disable-decimal-float --disable-bootstrap --disable-fixincludes
 	$(MAKE) -C toolchain/build-gcc -j$$(sysctl -n hw.ncpu) all-gcc all-target-libgcc
 	$(MAKE) -C toolchain/build-gcc install-gcc install-target-libgcc
 
