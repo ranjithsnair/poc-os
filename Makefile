@@ -1,368 +1,366 @@
-# Top-level build: produces the bootable hello-os.iso by combining the
-# compiled kernel with the Limine bootloader.
+OBJS = \
+	$(OBJDIR)/kernel/bio.o\
+	$(OBJDIR)/kernel/console.o\
+	$(OBJDIR)/kernel/exec.o\
+	$(OBJDIR)/kernel/file.o\
+	$(OBJDIR)/kernel/fs.o\
+	$(OBJDIR)/kernel/ide.o\
+	$(OBJDIR)/kernel/ioapic.o\
+	$(OBJDIR)/kernel/kalloc.o\
+	$(OBJDIR)/kernel/kbd.o\
+	$(OBJDIR)/kernel/lapic.o\
+	$(OBJDIR)/kernel/log.o\
+	$(OBJDIR)/kernel/main.o\
+	$(OBJDIR)/kernel/mp.o\
+	$(OBJDIR)/kernel/picirq.o\
+	$(OBJDIR)/kernel/pipe.o\
+	$(OBJDIR)/kernel/proc.o\
+	$(OBJDIR)/kernel/sleeplock.o\
+	$(OBJDIR)/kernel/spinlock.o\
+	$(OBJDIR)/kernel/string.o\
+	$(OBJDIR)/kernel/swtch.o\
+	$(OBJDIR)/kernel/syscall.o\
+	$(OBJDIR)/kernel/sysfile.o\
+	$(OBJDIR)/kernel/sysproc.o\
+	$(OBJDIR)/kernel/trapasm.o\
+	$(OBJDIR)/kernel/trap.o\
+	$(OBJDIR)/kernel/uart.o\
+	$(OBJDIR)/kernel/vectors.o\
+	$(OBJDIR)/kernel/vm.o\
+	$(OBJDIR)/kernel/x86.o\
 
-# `override` prevents a caller from renaming the image via the command line.
-override IMAGE_NAME := hello-os
+# Cross-compiling (e.g., on Mac OS X)
+# TOOLPREFIX = i386-jos-elf
 
-# Cross toolchain versions/paths (see the cross-binutils/cross-gcc rules
-# below) -- defined up top since busybox's own build rule references
-# CROSS_GCC before make would otherwise have seen GCC_VERSION assigned.
-BINUTILS_VERSION := 2.44
-GCC_VERSION := 14.2.0
-TOOLCHAIN_PREFIX := $(abspath toolchain/cross)
-TOOLCHAIN_SYSROOT := $(abspath toolchain/sysroot)
+# Using native tools (e.g., on X86 Linux)
+#TOOLPREFIX =
 
-# 256MB of guest RAM, and attach disk.img as a virtio-blk drive
-# (kernel/src/virtio_blk.c / fat32.c) -- the writable filesystem
-# process-visible files live on. No -display/-serial flags: PoC-OS's only
-# console is the graphical framebuffer (kernel/src/framebuffer.c) plus the
-# PS/2 keyboard (kernel/src/keyboard.c), so QEMU's default graphical
-# window is exactly what's needed -- open it and give it keyboard focus.
-QEMUFLAGS := -m 256M \
-	-drive file=disk.img,if=none,format=raw,id=disk0 \
-	-device virtio-blk-pci,drive=disk0
+# Try to infer the correct TOOLPREFIX if not set
+ifndef TOOLPREFIX
+TOOLPREFIX := $(shell if i386-jos-elf-objdump -i 2>&1 | grep '^elf32-i386$$' >/dev/null 2>&1; \
+	then echo 'i386-jos-elf-'; \
+	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
+	then echo ''; \
+	else echo "***" 1>&2; \
+	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils." 1>&2; \
+	echo "*** Is the directory with i386-jos-elf-gcc in your PATH?" 1>&2; \
+	echo "*** If your i386-*-elf toolchain is installed with a command" 1>&2; \
+	echo "*** prefix other than 'i386-jos-elf-', set your TOOLPREFIX" 1>&2; \
+	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
+	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
+	echo "***" 1>&2; exit 1; fi)
+endif
 
-.PHONY: all
-all: $(IMAGE_NAME).iso
+# If the makefile can't find QEMU, specify its path here
+# QEMU = qemu-system-i386
 
-# Delegates to kernel/Makefile to build kernel/bin/kernel.
-.PHONY: kernel
-kernel:
-	$(MAKE) -C kernel
+# Try to infer the correct QEMU
+ifndef QEMU
+QEMU = $(shell if which qemu > /dev/null; \
+	then echo qemu; exit; \
+	elif which qemu-system-i386 > /dev/null; \
+	then echo qemu-system-i386; exit; \
+	elif which qemu-system-x86_64 > /dev/null; \
+	then echo qemu-system-x86_64; exit; \
+	else \
+	qemu=/Applications/Q.app/Contents/MacOS/i386-softmmu.app/Contents/MacOS/i386-softmmu; \
+	if test -x $$qemu; then echo $$qemu; exit; fi; fi; \
+	echo "***" 1>&2; \
+	echo "*** Error: Couldn't find a working QEMU executable." 1>&2; \
+	echo "*** Is the directory containing the qemu binary in your PATH" 1>&2; \
+	echo "*** or have you tried setting the QEMU variable in Makefile?" 1>&2; \
+	echo "***" 1>&2; exit 1)
+endif
 
-# Builds the initrd: a USTAR archive holding busybox itself plus
-# /lib/ld.so and /lib/libc.so, staged into initrd_root/ the same way
-# disk.img's disk_root/ is (see disk.img's rule below) -- kernel/src/
-# tarfs.c reads this at boot (module_path in limine.conf) as the
-# self-contained rootfs kmain()'s spawn_boot_program() loads /busybox
-# from (main.c), so the ISO boots standalone with no disk attached at
-# all. --format=ustar pins the exact on-disk layout tarfs.c's parser was
-# written and tested against — GNU tar's default format differs in some
-# header fields, so this flag isn't optional.
-initrd.tar: busybox/busybox
-	rm -rf initrd_root
-	mkdir -p initrd_root/lib
-	cp busybox/busybox initrd_root/busybox
-	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/ld.so initrd_root/lib/ld.so
-	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/libc.so initrd_root/lib/libc.so
-	tar --format=ustar -cf $@ -C initrd_root busybox lib
-	rm -rf initrd_root
+CC = $(TOOLPREFIX)gcc
+AS = $(TOOLPREFIX)gas
+LD = $(TOOLPREFIX)ld
+OBJCOPY = $(TOOLPREFIX)objcopy
+OBJDUMP = $(TOOLPREFIX)objdump
 
-MLIBC_SYSROOT := toolchain/sysroot
+# NASM assembles all the .asm (Intel-syntax) sources. The shared C headers
+# in include/ (constants, struct layouts) are still expanded into them with
+# the C preprocessor before NASM ever sees the file - see the %.o: %.asm
+# rules below.
+NASM = nasm
+NASMFLAGS = -f elf32 -g
 
-# The real cross GCC (built below) -- busybox's own build system expects
-# a normal $(CROSS_COMPILE)gcc, not clang's `-target` spelling. GCC's own
-# --with-sysroot bakes in $(MLIBC_SYSROOT) (the *static* sysroot) at
-# configure time (see the `cross-gcc` target below); busybox overrides
-# that per-invocation with an explicit --sysroot=$(MLIBC_SYSROOT_SHARED)
-# so it links against the shared libc.so/ld.so instead.
-CROSS_BIN := $(abspath toolchain/cross/bin)
-CROSS_GCC := $(CROSS_BIN)/x86_64-elf-gcc
+# All headers live in include/, shared by boot/, kernel/, user/ and mkfs/.
+CPPFLAGS = -Iinclude
 
-# Builds the writable FAT32 disk image (kernel/src/fat32.c mounts this at
-# boot via kernel/src/virtio_blk.c) from disk_root/, a staging directory
-# populated with whatever binaries/files need to be on it. 300MiB is
-# comfortably over FAT32's 65525-cluster minimum at the image builder's
-# 4KiB clusters (see tools/mkfat32.py) -- it's a sparse-ish build (mostly
-# zeros past the FAT/data actually used), not 300MiB actually written to
-# the host disk's own filesystem.
-#
-# Just one binary (busybox itself) plus /lib/ld.so and /lib/libc.so: no
-# per-applet files/symlinks are needed since busybox's own standalone-
-# shell feature (see busybox.config) makes ash dispatch every configured
-# applet as a built-in call, and fat32.c has no symlink support anyway
-# (see fat32.h's doc comment) -- kernel/src/main.c's spawn_boot_program()
-# invokes this same file with argv[0] = "sh" to select the ash applet.
-disk.img: busybox/busybox tools/mkfat32.py
-	rm -rf disk_root
-	mkdir -p disk_root/lib
-	cp busybox/busybox disk_root/busybox
-	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/ld.so disk_root/lib/ld.so
-	cp $(MLIBC_SYSROOT_SHARED)/usr/lib/libc.so disk_root/lib/libc.so
-	python3 tools/mkfat32.py $@ 300 disk_root
-	rm -rf disk_root
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
+CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+# FreeBSD ld wants ``elf_i386_fbsd''
+LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
 
-# --- mlibc (bring up a real userspace on PoC-OS) ---
-#
-# Fetches mlibc (not committed, like limine/), overlays our own sysdeps
-# port (toolchain/mlibc-sysdeps-pocos/ -- persistent, version-controlled)
-# into mlibc/sysdeps/pocos, patches mlibc's own meson.build to recognize
-# it (see tools/setup_mlibc.py), configures it with Meson against
-# toolchain/pocos.cross-file, builds it with Ninja, and installs headers/
-# libc.a/crt1.o into a local sysroot (toolchain/sysroot/) userland
-# programs compile and link against above.
-#
-# llvm-ar/llvm-ranlib (not macOS's native ones, which don't understand
-# ELF object files at all -- see toolchain/pocos.cross-file's doc
-# comment) come from `brew install llvm`.
-LLVM_BIN := $(shell brew --prefix llvm 2>/dev/null)/bin
+# Disable PIE when possible (for Ubuntu 16.10 toolchain)
+ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+CFLAGS += -fno-pie -no-pie
+endif
+ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
+CFLAGS += -fno-pie -nopie
+endif
 
-mlibc/meson.build:
-	git clone --depth 1 https://github.com/managarm/mlibc.git mlibc
+# Every generated file lives under build/: final binaries, disk images,
+# and disassembly/symbol dumps directly in build/, and every intermediate
+# .o/.d/.i file under build/obj/, mirroring the source tree
+# (build/obj/kernel/, build/obj/user/, build/obj/boot/). Keeping the
+# object tree at a distinct path from the final binaries matters, not
+# just style: build/kernel (the linked kernel binary) and a hypothetical
+# build/kernel/ (a directory of kernel object files) can't both exist, so
+# intermediates get their own build/obj/ subtree instead of colliding
+# with the very product names they build towards - the same reason
+# kernel/, user/, and boot/ exist as directories one level up in the
+# first place. boot/, kernel/, user/, include/, and mkfs/ contain only
+# hand-written (or, for kernel/vectors.pl's output, generated-but-
+# that's-the-point) source, never build output; `make clean` is just
+# `rm -rf build`.
+BUILD = build
+OBJDIR = $(BUILD)/obj
 
-# Re-runs (wiping and reconfiguring build-pocos/) whenever our sysdeps
-# port, the cross-file, or the setup/generator scripts change; a no-op
-# rebuild otherwise, so plain `make mlibc-sysroot` after an unrelated
-# change is fast (ninja/meson install below are already incremental).
-# -type f only (not -o -type l): the abi-bits/*.h entries are symlinks
-# that are *intentionally* dangling from this location (they resolve
-# relative to mlibc/sysdeps/pocos/, only valid once copied there by
-# setup_mlibc.py below) -- letting Make see them as prerequisites makes
-# it stat() each one, find it broken, and refuse to proceed at all.
-MLIBC_SYSDEPS_SRC := $(shell find toolchain/mlibc-sysdeps-pocos -type f)
-mlibc/.pocos-setup: mlibc/meson.build tools/setup_mlibc.py tools/gen_mlibc_stubs.py \
-		$(MLIBC_SYSDEPS_SRC) toolchain/pocos.cross-file
-	python3 tools/setup_mlibc.py mlibc toolchain/mlibc-sysdeps-pocos
-	rm -rf mlibc/build-pocos
-	cd mlibc && PATH="$(LLVM_BIN):$$PATH" meson setup build-pocos \
-		--cross-file ../toolchain/pocos.cross-file -Dprefix=/usr \
-		-Dlinux_option=disabled -Dglibc_option=disabled -Dbsd_option=disabled \
-		-Dlibgcc_dependency=false -Ddefault_library=static
-	touch $@
+$(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user:
+	mkdir -p $@
 
-.PHONY: mlibc-sysroot
-mlibc-sysroot: mlibc/.pocos-setup
-	cd mlibc/build-pocos && PATH="$(LLVM_BIN):$$PATH" ninja
-	cd mlibc/build-pocos && PATH="$(LLVM_BIN):$$PATH" meson install --destdir ../../$(MLIBC_SYSROOT)
+# Compile a C source into build/obj/<dir>/<name>.o, keeping the same
+# boot/kernel/user split the sources themselves use.
+$(OBJDIR)/boot/%.o: boot/%.c | $(OBJDIR)/boot
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-# --- Dynamic linking: a second, shared build of mlibc (libc.so + ld.so),
-# alongside (not instead of) the static build above -- see
-# toolchain/pocos-shared.cross-file's doc comment and kernel/src/elf.c's
-# PT_INTERP support. Depends on mlibc/.pocos-setup (not just mlibc/
-# meson.build) so the sysdeps/pocos overlay + meson.build patch are always
-# done first, same as the static build; reconfigures only when this
-# cross-file (or anything the overlay depends on) changes.
-# -Ddefault_library_paths=/lib: mlibc's own default (meson.build) is only
-# auto-filled for host systems meson recognizes by name, which 'pocos'
-# isn't -- so ld.so's compiled-in search path has to be set explicitly, and
-# must match wherever disk.img's rule below actually installs libc.so.
-MLIBC_SYSROOT_SHARED := toolchain/sysroot-shared
-mlibc/.pocos-setup-shared: mlibc/.pocos-setup toolchain/pocos-shared.cross-file
-	rm -rf mlibc/build-pocos-shared
-	cd mlibc && PATH="$(LLVM_BIN):$$PATH" meson setup build-pocos-shared \
-		--cross-file ../toolchain/pocos-shared.cross-file -Dprefix=/usr \
-		-Dlinux_option=disabled -Dglibc_option=disabled -Dbsd_option=disabled \
-		-Dlibgcc_dependency=false -Ddefault_library=shared \
-		-Ddefault_library_paths=/lib
-	touch $@
+$(OBJDIR)/kernel/%.o: kernel/%.c | $(OBJDIR)/kernel
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-.PHONY: mlibc-sysroot-shared
-mlibc-sysroot-shared: mlibc/.pocos-setup-shared
-	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" ninja
-	cd mlibc/build-pocos-shared && PATH="$(LLVM_BIN):$$PATH" meson install --destdir ../../$(MLIBC_SYSROOT_SHARED)
+$(OBJDIR)/user/%.o: user/%.c | $(OBJDIR)/user
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-# --- busybox: a real shell + coreutils userland, dynamically linked
-# against mlibc (mlibc-sysroot-shared above) with the real cross GCC
-# (below) instead of clang -- busybox's own Kbuild expects a normal
-# $(CROSS_COMPILE)gcc it can probe flags against, not clang's `-target`
-# spelling. Installed onto disk.img as PoC-OS's init (kernel/src/main.c's
-# spawn_boot_program("/busybox", "sh")).
-BUSYBOX_VERSION := 1.36.1
+# Assemble a NASM source the same way: first expand #include/#define from
+# include/ with the C preprocessor (cpp doesn't care about NASM vs GAS
+# mnemonics, it just does text substitution), then hand the result to nasm.
+$(OBJDIR)/boot/%.o: boot/%.asm | $(OBJDIR)/boot
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2:
-	mkdir -p toolchain/src
-	curl -L -o $@ https://busybox.net/downloads/busybox-$(BUSYBOX_VERSION).tar.bz2
+$(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# Fetched like limine/mlibc (not committed -- see .gitignore); unpacked
-# straight into busybox/ (--strip-components=1 drops the tarball's own
-# busybox-$(BUSYBOX_VERSION)/ wrapper directory) rather than into
-# toolchain/src/ alongside binutils/gcc, since this one is built in
-# place rather than configured into a separate toolchain/build-*/ tree.
-busybox/Makefile: | toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2
-	rm -rf busybox
-	mkdir -p busybox
-	tar -C busybox --strip-components=1 -xf toolchain/src/busybox-$(BUSYBOX_VERSION).tar.bz2
-	./tools/patch-busybox-platform.sh busybox/include/platform.h
-	touch $@
+$(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# Applies toolchain/busybox-pocos.config (a small, version-controlled
-# fragment naming exactly the applets/features we want -- see its own
-# doc comment) over allnoconfig's "everything off" baseline: sed replaces
-# each fragment symbol's "# CONFIG_X is not set"/"CONFIG_X=..." line in
-# busybox/.config with "CONFIG_X=y" in place (KCONFIG_ALLCONFIG would be
-# the more obvious way to do this, but busybox's own Kconfig fork doesn't
-# honor its override values -- verified empirically: every symbol landed
-# 'n' regardless). `oldconfig` then resolves whatever dependent prompts
-# those selections newly expose; piping "" answers each with its
-# Kconfig-computed default instead of blocking on a terminal.
-busybox/.config: busybox/Makefile toolchain/busybox-pocos.config
-	$(MAKE) -C busybox ARCH=x86_64 allnoconfig
-	while IFS='=' read -r sym val; do \
-		case "$$sym" in \#*|"") continue ;; esac; \
-		if grep -q "^$${sym}=" busybox/.config; then \
-			sed -i '' "s|^$${sym}=.*|$${sym}=$${val}|" busybox/.config; \
-		elif [ "$$val" = "y" ]; then \
-			sed -i '' "s|^# $${sym} is not set\$$|$${sym}=y|" busybox/.config; \
-		fi; \
-	done < toolchain/busybox-pocos.config
-	yes "" | $(MAKE) -C busybox ARCH=x86_64 oldconfig
+$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/kernel | $(BUILD)
+	dd if=/dev/zero of=$(BUILD)/poc.img count=10000
+	dd if=$(BUILD)/bootblock of=$(BUILD)/poc.img conv=notrunc
+	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=1 conv=notrunc
 
-# CC embeds --sysroot/-fPIC as extra words (Make just runs "$(CC)
-# ...args...", so leading flags work the same as if they were on every
-# compile line) so busybox links against the *shared* mlibc build
-# (toolchain/sysroot-shared/) instead of whatever --with-sysroot the
-# cross-gcc target below baked in at its own configure time (the
-# *static* one, toolchain/sysroot/) -- mirroring the removed
-# userland/%.dyn.elf rule's PT_INTERP-facing flags. CROSS_COMPILE=
-# x86_64-elf- (with $(CROSS_BIN) on PATH) is enough for busybox's Kbuild
-# to also find x86_64-elf-ar/nm/objcopy/strip on its own -- binutils
-# installs the whole suite under that target prefix, so only CC itself
-# needs to be overridden with the extra sysroot/PIC flags.
-busybox/busybox: busybox/.config cross-gcc mlibc-sysroot-shared toolchain/pocos-gcc.specs
-	$(MAKE) -C busybox ARCH=x86_64 CROSS_COMPILE=x86_64-elf- PATH="$(CROSS_BIN):$$PATH" \
-		HOSTCC=cc SKIP_STRIP=y \
-		CC="$(CROSS_GCC) --sysroot=$(abspath $(MLIBC_SYSROOT_SHARED)) -fPIC \
-			-specs=$(abspath toolchain/pocos-gcc.specs) -B$(abspath $(MLIBC_SYSROOT_SHARED))/usr/lib" \
-		EXTRA_LDFLAGS="-pie -Wl,--dynamic-linker=/lib/ld.so"
+$(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
+	dd if=/dev/zero of=$(BUILD)/pocmemfs.img count=10000
+	dd if=$(BUILD)/bootblock of=$(BUILD)/pocmemfs.img conv=notrunc
+	dd if=$(BUILD)/kernelmemfs of=$(BUILD)/pocmemfs.img seek=1 conv=notrunc
 
-# --- Phase 2 of the plan: a real cross binutils + GCC targeting
-# x86_64-elf, built to run on this macOS host. Two-stage-bootstrap-free
-# here because mlibc (Phase 1) is built with clang against the cross-file
-# above, not with this GCC -- so unlike a from-scratch OSDev toolchain,
-# GCC only ever needs to compile against an *already-populated* sysroot,
-# never bootstrap it. Not committed (toolchain/cross, build-binutils,
-# build-gcc, src are all in .gitignore like mlibc/limine), so this is
-# also what makes the whole toolchain reproducible from a clean checkout.
-#
-# --with-system-zlib on both: the bundled-zlib fallback's zutil.c
-# declares zError(err) old-style-K&R, which collides with the macOS SDK's
-# own _stdio.h and fails to compile otherwise.
-toolchain/src/binutils-$(BINUTILS_VERSION).tar.xz:
-	mkdir -p toolchain/src
-	curl -L -o $@ https://ftp.gnu.org/gnu/binutils/binutils-$(BINUTILS_VERSION).tar.xz
+# bootmain.c needs its own rule rather than the generic $(OBJDIR)/boot/%.o
+# pattern above: the boot sector has a hard 510-byte budget (512 minus
+# the 2-byte 0x55AA signature), and -O2 (the default in $(CFLAGS)) alone
+# generates code too large to fit, so this keeps the lighter -O the
+# original boot Makefile always used here, along with -nostdinc since
+# the boot loader is freestanding.
+$(OBJDIR)/boot/bootmain.o: boot/bootmain.c | $(OBJDIR)/boot
+	$(CC) $(CFLAGS) $(CPPFLAGS) -fno-pic -O -nostdinc -c -o $@ $<
 
-# Order-only (the `|`) on purpose: a downloaded tarball's own mtime is
-# whenever curl happened to run, which is almost always *later* than the
-# release-day mtimes preserved on the files tar extracts from it -- a
-# normal prerequisite here would make Make think the extracted configure
-# is perpetually out-of-date relative to the tarball and re-extract (and
-# so re-trigger the full binutils/gcc build below) on every invocation.
-toolchain/src/binutils-$(BINUTILS_VERSION)/configure: | toolchain/src/binutils-$(BINUTILS_VERSION).tar.xz
-	tar -C toolchain/src -xf toolchain/src/binutils-$(BINUTILS_VERSION).tar.xz
-	touch $@
+$(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock.o $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
+	./boot/sign.pl $(BUILD)/bootblock
 
-toolchain/src/gcc-$(GCC_VERSION).tar.xz:
-	mkdir -p toolchain/src
-	curl -L -o $@ https://ftp.gnu.org/gnu/gcc/gcc-$(GCC_VERSION)/gcc-$(GCC_VERSION).tar.xz
+# entryother and initcode are raw binary blobs the kernel embeds with
+# -b binary (see kernel/main.c's and kernel/proc.c's matching
+# _binary_build_..._start symbols) rather than programs run standalone,
+# so unlike everything else in $(OBJS)/ULIB they need their own two-step
+# ld+objcopy recipe instead of just landing in a link line. They're
+# final build products, not intermediates, so - like bootblock, kernel,
+# and mkfs - they live directly in build/, not build/obj/.
+$(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
+	$(OBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
 
-toolchain/src/gcc-$(GCC_VERSION)/configure: | toolchain/src/gcc-$(GCC_VERSION).tar.xz
-	tar -C toolchain/src -xf toolchain/src/gcc-$(GCC_VERSION).tar.xz
-	touch $@
+$(BUILD)/initcode: $(OBJDIR)/user/initcode.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o $(OBJDIR)/user/initcode.out $(OBJDIR)/user/initcode.o
+	$(OBJCOPY) -S -O binary $(OBJDIR)/user/initcode.out $(BUILD)/initcode
+	$(OBJDUMP) -S $(OBJDIR)/user/initcode.o > $(BUILD)/initcode.dis
 
-# llvm-ar/llvm-ranlib, not macOS's native ar/ranlib, which can't index
-# ELF archives at all -- binutils' own libiberty/bfd build needs a
-# working ranlib on the *host* side too.
-toolchain/cross/bin/x86_64-elf-ld: toolchain/src/binutils-$(BINUTILS_VERSION)/configure
-	rm -rf toolchain/build-binutils
-	mkdir -p toolchain/build-binutils
-	cd toolchain/build-binutils && PATH="$(LLVM_BIN):$$PATH" \
-		../src/binutils-$(BINUTILS_VERSION)/configure \
-		--target=x86_64-elf --prefix=$(TOOLCHAIN_PREFIX) \
-		--with-sysroot=$(TOOLCHAIN_SYSROOT) \
-		--disable-nls --disable-werror --with-system-zlib
-	$(MAKE) -C toolchain/build-binutils -j$$(sysctl -n hw.ncpu)
-	$(MAKE) -C toolchain/build-binutils install
+$(BUILD)/kernel: $(OBJS) $(OBJDIR)/kernel/entry.o $(BUILD)/entryother $(BUILD)/initcode kernel/kernel.ld | $(BUILD)
+	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $(BUILD)/kernel $(OBJDIR)/kernel/entry.o $(OBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother
+	$(OBJDUMP) -S $(BUILD)/kernel > $(BUILD)/kernel.dis
+	$(OBJDUMP) -t $(BUILD)/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/kernel.sym
 
-# --without-headers: this GCC only ever needs to build its own
-# freestanding libgcc, never libc itself (that's mlibc, built separately
-# by clang) -- but it still needs $(TOOLCHAIN_SYSROOT) to exist (even
-# empty) since --with-sysroot is baked into the configure line so the
-# *installed*, final x86_64-elf-gcc resolves -lc/-isystem against
-# toolchain/sysroot/usr automatically once mlibc-sysroot populates it.
-#
-# --disable-fixincludes: since --with-sysroot is a non-empty path here,
-# configure's inhibit_libc check never trips (it only fires when
-# with_sysroot is unset), so fixincludes still runs and tries to fix up
-# headers under toolchain/sysroot/usr/include -- which doesn't exist yet
-# at this point in the build (mlibc-sysroot populates it later). Not
-# needed anyway: fixincludes patches broken *host* system headers, and
-# this compiler never sees any (--without-headers, freestanding libgcc
-# only).
-#
-# --with-newlib: same root cause as the fixincludes issue above --
-# configure's `inhibit_libc` (gcc/configure, the check gating tsystem.h's
-# `#ifdef inhibit_libc`) only turns on when `--with-sysroot` is *empty*,
-# so with our baked-in, not-yet-populated sysroot path it stays off and
-# libgcc2.c's build reaches for a real <stdio.h>/<stdlib.h>/etc that
-# doesn't exist yet, aborting all-target-libgcc with "stdio.h: No such
-# file or directory". `--with-newlib` is the other half of that same
-# configure condition (`... || test x$with_newlib = xyes`) and forces
-# inhibit_libc on regardless of --with-sysroot. This is the standard,
-# idiomatic flag for this exact target too -- x86_64-*-elf*'s own
-# tm_file (gcc/config.gcc) always includes newlib-stdint.h, unconditionally,
-# newlib or not: this generic elf target is built to assume a
-# newlib-shaped bare-metal libc all along.
-.PHONY: cross-gcc
-cross-gcc: toolchain/cross/bin/x86_64-elf-gcc
-toolchain/cross/bin/x86_64-elf-gcc: toolchain/cross/bin/x86_64-elf-ld toolchain/src/gcc-$(GCC_VERSION)/configure
-	mkdir -p $(TOOLCHAIN_SYSROOT)
-	rm -rf toolchain/build-gcc
-	mkdir -p toolchain/build-gcc
-	cd toolchain/build-gcc && PATH="$(TOOLCHAIN_PREFIX)/bin:$(LLVM_BIN):$$PATH" \
-		../src/gcc-$(GCC_VERSION)/configure \
-		--target=x86_64-elf --prefix=$(TOOLCHAIN_PREFIX) \
-		--with-sysroot=$(TOOLCHAIN_SYSROOT) \
-		--with-gmp=/usr/local/opt/gmp --with-mpfr=/usr/local/opt/mpfr \
-		--with-mpc=/usr/local/opt/libmpc --with-system-zlib \
-		--disable-nls --enable-languages=c --without-headers --with-newlib \
-		--disable-shared --disable-threads --disable-libssp \
-		--disable-libquadmath --disable-libgomp --disable-libatomic \
-		--disable-libitm --disable-libvtv --disable-libstdcxx \
-		--disable-decimal-float --disable-bootstrap --disable-fixincludes
-	$(MAKE) -C toolchain/build-gcc -j$$(sysctl -n hw.ncpu) all-gcc all-target-libgcc
-	$(MAKE) -C toolchain/build-gcc install-gcc install-target-libgcc
+# kernelmemfs is a copy of kernel that maintains the
+# disk image in memory instead of writing to a disk.
+# This is not so useful for testing persistent storage or
+# exploring disk buffering implementations, but it is
+# great for testing the kernel on real hardware without
+# needing a scratch disk.
+MEMFSOBJS = $(filter-out $(OBJDIR)/kernel/ide.o,$(OBJS)) $(OBJDIR)/kernel/memide.o
+$(BUILD)/kernelmemfs: $(MEMFSOBJS) $(OBJDIR)/kernel/entry.o $(BUILD)/entryother $(BUILD)/initcode kernel/kernel.ld $(BUILD)/fs.img | $(BUILD)
+	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $(BUILD)/kernelmemfs $(OBJDIR)/kernel/entry.o $(MEMFSOBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother $(BUILD)/fs.img
+	$(OBJDUMP) -S $(BUILD)/kernelmemfs > $(BUILD)/kernelmemfs.dis
+	$(OBJDUMP) -t $(BUILD)/kernelmemfs | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/kernelmemfs.sym
 
-# Fetches and builds the Limine bootloader tooling (the `limine` binary
-# used below to install the BIOS boot record) if it isn't present yet.
-# Pinned to the v9.x binary release branch so the vendored copy matches
-# the boot protocol version kernel/include/limine.h implements.
-limine/limine:
-	rm -rf limine
-	git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1 limine
-	$(MAKE) -C limine
+tags:
+	etags boot/*.asm boot/*.c kernel/*.asm kernel/*.c user/*.c user/*.asm include/*.h mkfs/*.c
 
-# Assemble a hybrid BIOS+UEFI bootable ISO:
-#   1. build the kernel and fetch/build limine (prerequisites)
-#   2. lay out an ISO root with the kernel, Limine's config, and its
-#      BIOS/UEFI boot files in the paths limine.conf expects
-#   3. use xorriso to package iso_root into an El Torito bootable ISO,
-#      with a BIOS boot catalog entry and a UEFI boot partition
-#   4. stamp a BIOS boot record onto the finished ISO via `limine bios-install`
-#      so it's also bootable on legacy BIOS, not just UEFI
-$(IMAGE_NAME).iso: kernel limine/limine initrd.tar
-	rm -rf iso_root
-	mkdir -p iso_root/boot/limine
-	cp kernel/bin/kernel iso_root/boot/
-	cp initrd.tar iso_root/boot/
-	cp limine.conf iso_root/boot/limine/
-	mkdir -p iso_root/EFI/BOOT
-	cp limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp limine/BOOTX64.EFI iso_root/EFI/BOOT/
-	cp limine/BOOTIA32.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs -R -r -J -b boot/limine/limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
-		-apm-block-size 2048 --efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-	./limine/limine bios-install $(IMAGE_NAME).iso
-	rm -rf iso_root
+# Generated (not hand-written), so it lives under build/ like every other
+# build product, even though NASM will treat it as a source file. Needs
+# its own rule rather than the generic $(OBJDIR)/kernel/%.o: kernel/%.asm
+# pattern above, since vectors.asm's "source" is itself a build product,
+# not a file that exists under kernel/.
+$(OBJDIR)/kernel/vectors.asm: kernel/vectors.pl | $(OBJDIR)/kernel
+	./kernel/vectors.pl > $(OBJDIR)/kernel/vectors.asm
 
-# Boot the built ISO in QEMU as if from a CD-ROM, with disk.img attached
-# as the writable virtio-blk drive.
-.PHONY: run
-run: $(IMAGE_NAME).iso disk.img
-	qemu-system-x86_64 -cdrom $(IMAGE_NAME).iso -boot d $(QEMUFLAGS)
+$(OBJDIR)/kernel/vectors.o: $(OBJDIR)/kernel/vectors.asm | $(OBJDIR)/kernel
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(OBJDIR)/kernel/vectors.i $(OBJDIR)/kernel/vectors.asm
+	$(NASM) $(NASMFLAGS) -o $@ $(OBJDIR)/kernel/vectors.i
 
-# Remove build outputs but keep the fetched limine/mlibc/busybox
-# toolchain trees (avoids re-cloning/re-extracting/re-building them on
-# every rebuild).
-.PHONY: clean
+ULIB = $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(OBJDIR)/kernel/x86.o
+
+$(BUILD)/_%: $(OBJDIR)/user/%.o $(ULIB) | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/$*.dis
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/$*.sym
+
+$(BUILD)/_forktest: $(OBJDIR)/user/forktest.o $(ULIB) | $(BUILD)
+	# forktest has less library code linked in - needs to be small
+	# in order to be able to max out the proc table.
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $(BUILD)/_forktest $(OBJDIR)/user/forktest.o $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/kernel/x86.o
+	$(OBJDUMP) -S $(BUILD)/_forktest > $(BUILD)/forktest.dis
+
+$(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
+	# -iquote (not -I) so quoted poc headers resolve to include/ while
+	# <fcntl.h> etc still resolve to the host's system headers.
+	gcc -Werror -Wall -iquote include -o $(BUILD)/mkfs mkfs/mkfs.c
+
+# Prevent deletion of intermediate files, e.g. cat.o, after first build, so
+# that disk image changes after first build are persistent until clean.  More
+# details:
+# http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o
+
+UPROGS=\
+	$(BUILD)/_cat\
+	$(BUILD)/_echo\
+	$(BUILD)/_forktest\
+	$(BUILD)/_grep\
+	$(BUILD)/_init\
+	$(BUILD)/_kill\
+	$(BUILD)/_ln\
+	$(BUILD)/_ls\
+	$(BUILD)/_mkdir\
+	$(BUILD)/_rm\
+	$(BUILD)/_sh\
+	$(BUILD)/_stressfs\
+	$(BUILD)/_usertests\
+	$(BUILD)/_wc\
+	$(BUILD)/_zombie\
+
+$(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS)
+	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS)
+
+-include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d
+
+all: $(BUILD)/poc.img $(BUILD)/fs.img
+
 clean:
-	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso initrd.tar initrd_root disk.img disk_root
+	rm -rf $(BUILD)
+	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg .gdbinit
 
-# Full clean, including the fetched limine/, mlibc/, busybox/
-# directories and the installed sysroots built from them.
-.PHONY: distclean
-distclean: clean
-	rm -rf limine mlibc busybox $(MLIBC_SYSROOT) $(MLIBC_SYSROOT_SHARED)
+# make a printout
+FILES = $(shell grep -v '^\#' tools/runoff.list)
+PRINT = tools/runoff.list tools/runoff.spec README docs/toc.hdr docs/toc.ftr $(FILES)
+
+poc.pdf: $(PRINT)
+	./tools/runoff
+	ls -l poc.pdf
+
+print: poc.pdf
+
+# run in emulators
+
+bochs : $(BUILD)/fs.img $(BUILD)/poc.img
+	if [ ! -e .bochsrc ]; then ln -s dot-bochsrc .bochsrc; fi
+	bochs -q
+
+# try to generate a unique GDB port
+GDBPORT = $(shell expr `id -u` % 5000 + 25000)
+# QEMU's gdb stub command line changed in 0.11
+QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+	then echo "-gdb tcp::$(GDBPORT)"; \
+	else echo "-s -p $(GDBPORT)"; fi)
+ifndef CPUS
+CPUS := 2
+endif
+QEMUOPTS = -drive file=$(BUILD)/fs.img,index=1,media=disk,format=raw -drive file=$(BUILD)/poc.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+
+qemu: $(BUILD)/fs.img $(BUILD)/poc.img
+	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+
+qemu-memfs: $(BUILD)/pocmemfs.img
+	$(QEMU) -drive file=$(BUILD)/pocmemfs.img,index=0,media=disk,format=raw -smp $(CPUS) -m 256
+
+qemu-nox: $(BUILD)/fs.img $(BUILD)/poc.img
+	$(QEMU) -nographic $(QEMUOPTS)
+
+.gdbinit: .gdbinit.tmpl
+	sed "s/localhost:1234/localhost:$(GDBPORT)/" < $^ > $@
+
+qemu-gdb: $(BUILD)/fs.img $(BUILD)/poc.img .gdbinit
+	@echo "*** Now run 'gdb'." 1>&2
+	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB)
+
+qemu-nox-gdb: $(BUILD)/fs.img $(BUILD)/poc.img .gdbinit
+	@echo "*** Now run 'gdb'." 1>&2
+	$(QEMU) -nographic $(QEMUOPTS) -S $(QEMUGDB)
+
+# CUT HERE
+# prepare dist for students
+# after running make dist, probably want to
+# rename it to rev0 or rev1 or so on and then
+# check in that version.
+
+EXTRA=\
+	mkfs/mkfs.c user/ulib.c include/user.h user/cat.c user/echo.c user/forktest.c user/grep.c user/kill.c\
+	user/ln.c user/ls.c user/mkdir.c user/rm.c user/stressfs.c user/usertests.c user/wc.c user/zombie.c\
+	user/printf.c user/umalloc.c\
+	README dot-bochsrc tools/*.pl docs/toc.* tools/runoff tools/runoff1 tools/runoff.list\
+	.gdbinit.tmpl tools/gdbutil\
+
+dist:
+	rm -rf dist
+	mkdir dist
+	for i in $(FILES); \
+	do \
+		grep -v PAGEBREAK $$i >dist/$$i; \
+	done
+	sed '/CUT HERE/,$$d' Makefile >dist/Makefile
+	echo >dist/tools/runoff.spec
+	cp $(EXTRA) dist
+
+dist-test:
+	rm -rf dist
+	make dist
+	rm -rf dist-test
+	mkdir dist-test
+	cp dist/* dist-test
+	cd dist-test; $(MAKE) print
+	cd dist-test; $(MAKE) bochs || true
+	cd dist-test; $(MAKE) qemu
+
+# update this rule (change rev#) when it is time to
+# make a new revision.
+tar:
+	rm -rf /tmp/poc
+	mkdir -p /tmp/poc
+	cp dist/* dist/.gdbinit.tmpl /tmp/poc
+	(cd /tmp; tar cf - poc) | gzip >poc-rev10.tar.gz  # the next one will be 10 (9/17)
+
+.PHONY: all clean dist-test dist tags print
