@@ -1,3 +1,9 @@
+# The first rule in the file is normally make's default goal, but that's
+# the build/-directory-creation rule below (needed as an order-only
+# prerequisite elsewhere) rather than a real build target - pin the
+# default explicitly so a bare `make` builds the OS image like `make all`.
+.DEFAULT_GOAL := all
+
 OBJS = \
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
@@ -35,17 +41,19 @@ OBJS = \
 # Using native tools (e.g., on X86 Linux)
 #TOOLPREFIX =
 
-# Try to infer the correct TOOLPREFIX if not set
+# Try to infer the correct TOOLPREFIX if not set. i686-elf-* is the
+# prefix used by the Homebrew i686-elf-gcc/i686-elf-binutils packages
+# (the common way to get an i386 ELF cross toolchain on modern macOS).
 ifndef TOOLPREFIX
-TOOLPREFIX := $(shell if i386-jos-elf-objdump -i 2>&1 | grep '^elf32-i386$$' >/dev/null 2>&1; \
-	then echo 'i386-jos-elf-'; \
+TOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
+	then echo 'i686-elf-'; \
 	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
 	then echo ''; \
 	else echo "***" 1>&2; \
 	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils." 1>&2; \
-	echo "*** Is the directory with i386-jos-elf-gcc in your PATH?" 1>&2; \
+	echo "*** Is the directory with i686-elf-gcc in your PATH?" 1>&2; \
 	echo "*** If your i386-*-elf toolchain is installed with a command" 1>&2; \
-	echo "*** prefix other than 'i386-jos-elf-', set your TOOLPREFIX" 1>&2; \
+	echo "*** prefix other than 'i686-elf-', set your TOOLPREFIX" 1>&2; \
 	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
 	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
 	echo "***" 1>&2; exit 1; fi)
@@ -270,6 +278,9 @@ $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS)
 
 all: $(BUILD)/poc.img $(BUILD)/fs.img
 
+run: all
+	$(QEMU) $(QEMUOPTS) </dev/null >/dev/null 2>&1 &
+
 clean:
 	rm -rf $(BUILD)
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg .gdbinit
@@ -301,6 +312,12 @@ CPUS := 2
 endif
 QEMUOPTS = -drive file=$(BUILD)/fs.img,index=1,media=disk,format=raw -drive file=$(BUILD)/poc.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
+# `run` launches QEMU detached from this shell's stdio (</dev/null so
+# it can't be suspended by SIGTTIN when backgrounded, output silenced)
+# so it opens its own GUI window and the terminal is free again
+# immediately, instead of blocking until QEMU exits the way `qemu`
+# below does. Serial console and monitor fall back to virtual-console
+# tabs inside that window (Ctrl-Alt-2/3).
 qemu: $(BUILD)/fs.img $(BUILD)/poc.img
 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
 
@@ -363,4 +380,4 @@ tar:
 	cp dist/* dist/.gdbinit.tmpl /tmp/poc
 	(cd /tmp; tar cf - poc) | gzip >poc-rev10.tar.gz  # the next one will be 10 (9/17)
 
-.PHONY: all clean dist-test dist tags print
+.PHONY: all run clean dist-test dist tags print
