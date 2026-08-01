@@ -25,7 +25,7 @@
 
 // Fetch the int at addr from the current process.
 int
-fetchint(uint addr, int *ip)
+fetchint(uintp addr, int *ip)
 {
   struct proc *curproc = myproc();
 
@@ -39,7 +39,7 @@ fetchint(uint addr, int *ip)
 // Doesn't actually copy the string - just sets *pp to point at it.
 // Returns length of string, not including nul.
 int
-fetchstr(uint addr, char **pp)
+fetchstr(uintp addr, char **pp)
 {
   char *s, *ep;
   struct proc *curproc = myproc();
@@ -55,12 +55,42 @@ fetchstr(uint addr, char **pp)
   return -1;
 }
 
+#ifdef X64
+// Fetch the nth system call argument. User code makes a system call
+// with INT T_SYSCALL, syscall number in %eax, and - since usys64.asm's
+// stubs are ordinary C-callable functions - arguments already in
+// %rdi/%rsi/%rdx/%rcx/%r8/%r9 per the SysV AMD64 calling convention
+// (the same registers alltraps in trapasm64.asm saved into the
+// trapframe), rather than on the user stack the way the 32-bit build's
+// argint reads them. int (not %rcx) is safe to use here as arg 4
+// because this is an INT-based syscall, not the `syscall` instruction -
+// only the latter clobbers %rcx/%r11 on entry.
+int
+argint(int n, int *ip)
+{
+  struct trapframe *tf = myproc()->tf;
+  uintp v;
+
+  switch(n){
+  case 0: v = tf->rdi; break;
+  case 1: v = tf->rsi; break;
+  case 2: v = tf->rdx; break;
+  case 3: v = tf->rcx; break;
+  case 4: v = tf->r8;  break;
+  case 5: v = tf->r9;  break;
+  default: return -1;
+  }
+  *ip = (int)v;
+  return 0;
+}
+#else
 // Fetch the nth 32-bit system call argument.
 int
 argint(int n, int *ip)
 {
   return fetchint((myproc()->tf->esp) + 4 + 4*n, ip);
 }
+#endif
 
 // Fetch the nth word-sized system call argument as a pointer
 // to a block of memory of size bytes.  Check that the pointer
@@ -73,9 +103,9 @@ argptr(int n, char **pp, int size)
  
   if(argint(n, &i) < 0)
     return -1;
-  if(size < 0 || (uint)i >= curproc->sz || (uint)i+size > curproc->sz)
+  if(size < 0 || (uintp)i >= curproc->sz || (uintp)i+size > curproc->sz)
     return -1;
-  *pp = (char*)i;
+  *pp = (char*)(uintp)i;
   return 0;
 }
 

@@ -34,21 +34,26 @@ bootmain(void)
   // Load each program segment (ignores ph flags).
   // ph->paddr, not ph->vaddr: the boot loader runs with paging off, so
   // it can only write to physical addresses, and the kernel's linker
-  // script (kernel/kernel.ld) arranges for paddr to be exactly the low
-  // physical load address the kernel's entry code (kernel/entry.asm)
-  // expects to find itself at before it enables paging.
-  ph = (struct proghdr*)((uchar*)elf + elf->phoff);
+  // script (kernel/kernel.ld / kernel/kernel64.ld) arranges for paddr to
+  // be exactly the low physical load address the kernel's entry code
+  // (kernel/entry.asm / kernel/entry64.asm) expects to find itself at
+  // before it enables paging - and, on the 64-bit build, before it's
+  // even reached long mode, so that address is always a plain 32-bit
+  // physical address (< 4GB) despite proghdr's fields being 64-bit wide
+  // there; the (uint) casts below make that truncation explicit rather
+  // than relying on an implicit one.
+  ph = (struct proghdr*)((uchar*)elf + (uint)elf->phoff);
   eph = ph + elf->phnum;
   for(; ph < eph; ph++){
-    pa = (uchar*)ph->paddr;
-    readseg(pa, ph->filesz, ph->off);
+    pa = (uchar*)(uint)ph->paddr;
+    readseg(pa, (uint)ph->filesz, (uint)ph->off);
     if(ph->memsz > ph->filesz)
-      stosb(pa + ph->filesz, 0, ph->memsz - ph->filesz);
+      stosb(pa + (uint)ph->filesz, 0, (uint)(ph->memsz - ph->filesz));
   }
 
   // Call the entry point from the ELF header.
   // Does not return!
-  entry = (void(*)(void))(elf->entry);
+  entry = (void(*)(void))(uint)elf->entry;
   entry();
 }
 

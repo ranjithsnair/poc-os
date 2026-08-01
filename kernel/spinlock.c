@@ -90,17 +90,17 @@ release(struct spinlock *lk)
 // it sit that function's saved %ebp and, above that, its caller's return
 // address, which is where the walk starts.
 void
-getcallerpcs(void *v, uint pcs[])
+getcallerpcs(void *v, uintp pcs[])
 {
-  uint *ebp;
+  uintp *ebp;
   int i;
 
-  ebp = (uint*)v - 2;
+  ebp = (uintp*)v - 2;
   for(i = 0; i < 10; i++){
-    if(ebp == 0 || ebp < (uint*)KERNBASE || ebp == (uint*)0xffffffff)
+    if(ebp == 0 || ebp < (uintp*)KERNBASE || ebp == (uintp*)-1)
       break;
-    pcs[i] = ebp[1];     // saved %eip
-    ebp = (uint*)ebp[0]; // saved %ebp
+    pcs[i] = ebp[1];       // saved %eip/%rip
+    ebp = (uintp*)ebp[0];  // saved %ebp/%rbp
   }
   for(; i < 10; i++)
     pcs[i] = 0;

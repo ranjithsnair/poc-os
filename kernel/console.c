@@ -2,6 +2,7 @@
 // Input is from the keyboard or serial port.
 // Output is written to the screen and serial port.
 
+#include <stdarg.h>
 #include "types.h"
 #include "defs.h"
 #include "param.h"
@@ -24,18 +25,24 @@ static struct {
   int locking;
 } cons;
 
+// xx is always the full pointer-width value here - %d/%x callers pass a
+// plain int/uint (cprintf below reads it as such and it widens on the
+// way in), %p callers pass a uintp directly - so this one implementation
+// covers both without needing to know which.
 static void
-printint(int xx, int base, int sign)
+printint(uintp xx, int base, int sign)
 {
   static char digits[] = "0123456789abcdef";
-  char buf[16];
+  char buf[24];
   int i;
-  uint x;
+  uintp x;
 
-  if(sign && (sign = xx < 0))
-    x = -xx;
-  else
+  if(sign && (long)xx < 0){
+    x = -(long)xx;
+  } else {
     x = xx;
+    sign = 0;
+  }
 
   i = 0;
   do{
@@ -51,11 +58,17 @@ printint(int xx, int base, int sign)
 //PAGEBREAK: 50
 
 // Print to the console. only understands %d, %x, %p, %s.
+//
+// %d and %x read a plain int/uint (4 bytes, matching ordinary integer
+// arguments); %p reads a full uintp (pointer-width) - the two must be
+// kept distinct on the 64-bit build, where they're different sizes, so
+// every %p call site needs to pass a pointer-width value (an address, a
+// pde_t, etc.), not a plain int.
 void
 cprintf(char *fmt, ...)
 {
+  va_list ap;
   int i, c, locking;
-  uint *argp;
   char *s;
 
   locking = cons.locking;
@@ -65,7 +78,7 @@ cprintf(char *fmt, ...)
   if (fmt == 0)
     panic("null fmt");
 
-  argp = (uint*)(void*)(&fmt + 1);
+  va_start(ap, fmt);
   for(i = 0; (c = fmt[i] & 0xff) != 0; i++){
     if(c != '%'){
       consputc(c);
@@ -76,14 +89,16 @@ cprintf(char *fmt, ...)
       break;
     switch(c){
     case 'd':
-      printint(*argp++, 10, 1);
+      printint(va_arg(ap, int), 10, 1);
       break;
     case 'x':
+      printint(va_arg(ap, uint), 16, 0);
+      break;
     case 'p':
-      printint(*argp++, 16, 0);
+      printint(va_arg(ap, uintp), 16, 0);
       break;
     case 's':
-      if((s = (char*)*argp++) == 0)
+      if((s = va_arg(ap, char*)) == 0)
         s = "(null)";
       for(; *s; s++)
         consputc(*s);
@@ -98,6 +113,7 @@ cprintf(char *fmt, ...)
       break;
     }
   }
+  va_end(ap);
 
   if(locking)
     release(&cons.lock);
@@ -107,7 +123,7 @@ void
 panic(char *s)
 {
   int i;
-  uint pcs[10];
+  uintp pcs[10];
 
   cli();
   cons.locking = 0;

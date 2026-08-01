@@ -4,6 +4,15 @@
 # default explicitly so a bare `make` builds the OS image like `make all`.
 .DEFAULT_GOAL := all
 
+# ARCH selects the target: 64 (default) builds a native x86-64 long-mode
+# kernel; 32 builds the original x86 protected-mode kernel. Most C sources
+# are shared and branch on the X64 preprocessor macro (see CPPFLAGS below);
+# a handful of files that differ in kind rather than in a few constants -
+# entry, context switch, trap entry/return, the raw instruction-wrapper
+# asm, and the linker script - have distinct 32-bit and 64-bit versions,
+# selected below via ENTRYOBJ/SWTCHOBJ/TRAPASMOBJ/X86ASMOBJ/KERNELLD.
+ARCH ?= 64
+
 OBJS = \
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
@@ -24,16 +33,30 @@ OBJS = \
 	$(OBJDIR)/kernel/sleeplock.o\
 	$(OBJDIR)/kernel/spinlock.o\
 	$(OBJDIR)/kernel/string.o\
-	$(OBJDIR)/kernel/swtch.o\
 	$(OBJDIR)/kernel/syscall.o\
 	$(OBJDIR)/kernel/sysfile.o\
 	$(OBJDIR)/kernel/sysproc.o\
-	$(OBJDIR)/kernel/trapasm.o\
 	$(OBJDIR)/kernel/trap.o\
 	$(OBJDIR)/kernel/uart.o\
 	$(OBJDIR)/kernel/vectors.o\
 	$(OBJDIR)/kernel/vm.o\
-	$(OBJDIR)/kernel/x86.o\
+
+ifeq ($(ARCH),64)
+ENTRYOBJ = $(OBJDIR)/kernel/entry64.o
+SWTCHOBJ = $(OBJDIR)/kernel/swtch64.o
+TRAPASMOBJ = $(OBJDIR)/kernel/trapasm64.o
+X86ASMOBJ = $(OBJDIR)/kernel/x86_64.o
+KERNELLD = kernel/kernel64.ld
+INITCODEOBJ = $(OBJDIR)/user/initcode64.o
+else
+ENTRYOBJ = $(OBJDIR)/kernel/entry.o
+SWTCHOBJ = $(OBJDIR)/kernel/swtch.o
+TRAPASMOBJ = $(OBJDIR)/kernel/trapasm.o
+X86ASMOBJ = $(OBJDIR)/kernel/x86.o
+KERNELLD = kernel/kernel.ld
+INITCODEOBJ = $(OBJDIR)/user/initcode.o
+endif
+OBJS += $(SWTCHOBJ) $(TRAPASMOBJ) $(X86ASMOBJ)
 
 # Cross-compiling (e.g., on Mac OS X)
 # TOOLPREFIX = i386-jos-elf
@@ -41,10 +64,25 @@ OBJS = \
 # Using native tools (e.g., on X86 Linux)
 #TOOLPREFIX =
 
-# Try to infer the correct TOOLPREFIX if not set. i686-elf-* is the
-# prefix used by the Homebrew i686-elf-gcc/i686-elf-binutils packages
-# (the common way to get an i386 ELF cross toolchain on modern macOS).
+# Try to infer the correct TOOLPREFIX if not set. i686-elf-*/x86_64-elf-*
+# are the prefixes used by the Homebrew i686-elf-gcc/x86_64-elf-gcc
+# packages (the common way to get an i386 or x86-64 ELF cross toolchain
+# on modern macOS).
 ifndef TOOLPREFIX
+ifeq ($(ARCH),64)
+TOOLPREFIX := $(shell if x86_64-elf-objdump -i 2>&1 | grep 'elf64-x86-64' >/dev/null 2>&1; \
+	then echo 'x86_64-elf-'; \
+	elif objdump -i 2>&1 | grep 'elf64-x86-64' >/dev/null 2>&1; \
+	then echo ''; \
+	else echo "***" 1>&2; \
+	echo "*** Error: Couldn't find an x86_64-*-elf version of GCC/binutils." 1>&2; \
+	echo "*** Is the directory with x86_64-elf-gcc in your PATH?" 1>&2; \
+	echo "*** If your x86_64-*-elf toolchain is installed with a command" 1>&2; \
+	echo "*** prefix other than 'x86_64-elf-', set your TOOLPREFIX" 1>&2; \
+	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
+	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
+	echo "***" 1>&2; exit 1; fi)
+else
 TOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
 	then echo 'i686-elf-'; \
 	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
@@ -56,6 +94,24 @@ TOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null
 	echo "*** prefix other than 'i686-elf-', set your TOOLPREFIX" 1>&2; \
 	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
 	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
+	echo "***" 1>&2; exit 1; fi)
+endif
+endif
+
+# The boot sector (boot/bootasm.asm, boot/bootmain.c) and the AP trampoline
+# (kernel/entryother.asm, until it grows a 64-bit sibling) always run in
+# 16/32-bit real/protected mode - the CPU doesn't reach long mode until
+# well after they've handed off control (see kernel/entry64.asm) - so
+# they're always built with a real 32-bit toolchain, independent of ARCH.
+ifndef BOOTTOOLPREFIX
+BOOTTOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
+	then echo 'i686-elf-'; \
+	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
+	then echo ''; \
+	else echo "***" 1>&2; \
+	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils" 1>&2; \
+	echo "*** (needed for the boot sector even when ARCH=64)." 1>&2; \
+	echo "*** Is the directory with i686-elf-gcc in your PATH?" 1>&2; \
 	echo "***" 1>&2; exit 1; fi)
 endif
 
@@ -86,21 +142,80 @@ LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
+BOOTCC = $(BOOTTOOLPREFIX)gcc
+BOOTLD = $(BOOTTOOLPREFIX)ld
+BOOTOBJCOPY = $(BOOTTOOLPREFIX)objcopy
+BOOTOBJDUMP = $(BOOTTOOLPREFIX)objdump
+
 # NASM assembles all the .asm (Intel-syntax) sources. The shared C headers
 # in include/ (constants, struct layouts) are still expanded into them with
 # the C preprocessor before NASM ever sees the file - see the %.o: %.asm
-# rules below.
+# rules below. BOOTNASMFLAGS is for the always-32-bit boot sector/AP
+# trampoline (see BOOTTOOLPREFIX above); NASMFLAGS follows ARCH and is used
+# for every other hand-written .asm source.
 NASM = nasm
+BOOTNASMFLAGS = -f elf32 -g
+ifeq ($(ARCH),64)
+NASMFLAGS = -f elf64 -g
+else
 NASMFLAGS = -f elf32 -g
+endif
 
 # All headers live in include/, shared by boot/, kernel/, user/ and mkfs/.
+# -DX64 lets shared headers (types.h, mmu.h, memlayout.h, x86.h, proc.h,
+# elf.h) branch to their 64-bit struct/constant definitions.
 CPPFLAGS = -Iinclude
+ifeq ($(ARCH),64)
+CPPFLAGS += -DX64
+endif
 
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
+ifeq ($(ARCH),64)
+CFLAGS += -m64
+# Nothing on the 64-bit build ever sets CR0/CR4 to enable SSE (no build
+# here does FPU/SSE state management for kernel *or* user code, the same
+# way the 32-bit build doesn't) - but x86-64 architecturally has SSE2 as
+# a baseline, so unlike -m32, GCC will happily autovectorize an ordinary
+# scalar loop into SSE instructions at -O2 with no other prompting.
+# Executing one with SSE disabled raises #UD/#NM; this early in boot,
+# with no IDT installed yet, that's an instant triple fault - so this
+# has to rule out vector codegen entirely, for both kernel and user
+# code, rather than being a KCFLAGS-only (kernel-only) concern.
+CFLAGS += -mgeneral-regs-only
+else
+CFLAGS += -m32
+endif
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+
+# boot/*.c and kernel/entryother.asm compile with the fixed-32-bit
+# BOOTCC/BOOTNASMFLAGS above, but still want the same warning/codegen
+# posture as CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS
+# directly (whose -m64/-m32 tracks ARCH, not "always 32-bit").
+BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
+BOOTCFLAGS += $(shell $(BOOTCC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+
+# KCFLAGS adds flags needed only for kernel C code proper (not the boot
+# sector, not user programs) on the 64-bit build: -mcmodel=kernel because
+# KERNBASE (0xFFFFFFFF80000000, see memlayout.h) is in the top -2GB, which
+# is exactly the address range GCC's "kernel" code model - as opposed to
+# the default "small" model, which assumes symbols live in the *low* 2GB -
+# is for; -mno-red-zone because an interrupt can land on the kernel stack
+# at any instruction boundary and push a trap frame below the current
+# %rsp, which would silently corrupt a leaf function's red zone.
+ifeq ($(ARCH),64)
+KCFLAGS = -mcmodel=kernel -mno-red-zone
+else
+KCFLAGS =
+endif
+
 # FreeBSD ld wants ``elf_i386_fbsd''
+ifeq ($(ARCH),64)
+LDFLAGS += -m $(shell $(LD) -V | grep elf_x86_64 2>/dev/null | head -n 1)
+else
 LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
+endif
+BOOTLDFLAGS += -m $(shell $(BOOTLD) -V | grep elf_i386 2>/dev/null | head -n 1)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
@@ -108,6 +223,12 @@ CFLAGS += -fno-pie -no-pie
 endif
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
 CFLAGS += -fno-pie -nopie
+endif
+ifneq ($(shell $(BOOTCC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+BOOTCFLAGS += -fno-pie -no-pie
+endif
+ifneq ($(shell $(BOOTCC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
+BOOTCFLAGS += -fno-pie -nopie
 endif
 
 # Every generated file lives under build/: final binaries, disk images,
@@ -125,18 +246,20 @@ endif
 # that's-the-point) source, never build output; `make clean` is just
 # `rm -rf build`.
 BUILD = build
-OBJDIR = $(BUILD)/obj
+OBJDIR = $(BUILD)/obj$(ARCH)
 
 $(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user:
 	mkdir -p $@
 
-# Compile a C source into build/obj/<dir>/<name>.o, keeping the same
-# boot/kernel/user split the sources themselves use.
+# Compile a C source into build/obj<ARCH>/<dir>/<name>.o, keeping the same
+# boot/kernel/user split the sources themselves use. boot/ always uses the
+# fixed-32-bit BOOTCC/BOOTCFLAGS (see BOOTTOOLPREFIX above); kernel/ adds
+# KCFLAGS on top of the ARCH-selected CFLAGS.
 $(OBJDIR)/boot/%.o: boot/%.c | $(OBJDIR)/boot
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(BOOTCC) $(BOOTCFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/kernel/%.o: kernel/%.c | $(OBJDIR)/kernel
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(KCFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/user/%.o: user/%.c | $(OBJDIR)/user
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
@@ -145,12 +268,20 @@ $(OBJDIR)/user/%.o: user/%.c | $(OBJDIR)/user
 # include/ with the C preprocessor (cpp doesn't care about NASM vs GAS
 # mnemonics, it just does text substitution), then hand the result to nasm.
 $(OBJDIR)/boot/%.o: boot/%.asm | $(OBJDIR)/boot
-	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
-	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
+	$(BOOTCC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
 
 $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
+
+# kernel/entryother.asm is the one kernel/*.asm source that (until it grows
+# a 64-bit sibling in a later phase) always stays 16/32-bit real/protected
+# mode, like boot/*.asm - this explicit rule overrides the generic
+# ARCH-following pattern above for this file only.
+$(OBJDIR)/kernel/entryother.o: kernel/entryother.asm | $(OBJDIR)/kernel
+	$(BOOTCC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
 
 $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
@@ -168,17 +299,17 @@ $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 
 # bootmain.c needs its own rule rather than the generic $(OBJDIR)/boot/%.o
 # pattern above: the boot sector has a hard 510-byte budget (512 minus
-# the 2-byte 0x55AA signature), and -O2 (the default in $(CFLAGS)) alone
+# the 2-byte 0x55AA signature), and -O2 (the default in $(BOOTCFLAGS)) alone
 # generates code too large to fit, so this keeps the lighter -O the
 # original boot Makefile always used here, along with -nostdinc since
 # the boot loader is freestanding.
 $(OBJDIR)/boot/bootmain.o: boot/bootmain.c | $(OBJDIR)/boot
-	$(CC) $(CFLAGS) $(CPPFLAGS) -fno-pic -O -nostdinc -c -o $@ $<
+	$(BOOTCC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -O -nostdinc -c -o $@ $<
 
 $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock.o $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o
-	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
-	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
+	$(BOOTLD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock.o $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o
+	$(BOOTOBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
+	$(BOOTOBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
 
 # entryother and initcode are raw binary blobs the kernel embeds with
@@ -187,19 +318,22 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 # so unlike everything else in $(OBJS)/ULIB they need their own two-step
 # ld+objcopy recipe instead of just landing in a link line. They're
 # final build products, not intermediates, so - like bootblock, kernel,
-# and mkfs - they live directly in build/, not build/obj/.
+# and mkfs - they live directly in build/, not build/obj<ARCH>/. entryother
+# is always the fixed-32-bit trampoline (BOOTLD etc, see entryother.o's
+# rule above); initcode is $(INITCODEOBJ), which already matches ARCH, so
+# it links with the ARCH-selected LD like everything else in $(OBJS).
 $(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
-	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
-	$(OBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
+	$(BOOTLD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
+	$(BOOTOBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
+	$(BOOTOBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
 
-$(BUILD)/initcode: $(OBJDIR)/user/initcode.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o $(OBJDIR)/user/initcode.out $(OBJDIR)/user/initcode.o
+$(BUILD)/initcode: $(INITCODEOBJ) | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o $(OBJDIR)/user/initcode.out $(INITCODEOBJ)
 	$(OBJCOPY) -S -O binary $(OBJDIR)/user/initcode.out $(BUILD)/initcode
-	$(OBJDUMP) -S $(OBJDIR)/user/initcode.o > $(BUILD)/initcode.dis
+	$(OBJDUMP) -S $(INITCODEOBJ) > $(BUILD)/initcode.dis
 
-$(BUILD)/kernel: $(OBJS) $(OBJDIR)/kernel/entry.o $(BUILD)/entryother $(BUILD)/initcode kernel/kernel.ld | $(BUILD)
-	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $(BUILD)/kernel $(OBJDIR)/kernel/entry.o $(OBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother
+$(BUILD)/kernel: $(OBJS) $(ENTRYOBJ) $(BUILD)/entryother $(BUILD)/initcode $(KERNELLD) | $(BUILD)
+	$(LD) $(LDFLAGS) -T $(KERNELLD) -o $(BUILD)/kernel $(ENTRYOBJ) $(OBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother
 	$(OBJDUMP) -S $(BUILD)/kernel > $(BUILD)/kernel.dis
 	$(OBJDUMP) -t $(BUILD)/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/kernel.sym
 
@@ -210,8 +344,8 @@ $(BUILD)/kernel: $(OBJS) $(OBJDIR)/kernel/entry.o $(BUILD)/entryother $(BUILD)/i
 # great for testing the kernel on real hardware without
 # needing a scratch disk.
 MEMFSOBJS = $(filter-out $(OBJDIR)/kernel/ide.o,$(OBJS)) $(OBJDIR)/kernel/memide.o
-$(BUILD)/kernelmemfs: $(MEMFSOBJS) $(OBJDIR)/kernel/entry.o $(BUILD)/entryother $(BUILD)/initcode kernel/kernel.ld $(BUILD)/fs.img | $(BUILD)
-	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $(BUILD)/kernelmemfs $(OBJDIR)/kernel/entry.o $(MEMFSOBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother $(BUILD)/fs.img
+$(BUILD)/kernelmemfs: $(MEMFSOBJS) $(ENTRYOBJ) $(BUILD)/entryother $(BUILD)/initcode $(KERNELLD) $(BUILD)/fs.img | $(BUILD)
+	$(LD) $(LDFLAGS) -T $(KERNELLD) -o $(BUILD)/kernelmemfs $(ENTRYOBJ) $(MEMFSOBJS) -b binary $(BUILD)/initcode $(BUILD)/entryother $(BUILD)/fs.img
 	$(OBJDUMP) -S $(BUILD)/kernelmemfs > $(BUILD)/kernelmemfs.dis
 	$(OBJDUMP) -t $(BUILD)/kernelmemfs | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/kernelmemfs.sym
 
@@ -224,24 +358,37 @@ tags:
 # pattern above, since vectors.asm's "source" is itself a build product,
 # not a file that exists under kernel/.
 $(OBJDIR)/kernel/vectors.asm: kernel/vectors.pl | $(OBJDIR)/kernel
-	./kernel/vectors.pl > $(OBJDIR)/kernel/vectors.asm
+	./kernel/vectors.pl $(ARCH) > $(OBJDIR)/kernel/vectors.asm
 
 $(OBJDIR)/kernel/vectors.o: $(OBJDIR)/kernel/vectors.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(OBJDIR)/kernel/vectors.i $(OBJDIR)/kernel/vectors.asm
 	$(NASM) $(NASMFLAGS) -o $@ $(OBJDIR)/kernel/vectors.i
 
-ULIB = $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(OBJDIR)/kernel/x86.o
+USYSOBJ = $(if $(filter 64,$(ARCH)),$(OBJDIR)/user/usys64.o,$(OBJDIR)/user/usys.o)
+ULIB = $(OBJDIR)/user/ulib.o $(USYSOBJ) $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(X86ASMOBJ)
 
+# Debug info (-ggdb, in CFLAGS) is generated for every user binary, same
+# as the kernel, but it's dead weight once mkfs packages the binary into
+# the filesystem image: nothing in poc reads DWARF at runtime, and the
+# generic $(OBJDUMP) -S/-t steps just above already captured everything
+# it's useful for (source-interleaved disassembly, a symbol table) into
+# build/$*.dis/.sym, which stay on the host, not in the image. Stripping
+# it here (after those, so they still see it) routinely more than
+# halves the linked binary's size - the difference between fitting
+# under MAXFILE (include/fs.h, ~70KB - see the UPROGS comment) and not,
+# for a binary like usertests with enough test code to approach it.
 $(BUILD)/_%: $(OBJDIR)/user/%.o $(ULIB) | $(BUILD)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
 	$(OBJDUMP) -S $@ > $(BUILD)/$*.dis
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/$*.sym
+	$(OBJCOPY) --strip-debug $@
 
 $(BUILD)/_forktest: $(OBJDIR)/user/forktest.o $(ULIB) | $(BUILD)
 	# forktest has less library code linked in - needs to be small
 	# in order to be able to max out the proc table.
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $(BUILD)/_forktest $(OBJDIR)/user/forktest.o $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/kernel/x86.o
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $(BUILD)/_forktest $(OBJDIR)/user/forktest.o $(OBJDIR)/user/ulib.o $(USYSOBJ) $(X86ASMOBJ)
 	$(OBJDUMP) -S $(BUILD)/_forktest > $(BUILD)/forktest.dis
+	$(OBJCOPY) --strip-debug $(BUILD)/_forktest
 
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while

@@ -125,13 +125,13 @@ found:
   // below it) is what pops next - landing us in trapasm.asm's trapret,
   // which restores the trap frame set up just above and irets into user
   // space at p->tf->eip.
-  sp -= 4;
-  *(uint*)sp = (uint)trapret;
+  sp -= sizeof(uintp);
+  *(uintp*)sp = (uintp)trapret;
 
   sp -= sizeof *p->context;
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
-  p->context->eip = (uint)forkret;
+  p->context->eip = (uintp)forkret;
 
   return p;
 }
@@ -151,13 +151,20 @@ userinit(void)
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
-  inituvm(p->pgdir, _binary_build_initcode_start, (int)_binary_build_initcode_size);
+  inituvm(p->pgdir, _binary_build_initcode_start, (int)(uintp)_binary_build_initcode_size);
   p->sz = PGSIZE;
   memset(p->tf, 0, sizeof(*p->tf));
   p->tf->cs = (SEG_UCODE << 3) | DPL_USER;
+#ifdef X64
+  // No ds/es on the 64-bit build's trapframe (see the struct comment
+  // in x86.h) - segmentation is flat in long mode, so there's nothing
+  // for them to do; ss is still real hardware state, so it's still set.
+  p->tf->ss = (SEG_UDATA << 3) | DPL_USER;
+#else
   p->tf->ds = (SEG_UDATA << 3) | DPL_USER;
   p->tf->es = p->tf->ds;
   p->tf->ss = p->tf->ds;
+#endif
   p->tf->eflags = FL_IF;
   p->tf->esp = PGSIZE;
   p->tf->eip = 0;  // beginning of initcode.asm
@@ -537,7 +544,7 @@ procdump(void)
   int i;
   struct proc *p;
   char *state;
-  uint pc[10];
+  uintp pc[10];
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
@@ -548,7 +555,11 @@ procdump(void)
       state = "???";
     cprintf("%d %s %s", p->pid, state, p->name);
     if(p->state == SLEEPING){
-      getcallerpcs((uint*)p->context->ebp+2, pc);
+#ifdef X64
+      getcallerpcs((uintp*)p->context->rbp+2, pc);
+#else
+      getcallerpcs((uintp*)p->context->ebp+2, pc);
+#endif
       for(i=0; i<10 && pc[i] != 0; i++)
         cprintf(" %p", pc[i]);
     }

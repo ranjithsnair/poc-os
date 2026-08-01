@@ -24,7 +24,7 @@ void
 ideinit(void)
 {
   memdisk = _binary_build_fs_img_start;
-  disksize = (uint)_binary_build_fs_img_size/BSIZE;
+  disksize = (uint)(uintp)_binary_build_fs_img_size/BSIZE;
 }
 
 // Interrupt handler.

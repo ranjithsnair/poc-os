@@ -11,7 +11,7 @@ memset(void *dst, int c, uint n)
   // a word (stosl, kernel/x86.asm) at a time instead of a byte (stosb)
   // at a time - four times fewer iterations of the underlying `rep`
   // instruction for the common case (page-sized, page-aligned buffers).
-  if ((int)dst%4 == 0 && n%4 == 0){
+  if ((uintp)dst%4 == 0 && n%4 == 0){
     c &= 0xFF;
     stosl(dst, (c<<24)|(c<<16)|(c<<8)|c, n/4);
   } else
