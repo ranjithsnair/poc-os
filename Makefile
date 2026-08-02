@@ -58,101 +58,27 @@ INITCODEOBJ = $(OBJDIR)/user/initcode.o
 endif
 OBJS += $(SWTCHOBJ) $(TRAPASMOBJ) $(X86ASMOBJ)
 
-# Cross-compiling (e.g., on Mac OS X)
-# TOOLPREFIX = i386-jos-elf
-
-# Using native tools (e.g., on X86 Linux)
-#TOOLPREFIX =
-
-# Try to infer the correct TOOLPREFIX if not set. i686-elf-*/x86_64-elf-*
-# are the prefixes used by the Homebrew i686-elf-gcc/x86_64-elf-gcc
-# packages (the common way to get an i386 or x86-64 ELF cross toolchain
-# on modern macOS).
-ifndef TOOLPREFIX
-ifeq ($(ARCH),64)
-TOOLPREFIX := $(shell if x86_64-elf-objdump -i 2>&1 | grep 'elf64-x86-64' >/dev/null 2>&1; \
-	then echo 'x86_64-elf-'; \
-	elif objdump -i 2>&1 | grep 'elf64-x86-64' >/dev/null 2>&1; \
-	then echo ''; \
-	else echo "***" 1>&2; \
-	echo "*** Error: Couldn't find an x86_64-*-elf version of GCC/binutils." 1>&2; \
-	echo "*** Is the directory with x86_64-elf-gcc in your PATH?" 1>&2; \
-	echo "*** If your x86_64-*-elf toolchain is installed with a command" 1>&2; \
-	echo "*** prefix other than 'x86_64-elf-', set your TOOLPREFIX" 1>&2; \
-	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
-	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
-	echo "***" 1>&2; exit 1; fi)
-else
-TOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
-	then echo 'i686-elf-'; \
-	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
-	then echo ''; \
-	else echo "***" 1>&2; \
-	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils." 1>&2; \
-	echo "*** Is the directory with i686-elf-gcc in your PATH?" 1>&2; \
-	echo "*** If your i386-*-elf toolchain is installed with a command" 1>&2; \
-	echo "*** prefix other than 'i686-elf-', set your TOOLPREFIX" 1>&2; \
-	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
-	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
-	echo "***" 1>&2; exit 1; fi)
-endif
-endif
-
-# The boot sector (boot/bootasm.asm, boot/bootmain.c) and the AP trampoline
-# (kernel/entryother.asm, until it grows a 64-bit sibling) always run in
-# 16/32-bit real/protected mode - the CPU doesn't reach long mode until
-# well after they've handed off control (see kernel/entry64.asm) - so
-# they're always built with a real 32-bit toolchain, independent of ARCH.
-ifndef BOOTTOOLPREFIX
-BOOTTOOLPREFIX := $(shell if i686-elf-objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
-	then echo 'i686-elf-'; \
-	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
-	then echo ''; \
-	else echo "***" 1>&2; \
-	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils" 1>&2; \
-	echo "*** (needed for the boot sector even when ARCH=64)." 1>&2; \
-	echo "*** Is the directory with i686-elf-gcc in your PATH?" 1>&2; \
-	echo "***" 1>&2; exit 1; fi)
-endif
-
-# If the makefile can't find QEMU, specify its path here
-# QEMU = qemu-system-i386
-
-# Try to infer the correct QEMU
-ifndef QEMU
-QEMU = $(shell if which qemu > /dev/null; \
-	then echo qemu; exit; \
-	elif which qemu-system-i386 > /dev/null; \
-	then echo qemu-system-i386; exit; \
-	elif which qemu-system-x86_64 > /dev/null; \
-	then echo qemu-system-x86_64; exit; \
-	else \
-	qemu=/Applications/Q.app/Contents/MacOS/i386-softmmu.app/Contents/MacOS/i386-softmmu; \
-	if test -x $$qemu; then echo $$qemu; exit; fi; fi; \
-	echo "***" 1>&2; \
-	echo "*** Error: Couldn't find a working QEMU executable." 1>&2; \
-	echo "*** Is the directory containing the qemu binary in your PATH" 1>&2; \
-	echo "*** or have you tried setting the QEMU variable in Makefile?" 1>&2; \
-	echo "***" 1>&2; exit 1)
-endif
-
+# Toolchain: x86_64-elf-gcc/ld (Homebrew, /usr/local/bin) is multilib - it
+# takes -m32 as well as -m64 (see BOOTCFLAGS/CFLAGS below) and its ld
+# supports both the elf_i386 and elf_x86_64 emulations - so this one
+# toolchain builds ARCH=32, ARCH=64, and the always-32-bit boot
+# sector/AP trampoline alike. No separate i686-elf- toolchain needed.
+TOOLPREFIX = x86_64-elf-
 CC = $(TOOLPREFIX)gcc
-AS = $(TOOLPREFIX)gas
 LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
-BOOTCC = $(BOOTTOOLPREFIX)gcc
-BOOTLD = $(BOOTTOOLPREFIX)ld
-BOOTOBJCOPY = $(BOOTTOOLPREFIX)objcopy
-BOOTOBJDUMP = $(BOOTTOOLPREFIX)objdump
+# qemu-system-x86_64's CPU is backwards compatible with 32-bit protected
+# mode, so the same binary boots an ARCH=32 kernel as well as ARCH=64.
+QEMU = qemu-system-x86_64
 
 # NASM assembles all the .asm (Intel-syntax) sources. The shared C headers
 # in include/ (constants, struct layouts) are still expanded into them with
 # the C preprocessor before NASM ever sees the file - see the %.o: %.asm
 # rules below. BOOTNASMFLAGS is for the always-32-bit boot sector/AP
-# trampoline (see BOOTTOOLPREFIX above); NASMFLAGS follows ARCH and is used
-# for every other hand-written .asm source.
+# trampoline; NASMFLAGS follows ARCH and is used for every other
+# hand-written .asm source.
 NASM = nasm
 BOOTNASMFLAGS = -f elf32 -g
 ifeq ($(ARCH),64)
@@ -172,28 +98,31 @@ endif
 CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
 ifeq ($(ARCH),64)
 CFLAGS += -m64
-# Nothing on the 64-bit build ever sets CR0/CR4 to enable SSE (no build
-# here does FPU/SSE state management for kernel *or* user code, the same
-# way the 32-bit build doesn't) - but x86-64 architecturally has SSE2 as
-# a baseline, so unlike -m32, GCC will happily autovectorize an ordinary
-# scalar loop into SSE instructions at -O2 with no other prompting.
-# Executing one with SSE disabled raises #UD/#NM; this early in boot,
-# with no IDT installed yet, that's an instant triple fault - so this
-# has to rule out vector codegen entirely, for both kernel and user
-# code, rather than being a KCFLAGS-only (kernel-only) concern.
-CFLAGS += -mgeneral-regs-only
 else
 CFLAGS += -m32
 endif
-CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
-ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+# Nothing here ever sets CR0/CR4 to enable SSE (no build does FPU/SSE
+# state management for kernel *or* user code) - but x86_64-elf-gcc's
+# codegen baseline includes SSE2 in both -m64 and -m32 mode (its -m32
+# multilib isn't the plain no-SSE i386 baseline a dedicated 32-bit-only
+# cross-gcc would default to), so GCC will happily autovectorize an
+# ordinary scalar loop into SSE instructions at -O2 with no other
+# prompting. Executing one with SSE disabled raises #UD/#NM; this early
+# in boot, with no IDT installed yet, that's an instant triple fault -
+# so -mgeneral-regs-only rules out vector codegen entirely, for both
+# ARCH values and for kernel and user code alike.
+CFLAGS += -mgeneral-regs-only
+# x86_64-elf-gcc supports -fno-stack-protector and -fno-pie/-no-pie in
+# both -m32 and -m64 mode, so these are added unconditionally.
+CFLAGS += -fno-stack-protector -fno-pie -no-pie
 
 # boot/*.c and kernel/entryother.asm compile with the fixed-32-bit
-# BOOTCC/BOOTNASMFLAGS above, but still want the same warning/codegen
-# posture as CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS
-# directly (whose -m64/-m32 tracks ARCH, not "always 32-bit").
-BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
-BOOTCFLAGS += $(shell $(BOOTCC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+# BOOTNASMFLAGS above, but still want the same warning/codegen posture as
+# CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS directly
+# (whose -m64/-m32 tracks ARCH, not "always 32-bit") - including
+# -mgeneral-regs-only, for the same reason: boot code runs in
+# real/protected mode with no SSE state management either.
+BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -mgeneral-regs-only -fno-stack-protector -fno-pie -no-pie
 
 # KCFLAGS adds flags needed only for kernel C code proper (not the boot
 # sector, not user programs) on the 64-bit build: -mcmodel=kernel because
@@ -209,27 +138,15 @@ else
 KCFLAGS =
 endif
 
-# FreeBSD ld wants ``elf_i386_fbsd''
+# ld's emulation name for each target, hardcoded (confirmed via
+# `x86_64-elf-ld -V` on this machine: elf_x86_64 / elf_i386, not the
+# FreeBSD elf_i386_fbsd variant).
 ifeq ($(ARCH),64)
-LDFLAGS += -m $(shell $(LD) -V | grep elf_x86_64 2>/dev/null | head -n 1)
+LDFLAGS += -m elf_x86_64
 else
-LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
+LDFLAGS += -m elf_i386
 endif
-BOOTLDFLAGS += -m $(shell $(BOOTLD) -V | grep elf_i386 2>/dev/null | head -n 1)
-
-# Disable PIE when possible (for Ubuntu 16.10 toolchain)
-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
-CFLAGS += -fno-pie -no-pie
-endif
-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
-CFLAGS += -fno-pie -nopie
-endif
-ifneq ($(shell $(BOOTCC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
-BOOTCFLAGS += -fno-pie -no-pie
-endif
-ifneq ($(shell $(BOOTCC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
-BOOTCFLAGS += -fno-pie -nopie
-endif
+BOOTLDFLAGS += -m elf_i386
 
 # Every generated file lives under build/: final binaries, disk images,
 # and disassembly/symbol dumps directly in build/, and every intermediate
@@ -253,10 +170,10 @@ $(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user:
 
 # Compile a C source into build/obj<ARCH>/<dir>/<name>.o, keeping the same
 # boot/kernel/user split the sources themselves use. boot/ always uses the
-# fixed-32-bit BOOTCC/BOOTCFLAGS (see BOOTTOOLPREFIX above); kernel/ adds
-# KCFLAGS on top of the ARCH-selected CFLAGS.
+# fixed-32-bit BOOTCFLAGS; kernel/ adds KCFLAGS on top of the
+# ARCH-selected CFLAGS.
 $(OBJDIR)/boot/%.o: boot/%.c | $(OBJDIR)/boot
-	$(BOOTCC) $(BOOTCFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/kernel/%.o: kernel/%.c | $(OBJDIR)/kernel
 	$(CC) $(CFLAGS) $(KCFLAGS) $(CPPFLAGS) -c -o $@ $<
@@ -268,7 +185,7 @@ $(OBJDIR)/user/%.o: user/%.c | $(OBJDIR)/user
 # include/ with the C preprocessor (cpp doesn't care about NASM vs GAS
 # mnemonics, it just does text substitution), then hand the result to nasm.
 $(OBJDIR)/boot/%.o: boot/%.asm | $(OBJDIR)/boot
-	$(BOOTCC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
 
 $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
@@ -280,7 +197,7 @@ $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
 # mode, like boot/*.asm - this explicit rule overrides the generic
 # ARCH-following pattern above for this file only.
 $(OBJDIR)/kernel/entryother.o: kernel/entryother.asm | $(OBJDIR)/kernel
-	$(BOOTCC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
+	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
 
 $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
@@ -304,12 +221,12 @@ $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 # original boot Makefile always used here, along with -nostdinc since
 # the boot loader is freestanding.
 $(OBJDIR)/boot/bootmain.o: boot/bootmain.c | $(OBJDIR)/boot
-	$(BOOTCC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -O -nostdinc -c -o $@ $<
+	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -O -nostdinc -c -o $@ $<
 
 $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD)
-	$(BOOTLD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock.o $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o
-	$(BOOTOBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
-	$(BOOTOBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
+	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock.o $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
 
 # entryother and initcode are raw binary blobs the kernel embeds with
@@ -319,13 +236,14 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 # ld+objcopy recipe instead of just landing in a link line. They're
 # final build products, not intermediates, so - like bootblock, kernel,
 # and mkfs - they live directly in build/, not build/obj<ARCH>/. entryother
-# is always the fixed-32-bit trampoline (BOOTLD etc, see entryother.o's
-# rule above); initcode is $(INITCODEOBJ), which already matches ARCH, so
-# it links with the ARCH-selected LD like everything else in $(OBJS).
+# is always the fixed-32-bit trampoline, linked with BOOTLDFLAGS
+# (see entryother.o's rule above); initcode is $(INITCODEOBJ), which
+# already matches ARCH, so it links with the ARCH-selected LDFLAGS like
+# everything else in $(OBJS).
 $(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
-	$(BOOTLD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
-	$(BOOTOBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
-	$(BOOTOBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
+	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
+	$(OBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
 
 $(BUILD)/initcode: $(INITCODEOBJ) | $(BUILD)
 	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o $(OBJDIR)/user/initcode.out $(INITCODEOBJ)
