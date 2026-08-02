@@ -21,7 +21,8 @@ exec(char *path, char **argv)
 {
   char *s, *last;
   int i, off;
-  uint argc, sz, sp, ustack[3+MAXARG+1];
+  uint argc;
+  uintp sz, sp, ustack[3+MAXARG+1];
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
@@ -77,6 +78,51 @@ exec(char *path, char **argv)
   clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
   sp = sz;
 
+#ifdef X64
+  // Push argument strings, then the argv[] pointer array itself -
+  // ustack[3..] becomes that array, once the strings' final addresses
+  // are all known. Unlike the 32-bit build, there's no fake-return-PC/
+  // argc/argv-pointer header to also push here: main() is entered
+  // directly (via iretq, not a call, so nothing reads a return
+  // address off the stack) with argc/argv passed the same way any
+  // SysV AMD64 call would - in %rdi/%rsi, set directly in the
+  // trapframe below - rather than read off the stack.
+  for(argc = 0; argv[argc]; argc++) {
+    if(argc >= MAXARG)
+      goto bad;
+    sp = (sp - (strlen(argv[argc]) + 1)) & ~7;
+    if(copyout(pgdir, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+      goto bad;
+    ustack[argc] = sp;
+  }
+  ustack[argc] = 0;
+
+  // The SysV AMD64 ABI guarantees %rsp % 16 == 0 at a fresh process's
+  // entry point; some compiler-generated code (SSE instructions in
+  // particular) relies on that.
+  sp -= (argc+1) * sizeof(uintp);
+  sp &= ~0xF;
+  if(copyout(pgdir, sp, ustack, (argc+1)*sizeof(uintp)) < 0)
+    goto bad;
+
+  // Save program name for debugging.
+  for(last=s=path; *s; s++)
+    if(*s == '/')
+      last = s+1;
+  safestrcpy(curproc->name, last, sizeof(curproc->name));
+
+  // Commit to the user image.
+  oldpgdir = curproc->pgdir;
+  curproc->pgdir = pgdir;
+  curproc->sz = sz;
+  curproc->tf->eip = elf.entry;  // main
+  curproc->tf->esp = sp;
+  curproc->tf->rdi = argc;
+  curproc->tf->rsi = sp;         // argv
+  switchuvm(curproc);
+  freevm(oldpgdir);
+  return 0;
+#else
   // Push argument strings, prepare rest of stack in ustack.
   // Copies each argv[] string itself onto the new stack (rounding sp
   // down to a 4-byte boundary each time) and records where it landed;
@@ -120,6 +166,7 @@ exec(char *path, char **argv)
   switchuvm(curproc);
   freevm(oldpgdir);
   return 0;
+#endif
 
  bad:
   if(pgdir)

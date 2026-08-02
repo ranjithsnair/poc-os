@@ -14,7 +14,12 @@
 
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
-extern uint vectors[];  // in vectors.asm: array of 256 entry pointers
+// in vectors.asm (32-bit build) / vectors64.asm-generated (64-bit build,
+// see kernel/vectors.pl): array of 256 entry pointers. uintp, not uint,
+// because the 64-bit build's vectors.pl output uses 8-byte (dq) entries
+// to hold full 64-bit vectorN addresses - a uint-typed array here would
+// read both the wrong width and the wrong stride.
+extern uintp vectors[];
 struct spinlock tickslock;
 uint ticks;
 
@@ -84,8 +89,12 @@ trap(struct trapframe *tf)
     break;
   case T_IRQ0 + 7:
   case T_IRQ0 + IRQ_SPURIOUS:
-    cprintf("cpu%d: spurious interrupt at %x:%x\n",
-            cpuid(), tf->cs, tf->eip);
+    // %p (not %x): tf->cs/tf->eip are uintp-width on the 64-bit build
+    // (see x86.h's trapframe) - passing them to a %x, which reads a
+    // plain 4-byte int/uint, would desync cprintf's va_arg reads for
+    // the rest of the format string.
+    cprintf("cpu%d: spurious interrupt at %p:%p\n",
+            cpuid(), (uintp)tf->cs, (uintp)tf->eip);
     lapiceoi();
     break;
 
@@ -93,15 +102,15 @@ trap(struct trapframe *tf)
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){
       // In kernel, it must be our mistake.
-      cprintf("unexpected trap %d from cpu %d eip %x (cr2=0x%x)\n",
-              tf->trapno, cpuid(), tf->eip, rcr2());
+      cprintf("unexpected trap %d from cpu %d eip %p (cr2=0x%p)\n",
+              (int)tf->trapno, cpuid(), (uintp)tf->eip, (uintp)rcr2());
       panic("trap");
     }
     // In user space, assume process misbehaved.
     cprintf("pid %d %s: trap %d err %d on cpu %d "
-            "eip 0x%x addr 0x%x--kill proc\n",
-            myproc()->pid, myproc()->name, tf->trapno,
-            tf->err, cpuid(), tf->eip, rcr2());
+            "eip 0x%p addr 0x%p--kill proc\n",
+            myproc()->pid, myproc()->name, (int)tf->trapno,
+            (int)tf->err, cpuid(), (uintp)tf->eip, (uintp)rcr2());
     myproc()->killed = 1;
   }
 

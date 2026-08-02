@@ -36,13 +36,14 @@ main(void)
   tvinit();        // trap vectors
   binit();         // buffer cache
   fileinit();      // file table
-  ideinit();       // disk 
+  ideinit();       // disk
   startothers();   // start other processors
   kinit2(P2V(4*1024*1024), P2V(PHYSTOP)); // must come after startothers()
   userinit();      // first user process
   mpmain();        // finish this processor's setup
 }
 
+#ifndef X64
 // Other CPUs jump here from entryother.asm.
 static void
 mpenter(void)
@@ -52,6 +53,7 @@ mpenter(void)
   lapicinit();
   mpmain();
 }
+#endif
 
 // Common CPU setup code.
 static void
@@ -63,12 +65,24 @@ mpmain(void)
   scheduler();     // start running processes
 }
 
+#ifndef X64
 pde_t entrypgdir[];  // For entry.asm
+#endif
 
 // Start the non-boot (AP) processors.
 static void
 startothers(void)
 {
+#ifdef X64
+  // SMP bring-up for the 64-bit build isn't implemented yet: APs need
+  // the same real-mode -> protected-mode -> long-mode transition
+  // kernel/entry64.asm does for the boot processor, which
+  // kernel/entryother.asm (written for the 32-bit build, and reused
+  // as-is here - see the Makefile - since it never leaves 32-bit
+  // protected mode) doesn't do. Until a kernel/entryother64.asm exists,
+  // every CPU past cpu0 just stays parked; poc runs single-CPU here.
+  return;
+#else
   extern uchar _binary_build_entryother_start[], _binary_build_entryother_size[];
   uchar *code;
   struct cpu *c;
@@ -99,8 +113,10 @@ startothers(void)
     while(c->started == 0)
       ;
   }
+#endif
 }
 
+#ifndef X64
 // The boot page table used in entry.asm and entryother.asm.
 // Page directories (and page tables) must start on page boundaries,
 // hence the __aligned__ attribute.
@@ -113,6 +129,7 @@ pde_t entrypgdir[NPDENTRIES] = {
   // Map VA's [KERNBASE, KERNBASE+4MB) to PA's [0, 4MB)
   [KERNBASE>>PDXSHIFT] = (0) | PTE_P | PTE_W | PTE_PS,
 };
+#endif
 
 //PAGEBREAK!
 // Blank page.

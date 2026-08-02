@@ -1,8 +1,16 @@
 // See MultiProcessor Specification Version 1.[14]
-
+//
+// These structs describe a table format the BIOS lays out in memory,
+// predating x86-64 - every address field in it is a fixed 4 bytes,
+// always, regardless of what CPU mode is reading it. Declaring them as
+// void*/uint* (rather than plain uint) would make them native-pointer-
+// width instead - 8 bytes on the 64-bit build - which shifts every
+// following field's offset out of sync with what the BIOS actually
+// wrote, the same way include/elf.h's ELF64 structs would break if
+// their genuinely-64-bit fields were declared as anything narrower.
 struct mp {             // floating pointer
   uchar signature[4];           // "_MP_"
-  void *physaddr;               // phys addr of MP config table
+  uint physaddr;                // phys addr of MP config table
   uchar length;                 // 1
   uchar specrev;                // [14]
   uchar checksum;               // all bytes must add up to 0
@@ -17,10 +25,10 @@ struct mpconf {         // configuration table header
   uchar version;                // [14]
   uchar checksum;               // all bytes must add up to 0
   uchar product[20];            // product id
-  uint *oemtable;               // OEM table pointer
+  uint oemtable;                // OEM table pointer
   ushort oemlength;             // OEM table length
   ushort entry;                 // entry count
-  uint *lapicaddr;              // address of local APIC
+  uint lapicaddr;               // address of local APIC
   ushort xlength;               // extended table length
   uchar xchecksum;              // extended table checksum
   uchar reserved;
@@ -42,7 +50,7 @@ struct mpioapic {       // I/O APIC table entry
   uchar apicno;                 // I/O APIC id
   uchar version;                // I/O APIC version
   uchar flags;                  // I/O APIC flags
-  uint *addr;                  // I/O APIC address
+  uint addr;                    // I/O APIC address
 };
 
 // Table entry types

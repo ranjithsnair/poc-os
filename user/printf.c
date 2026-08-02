@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include "types.h"
 #include "stat.h"
 #include "user.h"
@@ -8,18 +9,20 @@ putc(int fd, char c)
   write(fd, &c, 1);
 }
 
+// xx is always the full pointer-width value here - see the comment on
+// printf's %p handling below.
 static void
-printint(int fd, int xx, int base, int sgn)
+printint(int fd, uintp xx, int base, int sgn)
 {
   static char digits[] = "0123456789ABCDEF";
-  char buf[16];
+  char buf[24];
   int i, neg;
-  uint x;
+  uintp x;
 
   neg = 0;
-  if(sgn && xx < 0){
+  if(sgn && (long)xx < 0){
     neg = 1;
-    x = -xx;
+    x = -(long)xx;
   } else {
     x = xx;
   }
@@ -35,22 +38,21 @@ printint(int fd, int xx, int base, int sgn)
     putc(fd, buf[i]);
 }
 
-// Print to the given fd. Only understands %d, %x, %p, %s.
+// Print to the given fd. Only understands %d, %x, %p, %s, %c.
+//
+// %d and %x read a plain int/uint (4 bytes); %p reads a full uintp
+// (pointer-width) - the two must be kept distinct on the 64-bit build,
+// where they're different sizes, so every %p call site needs to pass a
+// pointer-width value, not a plain int.
 void
 printf(int fd, const char *fmt, ...)
 {
+  va_list ap;
   char *s;
   int c, i, state;
-  uint *ap;
 
+  va_start(ap, fmt);
   state = 0;
-  // No <stdarg.h> here: this reaches past fmt on the stack to the
-  // varargs that follow it, relying on the cdecl calling convention
-  // (all arguments pushed by the caller, in order) rather than a
-  // portable va_list. Every %-directive below advances ap by exactly
-  // one word, so it only works for word-sized (or narrower, promoted to
-  // word-sized) arguments - which is all this printf supports anyway.
-  ap = (uint*)(void*)&fmt + 1;
   for(i = 0; fmt[i]; i++){
     c = fmt[i] & 0xff;
     if(state == 0){
@@ -61,14 +63,13 @@ printf(int fd, const char *fmt, ...)
       }
     } else if(state == '%'){
       if(c == 'd'){
-        printint(fd, *ap, 10, 1);
-        ap++;
-      } else if(c == 'x' || c == 'p'){
-        printint(fd, *ap, 16, 0);
-        ap++;
+        printint(fd, va_arg(ap, int), 10, 1);
+      } else if(c == 'x'){
+        printint(fd, va_arg(ap, uint), 16, 0);
+      } else if(c == 'p'){
+        printint(fd, va_arg(ap, uintp), 16, 0);
       } else if(c == 's'){
-        s = (char*)*ap;
-        ap++;
+        s = va_arg(ap, char*);
         if(s == 0)
           s = "(null)";
         while(*s != 0){
@@ -76,8 +77,7 @@ printf(int fd, const char *fmt, ...)
           s++;
         }
       } else if(c == 'c'){
-        putc(fd, *ap);
-        ap++;
+        putc(fd, va_arg(ap, int));
       } else if(c == '%'){
         putc(fd, c);
       } else {
@@ -88,4 +88,5 @@ printf(int fd, const char *fmt, ...)
       state = 0;
     }
   }
+  va_end(ap);
 }

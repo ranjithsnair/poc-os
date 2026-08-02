@@ -22,8 +22,25 @@ extern int ncpu;
 // Contexts are stored at the bottom of the stack they
 // describe; the stack pointer is the address of the context.
 // The layout of the context matches the layout of the stack in swtch.asm
-// at the "Switch stacks" comment. Switch doesn't save eip explicitly,
-// but it is on the stack and allocproc() manipulates it.
+// (kernel/swtch64.asm on the 64-bit build) at the "Switch stacks"
+// comment. Switch doesn't save eip/rip explicitly, but it is on the
+// stack (the return address pushed by the `call swtch`/`call swtch64`
+// that got here) and allocproc() manipulates it.
+#ifdef X64
+// SysV's callee-saved registers: rbx, rbp, r12-r15 (rsp is handled by the
+// stack-pointer swap itself, not saved as a field here). eip (not rip)
+// for the same reason noted on struct trapframe in x86.h: proc.c
+// references context->eip by name regardless of arch.
+struct context {
+  uint64 r15;
+  uint64 r14;
+  uint64 r13;
+  uint64 r12;
+  uint64 rbx;
+  uint64 rbp;
+  uint64 eip;
+};
+#else
 struct context {
   uint edi;
   uint esi;
@@ -31,12 +48,13 @@ struct context {
   uint ebp;
   uint eip;
 };
+#endif
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
 struct proc {
-  uint sz;                     // Size of process memory (bytes)
+  uintp sz;                    // Size of process memory (bytes)
   pde_t* pgdir;                // Page table
   char *kstack;                // Bottom of kernel stack for this process
   enum procstate state;        // Process state

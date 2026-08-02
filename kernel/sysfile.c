@@ -418,7 +418,11 @@ sys_exec(void)
   for(i=0;; i++){
     if(i >= NELEM(argv))
       return -1;
-    if(fetchint(uargv+4*i, (int*)&uarg) < 0)
+    // sizeof(uintp), not a hardcoded 4: a 64-bit user binary's own
+    // char *argv[] array has 8-byte pointer slots, not 4-byte ones -
+    // the same stride mismatch that bit kernel/vectors.pl's output
+    // (see trap.c's extern uintp vectors[]).
+    if(fetchint(uargv+sizeof(uintp)*i, (int*)&uarg) < 0)
       return -1;
     if(uarg == 0){
       argv[i] = 0;
