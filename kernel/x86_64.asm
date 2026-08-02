@@ -178,3 +178,16 @@ global lcr3
 lcr3:
   mov cr3, rdi
   ret
+
+; void wrmsr(uint msr, uint64 val)
+; wrmsr itself takes the MSR index in ecx and the 64-bit value split as
+; edx:eax (high:low), not as one 64-bit register - the "$" prefix is the
+; same reserved-mnemonic dodge as $lgdt/$ltr/etc above.
+global $wrmsr
+$wrmsr:
+  mov ecx, edi   ; msr
+  mov rax, rsi   ; val (also sets eax = val's low 32 bits)
+  mov rdx, rax
+  shr rdx, 32    ; edx = val's high 32 bits
+  wrmsr
+  ret

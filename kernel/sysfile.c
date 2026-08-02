@@ -90,6 +90,81 @@ sys_write(void)
   return filewrite(f, p, n);
 }
 
+#ifdef X64
+// (fd, iov, iovcnt): see include/syscall.h. struct iovec is
+// {void *iov_base; size_t iov_len;}, 16 bytes on the 64-bit build;
+// argptr isn't used here since iov_base/iov_len live inside a
+// caller-provided array rather than being syscall arguments
+// themselves, so each field is fetched (and, like argptr, bounds-
+// checked against curproc->sz) by hand instead.
+int
+sys_writev(void)
+{
+  struct file *f;
+  int iovp, iovcnt;
+  int i, total, base, len, n;
+  char *p;
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &iovp) < 0 || argint(2, &iovcnt) < 0)
+    return -1;
+  if(iovcnt < 0 || iovcnt > 16)
+    return -1;
+
+  total = 0;
+  for(i = 0; i < iovcnt; i++){
+    if(fetchint(iovp + 16*i, &base) < 0 || fetchint(iovp + 16*i + 8, &len) < 0)
+      return total > 0 ? total : -1;
+    if(len == 0)
+      continue;
+    if(len < 0 || (uint)base >= myproc()->sz || (uint)base+len > myproc()->sz)
+      return total > 0 ? total : -1;
+    p = (char*)(uintp)(uint)base;
+    if((n = filewrite(f, p, len)) < 0)
+      return total > 0 ? total : -1;
+    total += n;
+    if(n < len)
+      break;  // short write - stop, like a real writev would
+  }
+  return total;
+}
+
+// (fd, offset, whence): see include/syscall.h.
+int
+sys_lseek(void)
+{
+  struct file *f;
+  int offset, whence;
+  uint newoff;
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &offset) < 0 || argint(2, &whence) < 0)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+
+  switch(whence){
+  case 0:  // SEEK_SET
+    if(offset < 0)
+      return -1;
+    newoff = (uint)offset;
+    break;
+  case 1:  // SEEK_CUR
+    if((int)f->off + offset < 0)
+      return -1;
+    newoff = f->off + offset;
+    break;
+  case 2:  // SEEK_END
+    if((int)f->ip->size + offset < 0)
+      return -1;
+    newoff = f->ip->size + offset;
+    break;
+  default:
+    return -1;
+  }
+  f->off = newoff;
+  return newoff;
+}
+#endif
+
 int
 sys_close(void)
 {
@@ -433,6 +508,48 @@ sys_exec(void)
   }
   return exec(path, argv);
 }
+
+#ifdef X64
+// Fetches a NUL-terminated, NULL-terminated-array-of-pointers argument
+// (argv or envp) the same way sys_exec()'s loop above does, into an
+// already zeroed uintp-per-slot array of the given capacity.
+static int
+fetchargv(uint uarr, char **arr, int cap)
+{
+  int i;
+  uint uarg;
+
+  for(i=0;; i++){
+    if(i >= cap)
+      return -1;
+    if(fetchint(uarr+sizeof(uintp)*i, (int*)&uarg) < 0)
+      return -1;
+    if(uarg == 0){
+      arr[i] = 0;
+      return 0;
+    }
+    if(fetchstr(uarg, &arr[i]) < 0)
+      return -1;
+  }
+}
+
+int
+sys_execve(void)
+{
+  char *path, *argv[MAXARG], *envp[MAXENVP];
+  uint uargv, uenvp;
+
+  if(argstr(0, &path) < 0 || argint(1, (int*)&uargv) < 0 || argint(2, (int*)&uenvp) < 0)
+    return -1;
+  memset(argv, 0, sizeof(argv));
+  memset(envp, 0, sizeof(envp));
+  if(fetchargv(uargv, argv, NELEM(argv)) < 0)
+    return -1;
+  if(fetchargv(uenvp, envp, NELEM(envp)) < 0)
+    return -1;
+  return execve(path, argv, envp);
+}
+#endif
 
 int
 sys_pipe(void)

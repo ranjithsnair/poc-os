@@ -165,7 +165,7 @@ BOOTLDFLAGS += -m elf_i386
 BUILD = build
 OBJDIR = $(BUILD)/obj$(ARCH)
 
-$(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user:
+$(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user $(OBJDIR)/musl-test:
 	mkdir -p $@
 
 # Compile a C source into build/obj<ARCH>/<dir>/<name>.o, keeping the same
@@ -308,6 +308,221 @@ $(BUILD)/_forktest: $(OBJDIR)/user/forktest.o $(ULIB) | $(BUILD)
 	$(OBJDUMP) -S $(BUILD)/_forktest > $(BUILD)/forktest.dis
 	$(OBJCOPY) --strip-debug $(BUILD)/_forktest
 
+# musl-test/: a standalone smoke test for the musl port (see musl/README
+# and musl/test/hello.c) - it calls the vendored, poc-os-forked
+# arch/x86_64/syscall_arch.h directly, with none of the rest of musl
+# involved yet, so unlike ordinary user/ programs it needs neither ULIB
+# nor an -e main convention shared with xv6's own ulib.c (it doesn't
+# link ulib.c at all). -Iinclude is here too (not just
+# -Imusl/arch/x86_64) since some of these tests reference poc-os kernel
+# constants directly (e.g. ARCH_SET_FS from include/syscall.h) rather
+# than only musl's own headers.
+$(OBJDIR)/musl-test/%.o: musl/test/%.c | $(OBJDIR)/musl-test
+	$(CC) $(CFLAGS) -Imusl/arch/x86_64 -Iinclude -c -o $@ $<
+
+$(BUILD)/_muslhello: $(OBJDIR)/musl-test/hello.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/muslhello.dis
+	$(OBJCOPY) --strip-debug $@
+
+# execve_launch/execve_verify: the two-binary SYS_execve smoke test
+# (see musl/test/execve_launch.c). execve_launch is entered the normal
+# poc-os way (-e main); execve_verify is entered the Linux/musl way
+# (-e _start_asm, argc/argv/envp/auxv decoded from %rsp, not %rdi/%rsi)
+# to check what kernel/exec.c's execve() actually put on its stack.
+$(BUILD)/_execve_launch: $(OBJDIR)/musl-test/execve_launch.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/execve_launch.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_execve_verify: $(OBJDIR)/musl-test/execve_verify.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e _start_asm -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/execve_verify.dis
+	$(OBJCOPY) --strip-debug $@
+
+# tls: SYS_arch_prctl(ARCH_SET_FS)/MSR_FS_BASE smoke test (see
+# musl/test/tls.c). Entered the normal poc-os way (-e main); it doesn't
+# need argv/envp, just a syscall and a %fs-relative memory access.
+$(BUILD)/_tls: $(OBJDIR)/musl-test/tls.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/tls.dis
+	$(OBJCOPY) --strip-debug $@
+
+# mmap: SYS_mmap/SYS_munmap smoke test (see musl/test/mmap.c).
+$(BUILD)/_mmaptest: $(OBJDIR)/musl-test/mmap.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/mmaptest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# musl/: real musl source (musl-test/ above is only raw syscall_arch.h
+# smoke tests; this is actual crt1/__libc_start_main/malloc/etc object
+# code). musl's own build system generates two headers from
+# arch/x86_64/bits/*.in - obj/include/bits/alltypes.h and bits/
+# syscall.h - normally by running its ./configure && make; the two
+# recipes below just replicate those two exact commands (see musl/
+# Makefile's own obj/include/bits/%.h rules) without depending on
+# musl's build system or a prior ./configure, since all we want out of
+# it is these two files.
+$(OBJDIR)/musl/include/bits/alltypes.h: musl/arch/x86_64/bits/alltypes.h.in musl/include/alltypes.h.in musl/tools/mkalltypes.sed
+	@mkdir -p $(dir $@)
+	sed -f musl/tools/mkalltypes.sed musl/arch/x86_64/bits/alltypes.h.in musl/include/alltypes.h.in > $@
+
+$(OBJDIR)/musl/include/bits/syscall.h: musl/arch/x86_64/bits/syscall.h.in
+	@mkdir -p $(dir $@)
+	cp $< $@
+	sed -n -e s/__NR_/SYS_/p < $< >> $@
+
+MUSL_GENH = $(OBJDIR)/musl/include/bits/alltypes.h $(OBJDIR)/musl/include/bits/syscall.h
+
+# Mirrors musl's own CFLAGS_ALL/IFLAGS (see musl/Makefile) so its
+# source compiles unmodified: -nostdinc/-ffreestanding because it's
+# its own libc, not something built against poc-os's (or the host's)
+# headers; the -I order matters (arch-specific bits before generic,
+# musl's own src/internal/syscall.h etc before its public include/,
+# $(OBJDIR)/musl/include last among musl's own so a real header always
+# wins over the generated stand-in) since a couple of names exist at
+# more than one of these paths on purpose (bits/syscall.h.in and its
+# generated bits/syscall.h in particular).
+MUSL_CFLAGS = -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fno-pie -no-pie \
+	-fno-omit-frame-pointer -g -Wall
+MUSL_INC = -Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/internal \
+	-Imusl/src/include -Imusl/src/internal -I$(OBJDIR)/musl/include -Imusl/include
+
+# One rule for musl/**.c, however deep - unlike boot/kernel/user's
+# fixed one-level split, musl's source tree has real subdirectories
+# (src/env/, src/thread/x86_64/, crt/, ...), so this mirrors each
+# source's path under $(OBJDIR)/musl/ via $(dir $@) rather than
+# pre-declaring every subdirectory as an order-only prerequisite the
+# way the rest of this Makefile does.
+$(OBJDIR)/musl/%.o: musl/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(MUSL_CFLAGS) $(MUSL_INC) -c -o $@ $<
+
+# Ditto for musl's hand-written .s (AT&T syntax, assembled directly by
+# $(CC) via binutils as - not one of poc-os's own NASM .asm sources).
+$(OBJDIR)/musl/%.o: musl/%.s
+	@mkdir -p $(dir $@)
+	$(CC) -m64 -c -o $@ $<
+
+# The minimal real-musl object set proven to link and run a genuine
+# crt1-started, argv/envp/auxv-fed, TLS-initialized program (see
+# musl/test/real_hello.c): startup (crt1, __libc_start_main, TLS init,
+# environ/libc globals), the generic syscall_cp/errno/memcpy plumbing
+# every musl syscall wrapper sits on top of, and write()/exit()/_Exit()
+# themselves. Nowhere near all of musl - no malloc, no stdio/printf, no
+# dynamic linking - just what this specific set of source files pulls
+# in transitively; grown file-by-file, fixing each undefined-reference
+# as it came up, not designed upfront.
+MUSL_LIBC_OBJS = \
+	$(OBJDIR)/musl/crt/crt1.o \
+	$(OBJDIR)/musl/src/env/__libc_start_main.o \
+	$(OBJDIR)/musl/src/env/__init_tls.o \
+	$(OBJDIR)/musl/src/env/__environ.o \
+	$(OBJDIR)/musl/src/internal/libc.o \
+	$(OBJDIR)/musl/src/internal/defsysinfo.o \
+	$(OBJDIR)/musl/src/internal/syscall_ret.o \
+	$(OBJDIR)/musl/src/thread/__syscall_cp.o \
+	$(OBJDIR)/musl/src/thread/default_attr.o \
+	$(OBJDIR)/musl/src/thread/x86_64/__set_thread_area.o \
+	$(OBJDIR)/musl/src/string/memcpy.o \
+	$(OBJDIR)/musl/src/errno/__errno_location.o \
+	$(OBJDIR)/musl/src/unistd/write.o \
+	$(OBJDIR)/musl/src/exit/exit.o \
+	$(OBJDIR)/musl/src/exit/_Exit.o \
+
+# real_hello: entry is musl's own _start (crt1.o, via crt_arch.h), not
+# poc-os's usual -e main - it has to be launched with SYS_execve (see
+# musl/test/runmusl.c), not poc-os's native SYS_exec, since only
+# execve() builds the argc/argv/envp/auxv stack crt1 reads.
+$(BUILD)/_real_hello: $(OBJDIR)/musl/test/real_hello.o $(MUSL_LIBC_OBJS) | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/real_hello.dis
+	$(OBJCOPY) --strip-debug $@
+
+# runmusl: generic launcher, "runmusl <path> [args...]" - see
+# musl/test/runmusl.c. Entered the normal poc-os way (-e main, native
+# SYS_exec) since it's poc-os code, not musl code; what it launches
+# (SYS_execve on argv[1]) is what needs the musl-style stack.
+$(BUILD)/_runmusl: $(OBJDIR)/musl-test/runmusl.o | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/runmusl.dis
+	$(OBJCOPY) --strip-debug $@
+
+# Adds musl's "oldmalloc" backend (musl/src/malloc/oldmalloc/malloc.c -
+# chosen over the default mallocng backend for being one file, simpler,
+# and forgiving of poc-os's minimal mmap/munmap) on top of
+# MUSL_LIBC_OBJS: real malloc/calloc/realloc/free, real SYS_brk (which
+# oldmalloc calls directly, not through any sbrk()-style wrapper - see
+# kernel/sysproc.c's sys_brk()), and the handful of files that turned
+# out to be needed to link it (strlen, __lock/__wait for its
+# currently-always-uncontended locking, madvise/mremap - both
+# kernel-side stubs, see include/syscall.h).
+MUSL_MALLOC_OBJS = \
+	$(OBJDIR)/musl/src/malloc/oldmalloc/malloc.o \
+	$(OBJDIR)/musl/src/malloc/lite_malloc.o \
+	$(OBJDIR)/musl/src/malloc/calloc.o \
+	$(OBJDIR)/musl/src/malloc/realloc.o \
+	$(OBJDIR)/musl/src/malloc/free.o \
+	$(OBJDIR)/musl/src/malloc/replaced.o \
+	$(OBJDIR)/musl/src/mman/mmap.o \
+	$(OBJDIR)/musl/src/mman/munmap.o \
+	$(OBJDIR)/musl/src/mman/madvise.o \
+	$(OBJDIR)/musl/src/mman/mremap.o \
+	$(OBJDIR)/musl/src/string/memset.o \
+	$(OBJDIR)/musl/src/string/strlen.o \
+	$(OBJDIR)/musl/src/thread/__wait.o \
+	$(OBJDIR)/musl/src/thread/__lock.o \
+
+$(BUILD)/_real_malloc: $(OBJDIR)/musl/test/real_malloc.o $(MUSL_LIBC_OBJS) $(MUSL_MALLOC_OBJS) | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/real_malloc.dis
+	$(OBJCOPY) --strip-debug $@
+
+# Adds real printf/vfprintf/stdio on top of MUSL_LIBC_OBJS +
+# MUSL_MALLOC_OBJS (FILE buffering needs both malloc, for the stream
+# buffer, and the syscalls below). %a/%e/%f/%g print a fixed
+# "<float-unsupported>" placeholder rather than a real value -
+# vfprintf.c is forked (see its fmt_fp() and pop_arg()'s DBL/LDBL
+# cases) to avoid all x87/SSE codegen, none of which compiles under
+# -mgeneral-regs-only in the first place, the same reason nothing else
+# in this build touches floating point; real support needs the kernel
+# to save/restore FPU state across a context switch first, which it
+# doesn't do at all today. Also needed two more real syscalls beyond
+# what MUSL_LIBC_OBJS/MUSL_MALLOC_OBJS required: SYS_writev (stdio's
+# actual flush path) and SYS_lseek (both genuinely implemented, not
+# stubs - kernel/sysfile.c), plus two stubs (SYS_ioctl, always fails -
+# stdio's isatty-for-buffering-mode check; poc-os has no ioctl of any
+# kind yet).
+MUSL_STDIO_OBJS = \
+	$(OBJDIR)/musl/src/stdio/vfprintf.o \
+	$(OBJDIR)/musl/src/stdio/printf.o \
+	$(OBJDIR)/musl/src/stdio/vprintf.o \
+	$(OBJDIR)/musl/src/stdio/__towrite.o \
+	$(OBJDIR)/musl/src/stdio/__overflow.o \
+	$(OBJDIR)/musl/src/stdio/__stdio_write.o \
+	$(OBJDIR)/musl/src/stdio/stdout.o \
+	$(OBJDIR)/musl/src/stdio/__lockfile.o \
+	$(OBJDIR)/musl/src/stdio/__stdio_exit.o \
+	$(OBJDIR)/musl/src/stdio/ofl.o \
+	$(OBJDIR)/musl/src/stdio/ofl_add.o \
+	$(OBJDIR)/musl/src/stdio/fwrite.o \
+	$(OBJDIR)/musl/src/stdio/__stdio_close.o \
+	$(OBJDIR)/musl/src/stdio/__stdout_write.o \
+	$(OBJDIR)/musl/src/stdio/__stdio_seek.o \
+	$(OBJDIR)/musl/src/errno/strerror.o \
+	$(OBJDIR)/musl/src/string/strnlen.o \
+	$(OBJDIR)/musl/src/string/memchr.o \
+	$(OBJDIR)/musl/src/multibyte/wctomb.o \
+	$(OBJDIR)/musl/src/multibyte/wcrtomb.o \
+	$(OBJDIR)/musl/src/locale/__lctrans.o \
+	$(OBJDIR)/musl/src/unistd/lseek.o \
+
+$(BUILD)/_real_printf: $(OBJDIR)/musl/test/real_printf.o $(MUSL_LIBC_OBJS) $(MUSL_MALLOC_OBJS) $(MUSL_STDIO_OBJS) | $(BUILD)
+	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > $(BUILD)/real_printf.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -317,7 +532,7 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
-.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o
 
 UPROGS=\
 	$(BUILD)/_cat\
@@ -335,6 +550,26 @@ UPROGS=\
 	$(BUILD)/_usertests\
 	$(BUILD)/_wc\
 	$(BUILD)/_zombie\
+
+# musl-test/ smoke-test binaries (see musl/README and musl/test/*.c):
+# x86_64-only, like the rest of the musl port - some of them (notably
+# execve_verify.c's _start_asm) use raw 64-bit-register inline asm that
+# doesn't compile at all under ARCH=32's -m32, so unlike every other
+# UPROGS entry above these are conditional on ARCH rather than always
+# built.
+ifeq ($(ARCH),64)
+UPROGS+=\
+	$(BUILD)/_execve_launch\
+	$(BUILD)/_execve_verify\
+	$(BUILD)/_mmaptest\
+	$(BUILD)/_muslhello\
+	$(BUILD)/_real_hello\
+	$(BUILD)/_real_malloc\
+	$(BUILD)/_real_printf\
+	$(BUILD)/_runmusl\
+	$(BUILD)/_tls\
+
+endif
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS)

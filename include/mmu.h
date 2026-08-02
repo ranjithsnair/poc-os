@@ -20,6 +20,15 @@
 #define MSR_EFER         0xC0000080
 #define EFER_LME         0x00000100     // Long Mode Enable
 
+// IA32_FS_BASE: the hidden base address backing the %fs segment in long
+// mode, where TLS lives (musl's thread pointer is just "the address
+// %fs:0 reads back", see musl/arch/x86_64/pthread_arch.h's __get_tp).
+// Applied per-process in kernel/trap.c, from struct proc's tls_base,
+// on every return to user mode - unlike CR3, it isn't swapped by
+// swtch()/context switching, so it has to be reasserted there rather
+// than only when a process's tls_base first changes.
+#define MSR_FS_BASE      0xC0000100
+
 // various segment selectors.
 #define SEG_KCODE 1  // kernel code
 #define SEG_KDATA 2  // kernel data+stack
