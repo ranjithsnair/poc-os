@@ -206,10 +206,93 @@ runcmd(struct cmd *cmd)
   exit();
 }
 
+// cwd: this shell's own idea of its current directory, purely so the
+// prompt can show it - poc-os has no real getcwd() (no way to turn an
+// inode back into a path without directory-reading support, and even
+// with that, no reason for every process to redo the walk when this
+// one already knows every cd it did itself). Kept as a plain string,
+// updated locally after each successful chdir() rather than queried
+// from the kernel - accurate for exactly the reason a shell's own cwd
+// tracking always is: nothing but this process's own cd command ever
+// changes what its chdir() calls resolved against.
+#define MAXPATH 512
+static char cwd[MAXPATH] = "/";
+
+// Rewrites abspath in place into cwd: splits on '/', drops "." and
+// empty components, pops one component per ".." (the actual reason
+// this can't just be string concatenation - resolving ".." requires
+// already knowing what the prior component was), then rejoins.
+static void
+setcwd(char *abspath)
+{
+  char *comp[64];
+  int len[64];
+  int ncomp = 0;
+  char *s = abspath;
+
+  while(*s){
+    while(*s == '/')
+      s++;
+    if(*s == 0)
+      break;
+    char *start = s;
+    while(*s && *s != '/')
+      s++;
+    int n = s - start;
+    if(n == 1 && start[0] == '.'){
+      // skip
+    } else if(n == 2 && start[0] == '.' && start[1] == '.'){
+      if(ncomp > 0)
+        ncomp--;
+    } else if(ncomp < 64){
+      comp[ncomp] = start;
+      len[ncomp] = n;
+      ncomp++;
+    }
+  }
+
+  int pos = 0;
+  cwd[pos++] = '/';
+  for(int i = 0; i < ncomp; i++){
+    if(i > 0 && pos < MAXPATH - 1)
+      cwd[pos++] = '/';
+    int n = len[i];
+    if(pos + n >= MAXPATH - 1)
+      n = MAXPATH - 1 - pos;
+    if(n > 0){
+      memmove(cwd + pos, comp[i], n);
+      pos += n;
+    }
+  }
+  cwd[pos] = 0;
+}
+
+// Combines cwd with a cd argument (absolute or relative) into one
+// path and hands it to setcwd() to resolve - called only after a
+// chdir() to the same argument already succeeded.
+static void
+update_cwd(char *arg)
+{
+  char joined[MAXPATH];
+
+  if(arg[0] == '/'){
+    strcpy(joined, arg);
+  } else if(cwd[1] == 0){  // cwd is "/"
+    joined[0] = '/';
+    strcpy(joined + 1, arg);
+  } else {
+    strcpy(joined, cwd);
+    int l = strlen(joined);
+    joined[l] = '/';
+    strcpy(joined + l + 1, arg);
+  }
+  setcwd(joined);
+}
+
 int
 getcmd(char *buf, int nbuf)
 {
-  printf(2, "$ ");
+  printf(2, "%s $ ", cwd);
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -244,6 +327,8 @@ main(void)
       buf[strlen(buf)-1] = 0;  // chop \n
       if(chdir(buf+3) < 0)
         printf(2, "cannot cd %s\n", buf+3);
+      else
+        update_cwd(buf+3);
       continue;
     }
     if(fork1() == 0)

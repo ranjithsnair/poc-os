@@ -597,6 +597,50 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/unistd/isatty.o \
 	$(OBJDIR)/musl-pic/src/unistd/ftruncate.o \
 	$(OBJDIR)/musl-pic/src/stdio/rename.o \
+	$(OBJDIR)/musl-pic/src/signal/sigemptyset.o \
+	$(OBJDIR)/musl-pic/src/ctype/isblank.o \
+	$(OBJDIR)/musl-pic/src/ctype/iscntrl.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswalnum.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswalpha.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswblank.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswcntrl.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswctype.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswgraph.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswlower.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswprint.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswpunct.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswspace.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswupper.o \
+	$(OBJDIR)/musl-pic/src/ctype/iswxdigit.o \
+	$(OBJDIR)/musl-pic/src/ctype/tolower.o \
+	$(OBJDIR)/musl-pic/src/ctype/toupper.o \
+	$(OBJDIR)/musl-pic/src/ctype/towctrans.o \
+	$(OBJDIR)/musl-pic/src/env/putenv.o \
+	$(OBJDIR)/musl-pic/src/env/setenv.o \
+	$(OBJDIR)/musl-pic/src/env/unsetenv.o \
+	$(OBJDIR)/musl-pic/src/internal/intscan.o \
+	$(OBJDIR)/musl-pic/src/internal/shgetc.o \
+	$(OBJDIR)/musl-pic/src/locale/strcoll.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbsinit.o \
+	$(OBJDIR)/musl-pic/src/regex/fnmatch.o \
+	$(OBJDIR)/musl-pic/src/signal/sigaddset.o \
+	$(OBJDIR)/musl-pic/src/signal/sigismember.o \
+	$(OBJDIR)/musl-pic/src/stdio/sprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/vsprintf.o \
+	$(OBJDIR)/musl-pic/src/stdlib/strtol.o \
+	$(OBJDIR)/musl-pic/src/string/wcschr.o \
+	$(OBJDIR)/musl-pic/src/string/wcslen.o \
+	$(OBJDIR)/musl-pic/src/time/__month_to_secs.o \
+	$(OBJDIR)/musl-pic/src/time/__secs_to_tm.o \
+	$(OBJDIR)/musl-pic/src/time/__tm_to_secs.o \
+	$(OBJDIR)/musl-pic/src/time/__tz.o \
+	$(OBJDIR)/musl-pic/src/time/__year_to_secs.o \
+	$(OBJDIR)/musl-pic/src/time/gmtime_r.o \
+	$(OBJDIR)/musl-pic/src/time/localtime_r.o \
+	$(OBJDIR)/musl-pic/src/time/mktime.o \
+	$(OBJDIR)/musl-pic/src/time/strftime.o \
+	$(OBJDIR)/musl-pic/src/time/timegm.o \
+	$(OBJDIR)/musl-pic/src/unistd/tcgetpgrp.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -1118,6 +1162,82 @@ $(BUILD)/_cp: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/cp.o \
 	$(OBJDUMP) -S $@ > $(BUILD)/cp.dis
 	$(OBJCOPY) --strip-debug $@
 
+# ls: needed real getdents (SYS_getdents/opendir - already added for
+# mkdir/rm/etc's fts.c above) plus three gnulib functions this port has
+# no working real implementation of at all - not shimmed as no-ops,
+# genuinely reimplemented:
+#   - human_options()/human_readable() (coreutils/poc/human_shim.c):
+#     real gnulib (lib/human.c) formats sizes with `long double`
+#     arithmetic even in the plain, non "-h" case - needs the x87 FPU,
+#     unavailable under -mgeneral-regs-only (see this file's own
+#     COREUTILS_PIC_CFLAGS comment) for the same reason gnulib's
+#     hash.c did (coreutils_shims.c's own hash_initialize comment).
+#     Plain 64-bit integer arithmetic throughout instead - exact, not
+#     an approximation, for any size poc-os's own MAXFILE could ever
+#     actually produce.
+#   - timespec_cmp() (coreutils/poc/timespec_shim.c): timespec.h
+#     declares this as a plain C99 "inline" (needs one real external
+#     instantiation to exist - same rule chmodat()/chownat()/
+#     psame_inode() already needed one for), but the file gnulib
+#     provides for that (lib/timespec.c) forces every OTHER inline in
+#     the same header to instantiate too, including timespectod() -
+#     which needs the FPU for the exact same reason human_readable()
+#     does. A tiny replacement providing just the one function ls -l
+#     actually calls sidesteps the FPU entirely.
+# Also needed config.h's USE_ACL/HAVE_SYS_ACL_H fix (mv/cp's own
+# comment above), SETLOCALE_NULL_MAX/setlocale_null_r and c32iscntrl/
+# c32width declarations (poc_prelude.h - gnulib's own header
+# replacements are the only place that normally declare these), and
+# sigaction()/sigprocmask()/signal()/getpwnam()/getpwuid()/getgrnam()/
+# getgrgid()/gethostname() (coreutils_shims.c - poc-os has no signal
+# delivery or user/group database of any kind, so "always succeeded,
+# nothing to report" is the accurate answer, not a fake success).
+COREUTILS_LS_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/argmatch.o \
+	$(OBJDIR)/coreutils-pic/lib/obstack.o \
+	$(OBJDIR)/coreutils-pic/lib/areadlink-with-size.o \
+	$(OBJDIR)/coreutils-pic/lib/c-strncasecmp.o \
+	$(OBJDIR)/coreutils-pic/lib/canonicalize.o \
+	$(OBJDIR)/coreutils-pic/lib/file-has-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat.o \
+	$(OBJDIR)/coreutils-pic/lib/filemode.o \
+	$(OBJDIR)/coreutils-pic/lib/filevercmp.o \
+	$(OBJDIR)/coreutils-pic/lib/idcache.o \
+	$(OBJDIR)/coreutils-pic/lib/gettime.o \
+	$(OBJDIR)/coreutils-pic/lib/hard-locale.o \
+	$(OBJDIR)/coreutils-pic/poc/human_shim.o \
+	$(OBJDIR)/coreutils-pic/lib/imaxtostr.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/time_rz.o \
+	$(OBJDIR)/coreutils-pic/src/ls-dir.o \
+	$(OBJDIR)/coreutils-pic/lib/mbswidth.o \
+	$(OBJDIR)/coreutils-pic/lib/mpsort.o \
+	$(OBJDIR)/coreutils-pic/lib/nstrftime.o \
+	$(OBJDIR)/coreutils-pic/poc/timespec_shim.o \
+	$(OBJDIR)/coreutils-pic/lib/umaxtostr.o \
+	$(OBJDIR)/coreutils-pic/lib/xgethostname.o \
+	$(OBJDIR)/coreutils-pic/lib/xdectoumax.o \
+	$(OBJDIR)/coreutils-pic/lib/xstrtol-error.o \
+	$(OBJDIR)/coreutils-pic/lib/xstrtoumax.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow_preserve.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/file-set.o \
+	$(OBJDIR)/coreutils-pic/lib/setlocale_null.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple-simple.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-pjw.o \
+	$(OBJDIR)/coreutils-pic/lib/setlocale_null-unlocked.o \
+
+$(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_LS_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_LS_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/ls.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -1183,6 +1303,12 @@ MKFS_INSTALL_DEPS += $(BUILD)/_mkdir $(BUILD)/_rmdir $(BUILD)/_rm \
 # COREUTILS_MV_GNULIB_OBJS's own comment above.
 MKFS_INSTALL += usr/bin/mv:$(BUILD)/_mv usr/bin/cp:$(BUILD)/_cp
 MKFS_INSTALL_DEPS += $(BUILD)/_mv $(BUILD)/_cp
+
+# ls: real directory listing - see COREUTILS_LS_GNULIB_OBJS's own
+# comment above for what this needed beyond the mkdir/rm/etc batch's
+# getdents/opendir infrastructure.
+MKFS_INSTALL += usr/bin/ls:$(BUILD)/_ls
+MKFS_INSTALL_DEPS += $(BUILD)/_ls
 
 endif
 

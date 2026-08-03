@@ -7,6 +7,14 @@
 #include <stdio.h>
 #include <wchar.h>
 extern int fpurge(FILE *);
+/* SETLOCALE_NULL_MAX/setlocale_null_r: coreutils/lib/hard-locale.c (as
+ * vendored here) uses both without including coreutils/lib/
+ * setlocale_null.h itself - a gnulib-module-list/version mismatch in
+ * this vendored snapshot, not a poc-os-specific gap: the real
+ * implementation (coreutils/lib/setlocale_null.c) is unmodified
+ * upstream gnulib and compiles and works as-is once this is visible. */
+#define SETLOCALE_NULL_MAX (256+1)
+extern int setlocale_null_r(int category, char *buf, size_t bufsize);
 /* mbszero()/c32isprint(): see coreutils/poc/coreutils_shims.c for the
  * real (poc-os-specific) definitions - normally declared only in
  * gnulib's own <wchar.h> replacement (lib/wchar.in.h), which this
@@ -14,6 +22,15 @@ extern int fpurge(FILE *);
 extern void mbszero(mbstate_t *);
 extern int c32isprint(wint_t);
 extern int c32isblank(wint_t);
+extern int c32iscntrl(wint_t);
+/* c32width(): same story - gnulib's own <wchar.h> replacement is the
+ * only place that normally declares it; coreutils/lib/c32width.c
+ * itself is a real, complete implementation (needed by ls -l's column
+ * width computation for multibyte filenames), just missing this one
+ * declaration under the real musl <wchar.h> this build uses instead.
+ * char32_t itself is musl's <uchar.h>, not <wchar.h>. */
+#include <uchar.h>
+extern int c32width(char32_t);
 
 /* rawmemchr(): a GNU libc extension musl's own <string.h> never
  * declares (musl doesn't implement it under any exposure macro) - the
@@ -158,3 +175,25 @@ extern char *canonicalize_file_name(const char *);
 #include <errno.h>
 #define __set_errno(val) (errno = (val))
 #define __always_inline __attribute__((__always_inline__)) inline
+
+/* timezone_t/tzalloc/tzfree/localtime_rz/mktime_z: declared only in
+ * gnulib's own <time.h> replacement (lib/time.in.h), which - like
+ * every other gnulib header replacement - this build skips in favor
+ * of musl's real <time.h>, and musl's real <time.h> has no timezone_t
+ * API at all (it's a NetBSD/glibc extension, not POSIX). Unlike
+ * mbszero()/c32isprint()/etc above, this isn't a "no implementation
+ * of any kind for this libc" case: coreutils/lib/time_rz.c is gnulib's
+ * own portable implementation of the whole API (built specifically
+ * for libcs without a native timezone_t), and compiles and works
+ * as-is once it can see this typedef/these declarations - ls -l's
+ * (coreutils/src/ls.c) timestamp-column formatting is what actually
+ * needs them. struct tm_zone itself stays opaque here exactly as
+ * lib/time.in.h's own declaration leaves it - only time_rz.c's own
+ * translation unit (which includes lib/time-internal.h) ever looks
+ * inside one. */
+struct tm_zone;
+typedef struct tm_zone *timezone_t;
+extern timezone_t tzalloc(char const *);
+extern void tzfree(timezone_t);
+extern struct tm *localtime_rz(timezone_t, time_t const *restrict, struct tm *restrict);
+extern time_t mktime_z(timezone_t, struct tm *);

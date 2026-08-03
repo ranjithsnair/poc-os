@@ -51,6 +51,34 @@ c32isblank(wint_t wc)
 	return wc == ' ' || wc == '\t';
 }
 
+/* c32iscntrl(): same reasoning as c32isprint()/c32isblank() above -
+ * plain ASCII control-character range, the complement of
+ * c32isprint()'s own definition (every codepoint is one or the other
+ * in a C/POSIX locale). */
+int
+c32iscntrl(wint_t wc)
+{
+	return wc < 0x20 || wc == 0x7f;
+}
+
+/* c32width(): real gnulib (lib/c32width.c) delegates to libunistring's
+ * uc_width() (East-Asian wide-character tables, combining-mark
+ * zero-width handling, etc.) - the same large dependency this port
+ * isn't pulling in, for the same reason c32isprint() above isn't
+ * either. In a C/POSIX locale every character ls -l ever actually
+ * measures is plain ASCII: 1 column wide if printable, unreachable
+ * (already filtered through quoting - see quotearg.c/quote_name_buf's
+ * own use of this exact function) if a control character, which -2
+ * (uc_width()'s own documented "undefined width" sentinel gnulib
+ * callers already check for) reports honestly rather than guessing. */
+#include <uchar.h>
+
+int
+c32width(char32_t wc)
+{
+	return c32isprint((wint_t)wc) ? 1 : -2;
+}
+
 /* fpurge(): a BSD stdio extension (discard any unwritten buffered
  * output without writing it) musl doesn't have. Only reachable from
  * src/system.h's write_error(), itself only reachable once a write
@@ -607,10 +635,20 @@ getrandom(void *buf, size_t buflen, unsigned flags)
 /* clock()/clock_gettime(): poc-os has no real-time or per-process-CPU-
  * time clock of any kind wired up to musl (SYS_uptime, a raw timer-
  * tick count since boot, is poc-os's own native concept, not
- * something any real clock_gettime()/clock() caller expects). Real
- * gnulib callers already handle either of these failing as an
- * ordinary fallback path (e.g. skipping a duration measurement), so
- * ENOSYS/-1 is the honest answer, not a fake reading.
+ * something any real clock_gettime()/clock() caller expects). Most
+ * gnulib callers do handle either of these failing as an ordinary
+ * fallback path (e.g. skipping a duration measurement) - but not all:
+ * coreutils/lib/gettime.c's own gettime() calls clock_gettime() and
+ * unconditionally uses *ts right after, never checking the return
+ * value at all (ls -l is what actually surfaced this - the first
+ * caller in this port that ever reached gettime()). Zeroing *ts
+ * before reporting failure - a defined, safe answer (the Unix epoch)
+ * instead of whatever garbage happened to be on the caller's stack -
+ * is what turns that gnulib bug from a real crash (a wild timestamp
+ * feeding a date computation that can walk off an array) into a
+ * merely-wrong-looking one (every file's time shown as 1970-01-01),
+ * which is the honest degradation a "no real-time clock" answer
+ * should have looked like in the first place.
  */
 #include <time.h>
 
@@ -623,7 +661,11 @@ clock(void)
 int
 clock_gettime(clockid_t id, struct timespec *ts)
 {
-	(void)id; (void)ts;
+	(void)id;
+	if (ts) {
+		ts->tv_sec = 0;
+		ts->tv_nsec = 0;
+	}
 	errno = ENOSYS;
 	return -1;
 }
@@ -845,6 +887,7 @@ struct hash_table {
 	size_t (*hasher)(const void *, size_t);
 	bool (*comparator)(const void *, const void *);
 	void (*data_freer)(void *);
+	size_t n_entries;
 	struct hash_entry *buckets[POC_HASH_BUCKETS];
 };
 
@@ -898,7 +941,20 @@ hash_insert(Hash_table *table, const void *entry)
 	idx = table->hasher(entry, POC_HASH_BUCKETS) % POC_HASH_BUCKETS;
 	e->next = table->buckets[idx];
 	table->buckets[idx] = e;
+	table->n_entries++;
 	return (void *)entry;
+}
+
+/* hash_get_n_entries(): ls.c's own directory-cycle/inode-seen hash
+ * table uses this to check "is it even worth calling hash_lookup()
+ * yet" before the table has anything in it - the one other part of
+ * gnulib's public hash.h surface (besides hash_get_first/next, see
+ * this file's own hash_initialize comment) reachable outside
+ * GNULIB_FTS_DEBUG. */
+size_t
+hash_get_n_entries(const Hash_table *table)
+{
+	return table->n_entries;
 }
 
 void *
@@ -914,6 +970,7 @@ hash_remove(Hash_table *table, const void *entry)
 
 			*pp = dead->next;
 			free(dead);
+			table->n_entries--;
 			return data;
 		}
 		pp = &(*pp)->next;
@@ -970,5 +1027,110 @@ int
 lchown(const char *path, uid_t owner, gid_t group)
 {
 	(void)path; (void)owner; (void)group;
+	return 0;
+}
+
+/* sigaction()/sigprocmask()/signal(): poc-os has no signal delivery
+ * of any kind (no SYS_rt_sigaction/SYS_rt_sigprocmask, nothing in
+ * trap.c that ever raises one in a process's own context - the same
+ * fact coreutils_shims.c's raise()/__block_all_sigs() comments
+ * already rely on elsewhere). ls -l's job-control handling (SIGINT/
+ * SIGTSTP: pause the directory listing cleanly on ^Z, restore the
+ * terminal on ^C) is the caller here - reporting every install as
+ * having succeeded, with the previous disposition always "default",
+ * is the accurate answer for a kernel that will simply never deliver
+ * any of these signals to demonstrate otherwise, not a fake success
+ * hiding a real gap.
+ */
+#include <signal.h>
+
+int
+sigaction(int sig, const struct sigaction *restrict act,
+          struct sigaction *restrict oldact)
+{
+	(void)sig; (void)act;
+	if (oldact) {
+		oldact->sa_handler = SIG_DFL;
+		oldact->sa_flags = 0;
+		sigemptyset(&oldact->sa_mask);
+	}
+	return 0;
+}
+
+int
+sigprocmask(int how, const sigset_t *restrict set, sigset_t *restrict oldset)
+{
+	(void)how; (void)set;
+	if (oldset)
+		sigemptyset(oldset);
+	return 0;
+}
+
+/* void(*)(int), not sighandler_t: musl only typedefs sighandler_t
+ * under _GNU_SOURCE (musl/include/signal.h), which this build's
+ * -D_XOPEN_SOURCE=700 doesn't define. */
+void (*signal(int sig, void (*handler)(int)))(int)
+{
+	(void)sig; (void)handler;
+	return SIG_DFL;
+}
+
+/* getpwnam()/getpwuid()/getgrnam()/getgrgid(): poc-os has no user or
+ * group database of any kind (every process is uid/gid 0 - see
+ * geteuid()/getuid() above) - reporting "no such user/group" (a NULL
+ * return, errno untouched, exactly what real glibc does for a
+ * genuinely unknown id/name) is the accurate answer, not a stand-in
+ * for a real lookup. ls -l's owner/group columns already handle a
+ * NULL getpwuid()/getgrgid() gracefully, printing the bare numeric
+ * id instead of a resolved name - which is all poc-os has anyway.
+ */
+#include <pwd.h>
+#include <grp.h>
+
+struct passwd *
+getpwnam(const char *name)
+{
+	(void)name;
+	return NULL;
+}
+
+struct passwd *
+getpwuid(uid_t uid)
+{
+	(void)uid;
+	return NULL;
+}
+
+struct group *
+getgrnam(const char *name)
+{
+	(void)name;
+	return NULL;
+}
+
+struct group *
+getgrgid(gid_t gid)
+{
+	(void)gid;
+	return NULL;
+}
+
+/* gethostname(): poc-os has no hostname concept at all (no uname(),
+ * no configuration for one) - reporting a fixed name is more useful
+ * to a caller than failing outright (ls itself never calls this
+ * directly, but pulls it in transitively; other callers commonly
+ * treat a gethostname() failure as fatal even where the real answer
+ * wouldn't matter), the same tradeoff getcwd() above already makes.
+ */
+int
+gethostname(char *name, size_t len)
+{
+	static const char host[] = "poc-os";
+
+	if (len < sizeof(host)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	memcpy(name, host, sizeof(host));
 	return 0;
 }

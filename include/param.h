@@ -1,5 +1,19 @@
 #define NPROC        64  // maximum number of processes
 #define KSTACKSIZE 4096  // size of per-process kernel stack
+// USTACKPAGES: usable pages of user stack exec.c allocates (below a
+// single guard page - see its own comment). A dynamically-linked
+// program's real gnulib call chains run far deeper, with far bigger
+// per-frame locals (vsnprintf's own on-stack ~256-byte buffer, times
+// however many of nstrftime()/human_readable()/quote_name_buf()/...
+// are nested when ls -l formats one line), than any of poc-os's own
+// native, statically-linked user/*.c programs ever needed - 1 page
+// (the original xv6 value) turned out to be too little the first
+// time a real coreutils utility's deepest call chain (ls -l, of every
+// utility shipped so far) actually got exercised: `rep stosl`
+// zeroing vsnprintf's own local buffer faulted on a stack page past
+// the single one mapped, well before any genuinely-unbounded
+// recursion or runaway allocation was involved.
+#define USTACKPAGES  16
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       16  // open files per process
 #define NFILE       100  // open files per system

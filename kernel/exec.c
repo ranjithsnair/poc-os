@@ -71,12 +71,13 @@ exec(char *path, char **argv)
   end_op();
   ip = 0;
 
-  // Allocate two pages at the next page boundary.
-  // Make the first inaccessible.  Use the second as the user stack.
+  // Allocate a guard page plus USTACKPAGES usable pages at the next
+  // page boundary. Make the guard page (the lowest of the bunch)
+  // inaccessible; the rest is the user stack.
   sz = PGROUNDUP(sz);
-  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+  if((sz = allocuvm(pgdir, sz, sz + (USTACKPAGES+1)*PGSIZE)) == 0)
     goto bad;
-  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+  clearpteu(pgdir, (char*)(sz - (USTACKPAGES+1)*PGSIZE));
   sp = sz;
 
 #ifdef X64
@@ -344,10 +345,11 @@ execve(char *path, char **argv, char **envp)
     iip = 0;
   }
 
+  // See the non-interpreter path above for USTACKPAGES's own comment.
   sz = PGROUNDUP(sz);
-  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+  if((sz = allocuvm(pgdir, sz, sz + (USTACKPAGES+1)*PGSIZE)) == 0)
     goto bad;
-  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+  clearpteu(pgdir, (char*)(sz - (USTACKPAGES+1)*PGSIZE));
   sp = sz;
 
   sp -= sizeof(randbuf);
