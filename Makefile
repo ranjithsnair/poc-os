@@ -301,58 +301,19 @@ $(BUILD)/_%: $(OBJDIR)/user/%.o $(ULIB) | $(BUILD)
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILD)/$*.sym
 	$(OBJCOPY) --strip-debug $@
 
-$(BUILD)/_forktest: $(OBJDIR)/user/forktest.o $(ULIB) | $(BUILD)
-	# forktest has less library code linked in - needs to be small
-	# in order to be able to max out the proc table.
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $(BUILD)/_forktest $(OBJDIR)/user/forktest.o $(OBJDIR)/user/ulib.o $(USYSOBJ) $(X86ASMOBJ)
-	$(OBJDUMP) -S $(BUILD)/_forktest > $(BUILD)/forktest.dis
-	$(OBJCOPY) --strip-debug $(BUILD)/_forktest
-
-# musl-test/: a standalone smoke test for the musl port (see musl/README
-# and musl/test/hello.c) - it calls the vendored, poc-os-forked
-# arch/x86_64/syscall_arch.h directly, with none of the rest of musl
-# involved yet, so unlike ordinary user/ programs it needs neither ULIB
-# nor an -e main convention shared with xv6's own ulib.c (it doesn't
-# link ulib.c at all). -Iinclude is here too (not just
-# -Imusl/arch/x86_64) since some of these tests reference poc-os kernel
-# constants directly (e.g. ARCH_SET_FS from include/syscall.h) rather
-# than only musl's own headers.
+# musl-test/: home to runmusl.c (a manual launcher for a musl-crt1-style
+# binary via raw SYS_execve - "runmusl <path> [args...]"; user/sh.c's
+# own isdyn() check in runcmd() makes this unnecessary for the ordinary
+# case of just running true/false/cat by name, but it's still useful
+# standalone, e.g. to pass a path sh.c can't parse as a bare command)
+# and ldso_stubs.c (linked into libc.so itself - see MUSL_LDSO_OBJS).
+# Unlike ordinary user/ programs these need neither ULIB nor an -e main convention shared
+# with xv6's own ulib.c (they don't link ulib.c at all). -Iinclude is
+# here too (not just -Imusl/arch/x86_64) since these reference poc-os
+# kernel constants directly (e.g. ARCH_SET_FS from include/syscall.h)
+# rather than only musl's own headers.
 $(OBJDIR)/musl-test/%.o: musl/test/%.c | $(OBJDIR)/musl-test
 	$(CC) $(CFLAGS) -Imusl/arch/x86_64 -Iinclude -c -o $@ $<
-
-$(BUILD)/_muslhello: $(OBJDIR)/musl-test/hello.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/muslhello.dis
-	$(OBJCOPY) --strip-debug $@
-
-# execve_launch/execve_verify: the two-binary SYS_execve smoke test
-# (see musl/test/execve_launch.c). execve_launch is entered the normal
-# poc-os way (-e main); execve_verify is entered the Linux/musl way
-# (-e _start_asm, argc/argv/envp/auxv decoded from %rsp, not %rdi/%rsi)
-# to check what kernel/exec.c's execve() actually put on its stack.
-$(BUILD)/_execve_launch: $(OBJDIR)/musl-test/execve_launch.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/execve_launch.dis
-	$(OBJCOPY) --strip-debug $@
-
-$(BUILD)/_execve_verify: $(OBJDIR)/musl-test/execve_verify.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e _start_asm -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/execve_verify.dis
-	$(OBJCOPY) --strip-debug $@
-
-# tls: SYS_arch_prctl(ARCH_SET_FS)/MSR_FS_BASE smoke test (see
-# musl/test/tls.c). Entered the normal poc-os way (-e main); it doesn't
-# need argv/envp, just a syscall and a %fs-relative memory access.
-$(BUILD)/_tls: $(OBJDIR)/musl-test/tls.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/tls.dis
-	$(OBJCOPY) --strip-debug $@
-
-# mmap: SYS_mmap/SYS_munmap smoke test (see musl/test/mmap.c).
-$(BUILD)/_mmaptest: $(OBJDIR)/musl-test/mmap.o | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/mmaptest.dis
-	$(OBJCOPY) --strip-debug $@
 
 # musl/: real musl source (musl-test/ above is only raw syscall_arch.h
 # smoke tests; this is actual crt1/__libc_start_main/malloc/etc object
@@ -405,41 +366,6 @@ $(OBJDIR)/musl/%.o: musl/%.s
 	@mkdir -p $(dir $@)
 	$(CC) -m64 -c -o $@ $<
 
-# The minimal real-musl object set proven to link and run a genuine
-# crt1-started, argv/envp/auxv-fed, TLS-initialized program (see
-# musl/test/real_hello.c): startup (crt1, __libc_start_main, TLS init,
-# environ/libc globals), the generic syscall_cp/errno/memcpy plumbing
-# every musl syscall wrapper sits on top of, and write()/exit()/_Exit()
-# themselves. Nowhere near all of musl - no malloc, no stdio/printf, no
-# dynamic linking - just what this specific set of source files pulls
-# in transitively; grown file-by-file, fixing each undefined-reference
-# as it came up, not designed upfront.
-MUSL_LIBC_OBJS = \
-	$(OBJDIR)/musl/crt/crt1.o \
-	$(OBJDIR)/musl/src/env/__libc_start_main.o \
-	$(OBJDIR)/musl/src/env/__init_tls.o \
-	$(OBJDIR)/musl/src/env/__environ.o \
-	$(OBJDIR)/musl/src/internal/libc.o \
-	$(OBJDIR)/musl/src/internal/defsysinfo.o \
-	$(OBJDIR)/musl/src/internal/syscall_ret.o \
-	$(OBJDIR)/musl/src/thread/__syscall_cp.o \
-	$(OBJDIR)/musl/src/thread/default_attr.o \
-	$(OBJDIR)/musl/src/thread/x86_64/__set_thread_area.o \
-	$(OBJDIR)/musl/src/string/memcpy.o \
-	$(OBJDIR)/musl/src/errno/__errno_location.o \
-	$(OBJDIR)/musl/src/unistd/write.o \
-	$(OBJDIR)/musl/src/exit/exit.o \
-	$(OBJDIR)/musl/src/exit/_Exit.o \
-
-# real_hello: entry is musl's own _start (crt1.o, via crt_arch.h), not
-# poc-os's usual -e main - it has to be launched with SYS_execve (see
-# musl/test/runmusl.c), not poc-os's native SYS_exec, since only
-# execve() builds the argc/argv/envp/auxv stack crt1 reads.
-$(BUILD)/_real_hello: $(OBJDIR)/musl/test/real_hello.o $(MUSL_LIBC_OBJS) | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/real_hello.dis
-	$(OBJCOPY) --strip-debug $@
-
 # runmusl: generic launcher, "runmusl <path> [args...]" - see
 # musl/test/runmusl.c. Entered the normal poc-os way (-e main, native
 # SYS_exec) since it's poc-os code, not musl code; what it launches
@@ -449,79 +375,409 @@ $(BUILD)/_runmusl: $(OBJDIR)/musl-test/runmusl.o | $(BUILD)
 	$(OBJDUMP) -S $@ > $(BUILD)/runmusl.dis
 	$(OBJCOPY) --strip-debug $@
 
-# Adds musl's "oldmalloc" backend (musl/src/malloc/oldmalloc/malloc.c -
-# chosen over the default mallocng backend for being one file, simpler,
-# and forgiving of poc-os's minimal mmap/munmap) on top of
-# MUSL_LIBC_OBJS: real malloc/calloc/realloc/free, real SYS_brk (which
-# oldmalloc calls directly, not through any sbrk()-style wrapper - see
-# kernel/sysproc.c's sys_brk()), and the handful of files that turned
-# out to be needed to link it (strlen, __lock/__wait for its
-# currently-always-uncontended locking, madvise/mremap - both
-# kernel-side stubs, see include/syscall.h).
-MUSL_MALLOC_OBJS = \
-	$(OBJDIR)/musl/src/malloc/oldmalloc/malloc.o \
-	$(OBJDIR)/musl/src/malloc/lite_malloc.o \
-	$(OBJDIR)/musl/src/malloc/calloc.o \
-	$(OBJDIR)/musl/src/malloc/realloc.o \
-	$(OBJDIR)/musl/src/malloc/free.o \
-	$(OBJDIR)/musl/src/malloc/replaced.o \
-	$(OBJDIR)/musl/src/mman/mmap.o \
-	$(OBJDIR)/musl/src/mman/munmap.o \
-	$(OBJDIR)/musl/src/mman/madvise.o \
-	$(OBJDIR)/musl/src/mman/mremap.o \
-	$(OBJDIR)/musl/src/string/memset.o \
-	$(OBJDIR)/musl/src/string/strlen.o \
-	$(OBJDIR)/musl/src/thread/__wait.o \
-	$(OBJDIR)/musl/src/thread/__lock.o \
+# musl's own version.h (musl/src/internal/version.c's #include
+# "version.h"): normally generated by ./configure from musl/VERSION;
+# this is the same one-line `#define VERSION "..."` musl's own
+# Makefile produces, without needing to run ./configure at all - same
+# rationale as MUSL_GENH's alltypes.h/syscall.h above.
+$(OBJDIR)/musl/internal/version.h: musl/VERSION
+	@mkdir -p $(dir $@)
+	printf '#define VERSION "%s"\n' "$$(cat musl/VERSION)" > $@
 
-$(BUILD)/_real_malloc: $(OBJDIR)/musl/test/real_malloc.o $(MUSL_LIBC_OBJS) $(MUSL_MALLOC_OBJS) | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/real_malloc.dis
+# musl/ldso/ (real ld-musl-x86_64.so.1 - dlstart.c/dynlink.c, unmodified
+# upstream - plus enough of real musl's own libc, also unmodified
+# upstream, to link a genuine libc.so around them) and true/false/cat
+# themselves (real dynamically-linked PIE ELF binaries importing libc
+# via a real PT_INTERP/PLT/GOT, not musl-crt1-launched-by-runmusl like
+# poc-os's own static binaries) live in their own $(OBJDIR)/musl-pic/
+# tree, compiled -fPIC - shared-object code, unlike every other musl
+# object in this Makefile (MUSL_CFLAGS above is -fno-pie/-no-pie, for
+# poc-os's own always-static-at-0 binaries). A separate object tree
+# rather than reusing $(OBJDIR)/musl/ so a source file needed by both
+# a static MUSL_LIBC_OBJS-style binary (e.g. musl/src/string/memcpy.c)
+# and libc.so doesn't fight over one non-PIC-vs-PIC .o.
+MUSL_PIC_CFLAGS = $(MUSL_CFLAGS:-fno-pie=-fPIC)
+MUSL_PIC_INC = -Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/internal \
+	-Imusl/src/include -Imusl/src/internal -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/musl-pic/%.o: musl/%.c $(MUSL_GENH) $(OBJDIR)/musl/internal/version.h
+	@mkdir -p $(dir $@)
+	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
+
+$(OBJDIR)/musl-pic/%.o: musl/%.s
+	@mkdir -p $(dir $@)
+	$(CC) -m64 -fPIC -c -o $@ $<
+
+# coreutils_shims.c (see its own comment) is poc-os C, not gnulib or
+# musl - but it fills in real libc-shaped gaps (a translating fstat(),
+# mbszero(), abort(), ...), so it belongs in libc.so itself, available
+# to every dynamically-linked binary, not statically re-linked into
+# each one individually. Compiled exactly like any other musl-pic
+# source (MUSL_PIC_CFLAGS/INC - see musl/src/internal/stdio_impl.h's
+# role there, spelled out in the file's own comment), just from a
+# source path outside musl/ - hence its own rule rather than the
+# generic $(OBJDIR)/musl-pic/%.o: musl/%.c pattern above.
+$(OBJDIR)/musl-pic/coreutils-shims/coreutils_shims.o: coreutils/poc/coreutils_shims.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
+
+# The real musl objects libc.so needs beyond MUSL_LIBC_OBJS/
+# MUSL_MALLOC_OBJS/MUSL_STDIO_OBJS's already-proven subset - grown the
+# same file-by-file way those were (see this Makefile's own git log),
+# just starting from "does musl/ldso/dynlink.c link" instead of "does
+# a musl-crt1 hello world link". crt1.o is deliberately excluded (see
+# musl/crt/Scrt1.c below): it defines _start for a *static* program,
+# not something libc.so itself needs.
+MUSL_LDSO_OBJS = \
+	$(OBJDIR)/musl-pic/src/env/__libc_start_main.o \
+	$(OBJDIR)/musl-pic/src/env/__init_tls.o \
+	$(OBJDIR)/musl-pic/src/env/__environ.o \
+	$(OBJDIR)/musl-pic/src/internal/libc.o \
+	$(OBJDIR)/musl-pic/src/internal/defsysinfo.o \
+	$(OBJDIR)/musl-pic/src/internal/syscall_ret.o \
+	$(OBJDIR)/musl-pic/src/thread/__syscall_cp.o \
+	$(OBJDIR)/musl-pic/src/thread/default_attr.o \
+	$(OBJDIR)/musl-pic/src/thread/x86_64/__set_thread_area.o \
+	$(OBJDIR)/musl-pic/src/string/memcpy.o \
+	$(OBJDIR)/musl-pic/src/errno/__errno_location.o \
+	$(OBJDIR)/musl-pic/src/unistd/write.o \
+	$(OBJDIR)/musl-pic/src/exit/exit.o \
+	$(OBJDIR)/musl-pic/src/exit/_Exit.o \
+	$(OBJDIR)/musl-pic/src/malloc/oldmalloc/malloc.o \
+	$(OBJDIR)/musl-pic/src/malloc/lite_malloc.o \
+	$(OBJDIR)/musl-pic/src/malloc/calloc.o \
+	$(OBJDIR)/musl-pic/src/malloc/realloc.o \
+	$(OBJDIR)/musl-pic/src/malloc/free.o \
+	$(OBJDIR)/musl-pic/src/malloc/replaced.o \
+	$(OBJDIR)/musl-pic/src/mman/mmap.o \
+	$(OBJDIR)/musl-pic/src/mman/munmap.o \
+	$(OBJDIR)/musl-pic/src/mman/madvise.o \
+	$(OBJDIR)/musl-pic/src/mman/mremap.o \
+	$(OBJDIR)/musl-pic/src/mman/mprotect.o \
+	$(OBJDIR)/musl-pic/src/string/memset.o \
+	$(OBJDIR)/musl-pic/src/string/strlen.o \
+	$(OBJDIR)/musl-pic/src/thread/__wait.o \
+	$(OBJDIR)/musl-pic/src/thread/__lock.o \
+	$(OBJDIR)/musl-pic/src/stdio/vfprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/printf.o \
+	$(OBJDIR)/musl-pic/src/stdio/vprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/__towrite.o \
+	$(OBJDIR)/musl-pic/src/stdio/__overflow.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdio_write.o \
+	$(OBJDIR)/musl-pic/src/stdio/stdout.o \
+	$(OBJDIR)/musl-pic/src/stdio/__lockfile.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdio_exit.o \
+	$(OBJDIR)/musl-pic/src/stdio/ofl.o \
+	$(OBJDIR)/musl-pic/src/stdio/ofl_add.o \
+	$(OBJDIR)/musl-pic/src/stdio/fwrite.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdio_close.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdout_write.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdio_seek.o \
+	$(OBJDIR)/musl-pic/src/stdio/snprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/vsnprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/dprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/vdprintf.o \
+	$(OBJDIR)/musl-pic/src/errno/strerror.o \
+	$(OBJDIR)/musl-pic/src/string/strnlen.o \
+	$(OBJDIR)/musl-pic/src/string/memchr.o \
+	$(OBJDIR)/musl-pic/src/string/strcpy.o \
+	$(OBJDIR)/musl-pic/src/string/strrchr.o \
+	$(OBJDIR)/musl-pic/src/string/strchr.o \
+	$(OBJDIR)/musl-pic/src/string/strchrnul.o \
+	$(OBJDIR)/musl-pic/src/string/stpcpy.o \
+	$(OBJDIR)/musl-pic/src/string/memrchr.o \
+	$(OBJDIR)/musl-pic/src/string/strcspn.o \
+	$(OBJDIR)/musl-pic/src/string/strspn.o \
+	$(OBJDIR)/musl-pic/src/string/strncmp.o \
+	$(OBJDIR)/musl-pic/src/string/memcmp.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wctomb.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wcrtomb.o \
+	$(OBJDIR)/musl-pic/src/locale/__lctrans.o \
+	$(OBJDIR)/musl-pic/src/unistd/lseek.o \
+	$(OBJDIR)/musl-pic/src/unistd/pread.o \
+	$(OBJDIR)/musl-pic/src/unistd/_exit.o \
+	$(OBJDIR)/musl-pic/src/fcntl/open.o \
+	$(OBJDIR)/musl-pic/src/unistd/close.o \
+	$(OBJDIR)/musl-pic/src/unistd/read.o \
+	$(OBJDIR)/musl-pic/src/env/getenv.o \
+	$(OBJDIR)/musl-pic/src/malloc/libc_calloc.o \
+	$(OBJDIR)/musl-pic/src/ldso/dlerror.o \
+	$(OBJDIR)/musl-pic/src/ldso/tlsdesc.o \
+	$(OBJDIR)/musl-pic/src/internal/version.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_lock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_unlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_cond_wait.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_cond_broadcast.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_rdlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_wrlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_unlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_tryrdlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_trywrlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_timedrdlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_rwlock_timedwrlock.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_setcancelstate.o \
+	$(OBJDIR)/musl-pic/src/thread/__tls_get_addr.o \
+	$(OBJDIR)/musl-pic/src/thread/vmlock.o \
+	$(OBJDIR)/musl-pic/src/setjmp/x86_64/setjmp.o \
+	$(OBJDIR)/musl-pic/src/setjmp/x86_64/longjmp.o \
+	$(OBJDIR)/musl-pic/ldso/dlstart.o \
+	$(OBJDIR)/musl-pic/ldso/dynlink.o \
+	$(OBJDIR)/musl-pic/test/ldso_stubs.o \
+	$(OBJDIR)/musl-pic/src/ctype/__ctype_get_mb_cur_max.o \
+	$(OBJDIR)/musl-pic/src/time/__map_file.o \
+	$(OBJDIR)/musl-pic/src/locale/__mo_lookup.o \
+	$(OBJDIR)/musl-pic/src/exit/atexit.o \
+	$(OBJDIR)/musl-pic/src/locale/c_locale.o \
+	$(OBJDIR)/musl-pic/src/stdio/fclose.o \
+	$(OBJDIR)/musl-pic/src/fcntl/fcntl.o \
+	$(OBJDIR)/musl-pic/src/stdio/ferror.o \
+	$(OBJDIR)/musl-pic/src/stdio/fflush.o \
+	$(OBJDIR)/musl-pic/src/stdio/fprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/fputs.o \
+	$(OBJDIR)/musl-pic/src/stdio/putc.o \
+	$(OBJDIR)/musl-pic/src/stdio/stderr.o \
+	$(OBJDIR)/musl-pic/src/stdio/clearerr.o \
+	$(OBJDIR)/musl-pic/src/stdio/fileno.o \
+	$(OBJDIR)/musl-pic/src/multibyte/internal.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbrtoc32.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbrtowc.o \
+	$(OBJDIR)/musl-pic/src/locale/langinfo.o \
+	$(OBJDIR)/musl-pic/src/locale/locale_map.o \
+	$(OBJDIR)/musl-pic/src/locale/setlocale.o \
+	$(OBJDIR)/musl-pic/src/malloc/reallocarray.o \
+	$(OBJDIR)/musl-pic/src/malloc/posix_memalign.o \
+	$(OBJDIR)/musl-pic/src/malloc/oldmalloc/aligned_alloc.o \
+	$(OBJDIR)/musl-pic/src/string/strcmp.o \
+	$(OBJDIR)/musl-pic/src/string/strerror_r.o \
+	$(OBJDIR)/musl-pic/src/string/memmove.o \
+	$(OBJDIR)/musl-pic/src/misc/ioctl.o \
+	$(OBJDIR)/musl-pic/src/legacy/getpagesize.o \
+	$(OBJDIR)/musl-pic/src/unistd/unlink.o \
+	$(OBJDIR)/musl-pic/src/unistd/link.o \
+	$(OBJDIR)/musl-pic/src/exit/assert.o \
+	$(OBJDIR)/musl-pic/src/misc/getopt.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbtowc.o \
+	$(OBJDIR)/musl-pic/src/stdio/putchar.o \
+	$(OBJDIR)/musl-pic/src/stdio/ext2.o \
+	$(OBJDIR)/musl-pic/src/stdio/fseek.o \
+	$(OBJDIR)/musl-pic/src/stdio/stdin.o \
+	$(OBJDIR)/musl-pic/src/stdio/fgetc.o \
+	$(OBJDIR)/musl-pic/src/stdio/fread.o \
+	$(OBJDIR)/musl-pic/src/stdio/__stdio_read.o \
+	$(OBJDIR)/musl-pic/src/stdio/__toread.o \
+	$(OBJDIR)/musl-pic/src/stdio/__uflow.o \
+	$(OBJDIR)/musl-pic/coreutils-shims/coreutils_shims.o \
+
+# The interpreter/libc.so itself: -shared -e _dlstart is exactly
+# musl's own real link line for it (see musl/Makefile's $(LDSO)
+# rule) - a real ET_DYN with a real .dynsym/.dynamic/PLT/GOT, not
+# something poc-os invented a shape for. build/libc.so (this exact
+# name, not build/_libc.so) is also what -lc below resolves against.
+# Debug info is stripped for the same MAXFILE-budget reason $(BUILD)/_%
+# strips it (see that rule's comment) - unstripped this is >250KB,
+# stripped it's ~55KB. Installed into the image at /usr/lib/libc.so -
+# see MKFS_INSTALL and $(BUILD)/fs.img below - not through UPROGS's
+# usual root-placed/underscore-stripped convention.
+$(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
+	$(LD) -m elf_x86_64 -shared -e _dlstart -o $@ $^
+	$(OBJCOPY) --strip-debug $@
+	$(OBJCOPY) --strip-unneeded $@
+
+# Scrt1: musl/crt/Scrt1.c is just "#include crt1.c" (see musl/crt/
+# crt1.c) - the *-fPIC compiled* variant of the same _start real musl
+# uses for every dynamically-linked (non-static) executable, calling
+# __libc_start_main() via the PLT like any other libc.so import
+# rather than linking it in directly the way crt1.o did.
+
+# coreutils/: real GNU coreutils 9.5 source (src/, lib/ - the latter is
+# gnulib, coreutils' portability library) vendored the same way musl/
+# is - unmodified upstream, except coreutils/lib/config.h and
+# coreutils/lib/{error.h,stdckdint.h,configmake.h}/src/{version.h,
+# version.c}, which are what a real ./configure + make run would
+# normally *generate* (not source you'd hand-write) - vendored
+# pre-generated instead, since this Makefile doesn't run autoconf/
+# automake at all (the build machine may not even have them - see
+# coreutils/poc/config.h's own comment for how these were produced:
+# adapted from a native, non-cross ./configure run, not written from
+# scratch). coreutils/poc/ is poc-os's own small addition on top - not
+# vendored gnulib - the same idea as musl/test/ldso_stubs.c: a
+# handful of functions real gnulib only ever declares inside its own
+# header *replacements* (lib/wchar.in.h, lib/stdio.in.h, ...), which
+# this build skips in favor of musl's real public headers directly
+# (see COREUTILS_INC below), plus the handful gnulib has no
+# implementation of at all for this libc (__fpending, a translating
+# __fstat, a signal-free abort() - poc-os has no signal delivery of
+# any kind - see coreutils/poc/coreutils_shims.c, now part of
+# MUSL_LDSO_OBJS/libc.so itself rather than linked per-executable).
+#
+# Every coreutils/gnulib object is -fPIC (COREUTILS_PIC_CFLAGS, not a
+# -fno-pie one) and linked into true/false/cat themselves as a PIE
+# executable importing libc (open/printf/malloc/...) from libc.so via
+# the real ELF dynamic linker - not statically linked, since that's
+# what was actually asked for: real dynamic linking against /usr/lib.
+#
+# Mirrors MUSL_PIC_CFLAGS/INC in shape, not value - std=gnu11 (some
+# coreutils source already assumes C23's nullptr/unreachable()),
+# -DHAVE_CONFIG_H (every coreutils/gnulib source file starts with
+# #include <config.h>), and coreutils/poc's three directories take
+# priority in the -I order so its config.h/overrides are seen first.
+# -include forces poc_prelude.h ahead of every source file's own first
+# #include, the same role -DHAVE_CONFIG_H plays for config.h itself.
+COREUTILS_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall
+COREUTILS_INC = -include coreutils/poc/poc_prelude.h -Icoreutils/poc -Icoreutils/lib -Icoreutils/src \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/coreutils-pic/%.o: coreutils/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(COREUTILS_PIC_CFLAGS) $(COREUTILS_INC) -c -o $@ $<
+
+# The real gnulib/coreutils objects true/false need beyond libc
+# itself - grown file-by-file exactly like MUSL_LIBC_OBJS/
+# MUSL_LDSO_OBJS were (see their own comments): starting from "does
+# coreutils/src/true.c compile" and adding whichever gnulib source
+# each successive undefined reference pointed at. All of this stays
+# statically linked into each executable (real gnulib isn't part of
+# libc on any real system either) - only the true libc-side functions
+# beyond that (COREUTILS_CAT_MUSL_OBJS's musl additions, folded into
+# MUSL_LDSO_OBJS/libc.so itself instead - see that variable) come from
+# the dynamic linker.
+COREUTILS_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/c-ctype.o \
+	$(OBJDIR)/coreutils-pic/lib/c-strcasecmp.o \
+	$(OBJDIR)/coreutils-pic/lib/close-stream.o \
+	$(OBJDIR)/coreutils-pic/lib/closeout.o \
+	$(OBJDIR)/coreutils-pic/lib/error.o \
+	$(OBJDIR)/coreutils-pic/lib/exitfail.o \
+	$(OBJDIR)/coreutils-pic/lib/ialloc.o \
+	$(OBJDIR)/coreutils-pic/lib/localcharset.o \
+	$(OBJDIR)/coreutils-pic/lib/progname.o \
+	$(OBJDIR)/coreutils-pic/lib/propername-lite.o \
+	$(OBJDIR)/coreutils-pic/lib/quotearg.o \
+	$(OBJDIR)/coreutils-pic/lib/version-etc.o \
+	$(OBJDIR)/coreutils-pic/lib/version-etc-fsf.o \
+	$(OBJDIR)/coreutils-pic/lib/xalloc-die.o \
+	$(OBJDIR)/coreutils-pic/lib/xmalloc.o \
+	$(OBJDIR)/coreutils-pic/src/version.o \
+
+# true/false: PIE, -e _start via musl/crt/Scrt1.c - run as
+# "runmusl true"/"runmusl false" like every other musl-crt1-style
+# UPROGS entry, not directly by name.
+$(BUILD)/_true: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/true.o \
+		$(COREUTILS_GNULIB_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/true.o \
+		$(COREUTILS_GNULIB_OBJS) -L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/true.dis
 	$(OBJCOPY) --strip-debug $@
 
-# Adds real printf/vfprintf/stdio on top of MUSL_LIBC_OBJS +
-# MUSL_MALLOC_OBJS (FILE buffering needs both malloc, for the stream
-# buffer, and the syscalls below). %a/%e/%f/%g print a fixed
-# "<float-unsupported>" placeholder rather than a real value -
-# vfprintf.c is forked (see its fmt_fp() and pop_arg()'s DBL/LDBL
-# cases) to avoid all x87/SSE codegen, none of which compiles under
-# -mgeneral-regs-only in the first place, the same reason nothing else
-# in this build touches floating point; real support needs the kernel
-# to save/restore FPU state across a context switch first, which it
-# doesn't do at all today. Also needed two more real syscalls beyond
-# what MUSL_LIBC_OBJS/MUSL_MALLOC_OBJS required: SYS_writev (stdio's
-# actual flush path) and SYS_lseek (both genuinely implemented, not
-# stubs - kernel/sysfile.c), plus two stubs (SYS_ioctl, always fails -
-# stdio's isatty-for-buffering-mode check; poc-os has no ioctl of any
-# kind yet).
-MUSL_STDIO_OBJS = \
-	$(OBJDIR)/musl/src/stdio/vfprintf.o \
-	$(OBJDIR)/musl/src/stdio/printf.o \
-	$(OBJDIR)/musl/src/stdio/vprintf.o \
-	$(OBJDIR)/musl/src/stdio/__towrite.o \
-	$(OBJDIR)/musl/src/stdio/__overflow.o \
-	$(OBJDIR)/musl/src/stdio/__stdio_write.o \
-	$(OBJDIR)/musl/src/stdio/stdout.o \
-	$(OBJDIR)/musl/src/stdio/__lockfile.o \
-	$(OBJDIR)/musl/src/stdio/__stdio_exit.o \
-	$(OBJDIR)/musl/src/stdio/ofl.o \
-	$(OBJDIR)/musl/src/stdio/ofl_add.o \
-	$(OBJDIR)/musl/src/stdio/fwrite.o \
-	$(OBJDIR)/musl/src/stdio/__stdio_close.o \
-	$(OBJDIR)/musl/src/stdio/__stdout_write.o \
-	$(OBJDIR)/musl/src/stdio/__stdio_seek.o \
-	$(OBJDIR)/musl/src/errno/strerror.o \
-	$(OBJDIR)/musl/src/string/strnlen.o \
-	$(OBJDIR)/musl/src/string/memchr.o \
-	$(OBJDIR)/musl/src/multibyte/wctomb.o \
-	$(OBJDIR)/musl/src/multibyte/wcrtomb.o \
-	$(OBJDIR)/musl/src/locale/__lctrans.o \
-	$(OBJDIR)/musl/src/unistd/lseek.o \
-
-$(BUILD)/_real_printf: $(OBJDIR)/musl/test/real_printf.o $(MUSL_LIBC_OBJS) $(MUSL_MALLOC_OBJS) $(MUSL_STDIO_OBJS) | $(BUILD)
-	$(LD) $(LDFLAGS) -N -e _start -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $(BUILD)/real_printf.dis
+# false.c is coreutils/src/false.c itself just "#define EXIT_STATUS
+# EXIT_FAILURE" then "#include \"true.c\"" - same object set as true.
+$(BUILD)/_false: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/false.o \
+		$(COREUTILS_GNULIB_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/false.o \
+		$(COREUTILS_GNULIB_OBJS) -L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/false.dis
 	$(OBJCOPY) --strip-debug $@
+
+# The further gnulib objects cat.c needs beyond COREUTILS_GNULIB_OBJS's
+# true/false-derived subset - grown the exact same file-by-file way,
+# starting from "does coreutils/src/cat.c compile" this time. Real
+# file I/O (open/read/close/fstat) is what actually distinguishes
+# cat.c from true.c/false.c here, not anything cat-specific - the
+# next utility with real file I/O should need few, if any, further
+# gnulib additions beyond this set (any further libc-side needs go
+# into MUSL_LDSO_OBJS/libc.so instead, not here).
+COREUTILS_CAT_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/alignalloc.o \
+	$(OBJDIR)/coreutils-pic/lib/copy-file-range.o \
+	$(OBJDIR)/coreutils-pic/lib/fadvise.o \
+	$(OBJDIR)/coreutils-pic/lib/full-write.o \
+	$(OBJDIR)/coreutils-pic/lib/getopt.o \
+	$(OBJDIR)/coreutils-pic/lib/getopt1.o \
+	$(OBJDIR)/coreutils-pic/lib/safe-read.o \
+	$(OBJDIR)/coreutils-pic/lib/safe-write.o \
+	$(OBJDIR)/coreutils-pic/lib/xalignalloc.o \
+
+$(BUILD)/_gcat: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/cat.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/cat.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) -L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/gcat.dis
+	$(OBJCOPY) --strip-debug $@
+
+# echo: like true/false/cat, every one of these utilities' main() parses
+# --help/--version through gnulib's getopt_long (COREUTILS_CAT_GNULIB_OBJS'
+# getopt.o/getopt1.o, despite the name - see that variable's own comment)
+# even when it takes no other options, so every rule below needs it, not
+# just cat's own real-file-I/O additions.
+$(BUILD)/_gecho: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/echo.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/echo.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) -L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/gecho.dis
+	$(OBJCOPY) --strip-debug $@
+
+# basename/dirname: share basename-lgpl.o (the actual path-splitting
+# logic); basename.c additionally needs stripslash.o (trailing-slash
+# removal, which dirname doesn't do).
+COREUTILS_BASENAME_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/stripslash.o \
+
+$(BUILD)/_basename: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/basename.o \
+		$(OBJDIR)/coreutils-pic/lib/basename.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_BASENAME_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/basename.o \
+		$(OBJDIR)/coreutils-pic/lib/basename.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_BASENAME_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/basename.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_dirname: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/dirname.o \
+		$(OBJDIR)/coreutils-pic/lib/dirname-lgpl.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_BASENAME_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/dirname.o \
+		$(OBJDIR)/coreutils-pic/lib/dirname-lgpl.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_BASENAME_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/dirname.dis
+	$(OBJCOPY) --strip-debug $@
+
+# yes: long-options.o is --help/--version's shared "--help"/"--version
+# alone on the command line" handling, gnulib's usual long_options()
+# helper.
+$(BUILD)/_yes: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/yes.o \
+		$(OBJDIR)/coreutils-pic/lib/long-options.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/yes.o \
+		$(OBJDIR)/coreutils-pic/lib/long-options.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) -L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/yes.dis
+	$(OBJCOPY) --strip-debug $@
+
+# head/tr/cut: all three compile and link fine (see git history if
+# reviving this), but real FILE*-buffered I/O (fopen/fgetc/ungetc/
+# setvbuf/...) pushes libc.so past MAXFILE (include/fs.h - 140 blocks,
+# ~70KB; xv6's inode has only a single indirect block, no double
+# indirect) once added on top of what true/false/cat/echo/basename/
+# dirname/yes already need. Shipping these three needs either a
+# smaller libc.so (dropping something else) or real double-indirect
+# block support in kernel/fs.c's bmap()/itrunc() and mkfs/mkfs.c's
+# iappend() - both bigger than this port currently has. Their build
+# rules (Scrt1.o + coreutils-pic/src/{head,tr,cut}.o + the gnulib
+# objects noted above + libc.so) are straightforward to recreate in the
+# same shape as $(BUILD)/_gcat below once one of those two is done.
 
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
@@ -532,47 +788,52 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
-.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o
 
+# UPROGS is mkfs/mkfs.c's usual root-placed/underscore-stripped
+# convention (a bare host path, e.g. build/_foo -> installed as /foo -
+# see mkfs.c's own comment on argv). Empty today: every current binary,
+# including init/sh, is instead installed explicitly under /usr/bin via
+# MKFS_INSTALL's "imgpath:hostpath" form below, so there's exactly one
+# place binaries live rather than some at / and some at /usr/bin. Kept
+# (rather than deleted) as the mechanism a future root-placed program
+# would still use.
 UPROGS=\
-	$(BUILD)/_cat\
-	$(BUILD)/_echo\
-	$(BUILD)/_forktest\
-	$(BUILD)/_grep\
-	$(BUILD)/_init\
-	$(BUILD)/_kill\
-	$(BUILD)/_ln\
-	$(BUILD)/_ls\
-	$(BUILD)/_mkdir\
-	$(BUILD)/_rm\
-	$(BUILD)/_sh\
-	$(BUILD)/_stressfs\
-	$(BUILD)/_usertests\
-	$(BUILD)/_wc\
-	$(BUILD)/_zombie\
 
-# musl-test/ smoke-test binaries (see musl/README and musl/test/*.c):
-# x86_64-only, like the rest of the musl port - some of them (notably
-# execve_verify.c's _start_asm) use raw 64-bit-register inline asm that
-# doesn't compile at all under ARCH=32's -m32, so unlike every other
-# UPROGS entry above these are conditional on ARCH rather than always
-# built.
+# init/sh: not "commands" in the usual sense - init is PID 1 (the
+# kernel loads initcode.asm/initcode64.asm, which SYS_execs this exact
+# path - see those files' own "init:" string) and sh is what init execs
+# in turn (see user/init.c) - but installed under /usr/bin like
+# everything else rather than carved out as a root-level exception.
+# Unlike the coreutils additions below, these apply to every ARCH: the
+# 32-bit build still needs an init/sh, even with no musl/coreutils in
+# it at all.
+MKFS_INSTALL = usr/bin/init:$(BUILD)/_init usr/bin/sh:$(BUILD)/_sh
+MKFS_INSTALL_DEPS = $(BUILD)/_init $(BUILD)/_sh
+
+# GNU coreutils ports (true/false/cat/echo/basename/dirname/yes,
+# runmusl - a manual musl-crt1-style launcher, see musl-test/%.o's own
+# comment): x86_64-only, like the rest of the musl port, so conditional
+# on ARCH rather than always built. libc.so has to live at exactly
+# /usr/lib/libc.so - that path is baked into every one of these
+# binaries' own PT_INTERP segment (--dynamic-linker /usr/lib/libc.so
+# above) as the dynamic linker to load. Kept deliberately small - see
+# $(BUILD)/_ghead's own comment above for why head/tr/cut aren't here
+# too (MAXFILE).
 ifeq ($(ARCH),64)
-UPROGS+=\
-	$(BUILD)/_execve_launch\
-	$(BUILD)/_execve_verify\
-	$(BUILD)/_mmaptest\
-	$(BUILD)/_muslhello\
-	$(BUILD)/_real_hello\
-	$(BUILD)/_real_malloc\
-	$(BUILD)/_real_printf\
-	$(BUILD)/_runmusl\
-	$(BUILD)/_tls\
+MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
+	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \
+	usr/bin/echo:$(BUILD)/_gecho usr/bin/basename:$(BUILD)/_basename \
+	usr/bin/dirname:$(BUILD)/_dirname usr/bin/yes:$(BUILD)/_yes \
+	usr/bin/runmusl:$(BUILD)/_runmusl
+MKFS_INSTALL_DEPS += $(BUILD)/libc.so $(BUILD)/_true $(BUILD)/_false \
+	$(BUILD)/_gcat $(BUILD)/_gecho $(BUILD)/_basename $(BUILD)/_dirname \
+	$(BUILD)/_yes $(BUILD)/_runmusl
 
 endif
 
-$(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS)
-	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS)
+$(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
+	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
 -include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d
 
@@ -645,8 +906,7 @@ qemu-nox-gdb: $(BUILD)/fs.img $(BUILD)/poc.img .gdbinit
 # check in that version.
 
 EXTRA=\
-	mkfs/mkfs.c user/ulib.c include/user.h user/cat.c user/echo.c user/forktest.c user/grep.c user/kill.c\
-	user/ln.c user/ls.c user/mkdir.c user/rm.c user/stressfs.c user/usertests.c user/wc.c user/zombie.c\
+	mkfs/mkfs.c user/ulib.c include/user.h\
 	user/printf.c user/umalloc.c\
 	README dot-bochsrc tools/*.pl docs/toc.* tools/runoff tools/runoff1 tools/runoff.list\
 	.gdbinit.tmpl tools/gdbutil\

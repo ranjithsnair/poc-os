@@ -37,6 +37,7 @@ SYSCALL write, SYS_write
 SYSCALL close, SYS_close
 SYSCALL kill, SYS_kill
 SYSCALL exec, SYS_exec
+SYSCALL execve, SYS_execve
 SYSCALL open, SYS_open
 SYSCALL mknod, SYS_mknod
 SYSCALL unlink, SYS_unlink

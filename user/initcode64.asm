@@ -26,9 +26,9 @@ exit:
   int T_SYSCALL
   jmp exit
 
-; char init[] = "/init\0";
+; char init[] = "/usr/bin/init\0";
 init:
-  db "/init", 0, 0
+  db "/usr/bin/init", 0, 0
 
 ; char *argv[] = { init, 0 };
 align 8

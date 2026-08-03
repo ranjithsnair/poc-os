@@ -19,6 +19,8 @@
 #include "types.h"
 #include "user.h"
 #include "fcntl.h"
+#include "elf.h"
+#include "stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -69,6 +71,50 @@ int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
 
+// A deliberately tiny stand-in for a real $PATH search: a bare name (no
+// '/') that doesn't exist relative to the current directory is looked
+// up under /usr/bin instead, where poc-os installs every stock binary
+// (see the Makefile's MKFS_INSTALL) - so "true"/"cat"/"sh" keep working
+// as typed even though none of them actually live at the process's cwd.
+// A name that already contains '/', or that does exist as typed, is
+// left alone - cwd always wins over /usr/bin, same as a "./foo" would
+// in a real shell.
+static char*
+resolvepath(char *name, char *buf)
+{
+  struct stat st;
+
+  if(strchr(name, '/') || stat(name, &st) == 0)
+    return name;
+  strcpy(buf, "/usr/bin/");
+  strcpy(buf + strlen(buf), name);
+  return buf;
+}
+
+#ifdef X64
+// Peeks at path's ELF header to tell a poc-os-native static binary
+// (ET_EXEC, entered via plain SYS_exec's argc/argv convention) apart
+// from a musl-crt1/PIE binary (ET_DYN - true/false/cat and any future
+// GNU coreutils port), which instead needs SYS_execve's Linux-style
+// argc/argv/envp/auxv stack and PT_INTERP handling (see include/elf.h's
+// own comment on ELF_ET_DYN and kernel/exec.c's execve()) - the same
+// distinction musl/test/runmusl.c makes via raw syscalls, but done here
+// so plain "true"/"cat" work by name instead of needing a "runmusl"
+// prefix.
+static int
+isdyn(char *path)
+{
+  int fd, n;
+  struct elfhdr eh;
+
+  if((fd = open(path, O_RDONLY)) < 0)
+    return 0;
+  n = read(fd, &eh, sizeof(eh));
+  close(fd);
+  return n == sizeof(eh) && eh.magic == ELF_MAGIC && eh.type == ELF_ET_DYN;
+}
+#endif
+
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)
@@ -79,6 +125,7 @@ runcmd(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  char pathbuf[128], *path;
 
   if(cmd == 0)
     exit();
@@ -91,7 +138,16 @@ runcmd(struct cmd *cmd)
     ecmd = (struct execcmd*)cmd;
     if(ecmd->argv[0] == 0)
       exit();
-    exec(ecmd->argv[0], ecmd->argv);
+    path = resolvepath(ecmd->argv[0], pathbuf);
+#ifdef X64
+    if(isdyn(path)){
+      // Minimal fixed envp, same as musl/test/runmusl.c - poc-os's
+      // shell has no environment variables of its own to forward.
+      static char *envp[] = { "HOME=/", "PATH=/", 0 };
+      execve(path, ecmd->argv, envp);
+    } else
+#endif
+      exec(path, ecmd->argv);
     printf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 

@@ -10,6 +10,10 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
 #include "proc.h"
 #include "syscall.h"
 
@@ -152,34 +156,72 @@ sys_mremap(void)
   return -1;
 }
 
-// (addr, len, prot, flags, fd, offset): addr/prot/flags are ignored
-// (see include/syscall.h) and only anonymous mappings (fd == -1) are
-// supported - every mapping just grows curproc->sz by
-// PGROUNDUP(len), the same mechanism sbrk() uses (growproc(), which
-// allocuvm()s the new pages), and is placed at whatever the current
-// top of the address space happens to be. Good enough for musl's
-// allocator and TLS block, which only ever want fresh anonymous
-// memory; nowhere close to a real mmap (no VMA list, no fixed
-// addresses, no file backing) - that's future work, not attempted
-// here.
+// PROT_WRITE/MAP_FIXED: the same numeric values musl's <sys/mman.h>
+// (and Linux) use for them - the only two bits sys_mmap()/
+// sys_mprotect() below ever inspect (see their doc comments and
+// SYS_mmap/SYS_mprotect in include/syscall.h).
+#define PROT_WRITE 2
+#define MAP_FIXED  0x10
+
+// (addr, len, prot, flags, fd, offset): see include/syscall.h. Every
+// mapping still lives inside the single contiguous [0, curproc->sz)
+// region a poc-os process's address space has always been - there's
+// no separate VMA list. addr == 0, or any addr >= the current sz,
+// grows sz by PGROUNDUP(len) (the same growproc()/allocuvm() mechanism
+// sbrk() and the old anonymous-only mmap used, which zero-fills the
+// new pages on its own) and places the mapping at that new top.
+// addr < sz is the MAP_FIXED overlay path a real dynamic linker needs
+// (see musl/ldso/dynlink.c's map_library(): reserve a whole library's
+// span with one addr==0 mmap, then MAP_FIXED sub-mmap each PT_LOAD
+// segment into it) - addr/addr+len must land entirely inside that
+// already-mapped range, and this just overlays new content onto it
+// (read from fd at offset, or zeroed if fd == -1) instead of growing
+// sz further.
 int
 sys_mmap(void)
 {
   int len, prot, flags, fd, offset;
   int addr;
-  uint sz;
+  uint base, n, sz;
+  struct proc *curproc = myproc();
+  struct file *f = 0;
 
-  if(argint(1, &len) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
-     argint(4, &fd) < 0 || argint(5, &offset) < 0)
+  if(argint(0, &addr) < 0 || argint(1, &len) < 0 || argint(2, &prot) < 0 ||
+     argint(3, &flags) < 0 || argint(4, &fd) < 0 || argint(5, &offset) < 0)
     return -1;
-  if(fd != -1 || len <= 0)
+  if(len <= 0)
     return -1;
+  if(fd != -1){
+    if(fd < 0 || fd >= NOFILE || (f = curproc->ofile[fd]) == 0 ||
+       f->type != FD_INODE)
+      return -1;
+  }
 
-  sz = PGROUNDUP((uint)len);
-  addr = myproc()->sz;
-  if(growproc((int)sz) < 0)
-    return -1;
-  return addr;
+  n = PGROUNDUP((uint)len);
+  if((flags & MAP_FIXED) && (uint)addr < curproc->sz){
+    base = (uint)addr;
+    if(base % PGSIZE != 0 || base + n > curproc->sz || base + n < base)
+      return -1;
+  } else {
+    base = curproc->sz;
+    if((sz = allocuvm(curproc->pgdir, curproc->sz, base + n)) == 0)
+      return -1;
+    curproc->sz = sz;
+    switchuvm(curproc);
+  }
+
+  if(f){
+    ilock(f->ip);
+    if(loaduvm(curproc->pgdir, (char*)(uintp)base, f->ip, (uint)offset, (uint)len) < 0){
+      iunlock(f->ip);
+      return -1;
+    }
+    iunlock(f->ip);
+  } else {
+    uvmzero(curproc->pgdir, base, (uint)len);
+  }
+  uvmsetperm(curproc->pgdir, base, n, (prot & PROT_WRITE) != 0);
+  return base;
 }
 
 // (addr, len): only succeeds when [addr, addr+PGROUNDUP(len)) is
@@ -201,6 +243,30 @@ sys_munmap(void)
     return -1;
   if(growproc(-(int)sz) < 0)
     return -1;
+  return 0;
+}
+
+// (addr, len, prot): see include/syscall.h and sys_mmap()'s doc
+// comment above - addr/len are rounded out to whole pages the same
+// way a real mprotect() would (POSIX doesn't require addr to already
+// be page-aligned, only that it lie on one).
+int
+sys_mprotect(void)
+{
+  int addr, len, prot;
+  uint base, n;
+  struct proc *curproc = myproc();
+
+  if(argint(0, &addr) < 0 || argint(1, &len) < 0 || argint(2, &prot) < 0)
+    return -1;
+  if(len <= 0)
+    return -1;
+
+  base = PGROUNDDOWN((uint)addr);
+  n = PGROUNDUP((uint)addr + len) - base;
+  if(base + n > curproc->sz || base + n < base)
+    return -1;
+  uvmsetperm(curproc->pgdir, base, n, (prot & PROT_WRITE) != 0);
   return 0;
 }
 

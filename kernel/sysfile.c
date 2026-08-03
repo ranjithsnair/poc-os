@@ -128,6 +128,40 @@ sys_writev(void)
   return total;
 }
 
+// (fd, iov, iovcnt): see include/syscall.h. Read-side mirror of
+// sys_writev() above - same argument fetching, same per-iovec loop,
+// fileread() instead of filewrite().
+int
+sys_readv(void)
+{
+  struct file *f;
+  int iovp, iovcnt;
+  int i, total, base, len, n;
+  char *p;
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &iovp) < 0 || argint(2, &iovcnt) < 0)
+    return -1;
+  if(iovcnt < 0 || iovcnt > 16)
+    return -1;
+
+  total = 0;
+  for(i = 0; i < iovcnt; i++){
+    if(fetchint(iovp + 16*i, &base) < 0 || fetchint(iovp + 16*i + 8, &len) < 0)
+      return total > 0 ? total : -1;
+    if(len == 0)
+      continue;
+    if(len < 0 || (uint)base >= myproc()->sz || (uint)base+len > myproc()->sz)
+      return total > 0 ? total : -1;
+    p = (char*)(uintp)(uint)base;
+    if((n = fileread(f, p, len)) < 0)
+      return total > 0 ? total : -1;
+    total += n;
+    if(n < len)
+      break;  // short read - stop, like a real readv would
+  }
+  return total;
+}
+
 // (fd, offset, whence): see include/syscall.h.
 int
 sys_lseek(void)
@@ -162,6 +196,32 @@ sys_lseek(void)
   }
   f->off = newoff;
   return newoff;
+}
+
+// (fd, buf, count, offset): see include/syscall.h.
+int
+sys_pread(void)
+{
+  struct file *f;
+  char *p;
+  int n, offset;
+
+  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0 ||
+     argint(3, &offset) < 0)
+    return -1;
+  if(f->type != FD_INODE || f->readable == 0 || offset < 0)
+    return -1;
+  ilock(f->ip);
+  n = readi(f->ip, p, (uint)offset, n);
+  iunlock(f->ip);
+  return n;
+}
+
+// (fd, cmd, arg): see include/syscall.h.
+int
+sys_fcntl(void)
+{
+  return 0;
 }
 #endif
 

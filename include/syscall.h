@@ -36,13 +36,19 @@
 // was) to install the thread pointer every musl program needs even
 // single-threaded, since errno and friends are TLS-relative.
 #define SYS_arch_prctl 23
-// (addr, len, prot, flags, fd, offset). Only the anonymous case (fd ==
-// -1) is implemented, and addr/prot/flags are otherwise ignored: every
-// mapping is placed by the kernel at the current top of the process's
-// address space and is always both readable and writable - see
-// kernel/sysproc.c's sys_mmap(). File-backed mmap (fd != -1, which a
-// real dynamic linker needs to map a .so's segments) isn't implemented
-// yet.
+// (addr, len, prot, flags, fd, offset). Every mapping still lives
+// inside the single contiguous [0, proc->sz) region poc-os has always
+// used for a process's whole address space (there's no separate VMA
+// list) - "mmap" here means "grow sz and populate the new pages",
+// exactly like the brk-style anonymous case always did. addr==0 (or
+// any addr >= the current sz) always grows sz and returns the new
+// region's base; addr < sz (MAP_FIXED, per a real dynamic linker's
+// "reserve with one mmap, then MAP_FIXED sub-mmap each segment into
+// it" pattern - see musl/ldso/dynlink.c's map_library()) overlays new
+// content/permissions onto an already-mapped range instead of growing
+// sz further. fd != -1 reads the mapping's content from that file at
+// offset; fd == -1 zero-fills it (allocuvm() already zero-fills any
+// newly grown page regardless). See kernel/sysproc.c's sys_mmap().
 #define SYS_mmap   24
 // (addr, len). Only succeeds when [addr, addr+len) is exactly the
 // current top of the address space (what sys_mmap() above always
@@ -125,6 +131,39 @@
 // <unistd.h> (and Linux) use, so no translation is needed. Only valid
 // on FD_INODE files, matching real lseek's ESPIPE-on-a-pipe behavior.
 #define SYS_lseek 35
+// (addr, len, prot): changes the PTE_W bit on every page in an
+// already-mapped [addr, addr+len) range within [0, proc->sz) to match
+// prot's PROT_WRITE bit. poc-os's page tables track no NX-style
+// execute-disable bit at all (every present page is executable), so
+// PROT_EXEC/PROT_READ/PROT_NONE are accepted but otherwise ignored -
+// see kernel/sysproc.c's sys_mprotect(). musl's dynamic linker calls
+// this once per segment after relocation to drop write permission on
+// anything that isn't meant to stay writable (e.g. a .so's .text/
+// .rodata).
+#define SYS_mprotect 36
+// (fd, buf, count, offset): like SYS_read, but reads from a given
+// offset without touching (or being affected by) the file's own
+// read/write cursor - real pread() semantics. Only musl/ldso/
+// dynlink.c's map_library() needs this (to read a shared object's
+// program headers without disturbing the fd it's about to mmap from)
+// - see kernel/sysfile.c's sys_pread().
+#define SYS_pread 37
+// (fd, cmd, arg): stub - always "succeeds" as a no-op. musl's open()
+// (musl/src/fcntl/open.c) calls this once, with F_SETFD/FD_CLOEXEC,
+// whenever O_CLOEXEC is requested; poc-os has no exec-time fd-closing
+// behavior of any kind yet (every fd survives exec()), so a real
+// implementation would have nothing to do anyway - see
+// kernel/sysfile.c's sys_fcntl().
+#define SYS_fcntl 38
+// (fd, iov, iovcnt): the read-side mirror of SYS_writev above - musl's
+// buffered stdio (musl/src/stdio/__stdio_read.c) calls this on every
+// underlying fill, reading straight into both the caller's buffer and
+// the FILE's own internal one in a single syscall the same way
+// __stdio_write's flush does. Just loops fileread() once per non-empty
+// iovec (kernel/sysfile.c's sys_readv()), stopping at the first short
+// read exactly like a real readv() would; same iov_base/iov_len-as-
+// low-32-bits caveat as sys_writev().
+#define SYS_readv 39
 
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value

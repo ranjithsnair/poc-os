@@ -87,8 +87,20 @@ struct proghdr {
 
 // Values for Proghdr type
 #define ELF_PROG_LOAD           1
+// The dynamic linker's path (e.g. "/ld-musl-x86_64.so.1"), stored as a
+// NUL-terminated string at [off, off+filesz) - see kernel/exec.c's
+// execve(), which reads it and loads that file as the ELF interpreter
+// instead of jumping straight to the main executable's own entry point.
+#define ELF_PROG_INTERP         3
 
 // Flag bits for Proghdr flags
 #define ELF_PROG_FLAG_EXEC      1
 #define ELF_PROG_FLAG_WRITE     2
 #define ELF_PROG_FLAG_READ      4
+
+// Values for elfhdr.type - only used by execve() to tell an ET_DYN
+// interpreter (whose proghdr vaddrs are relative to an arbitrary load
+// bias the kernel picks) apart from an ET_EXEC main executable (loaded
+// at a fixed bias of 0, same as poc-os's own static, non-PIE binaries).
+#define ELF_ET_EXEC              2
+#define ELF_ET_DYN               3

@@ -34,3 +34,7 @@
 #define __NR_writev 33
 #define __NR_ioctl 34
 #define __NR_lseek 35
+#define __NR_mprotect 36
+#define __NR_pread 37
+#define __NR_fcntl 38
+#define __NR_readv 39

@@ -213,6 +213,25 @@ execve(char *path, char **argv, char **envp)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
+  // PT_INTERP support: a PT_LOAD-only ELF (every poc-os binary until
+  // now) still runs exactly as before, entered directly at elf.entry
+  // with AT_BASE 0. A PT_INTERP segment instead names a dynamic
+  // linker (e.g. "/ld-musl-x86_64.so.1") to load *alongside* the main
+  // executable and jump to instead - its own struct elfhdr/proghdr/
+  // inode, so the main executable's elf/ph/ip (needed afterwards for
+  // AT_PHDR/AT_PHENT/AT_PHNUM/AT_ENTRY) are never overwritten. The
+  // interpreter is ET_DYN (position-independent) - interp_bias is the
+  // load address the kernel picks for it, placed right above the main
+  // executable in the same contiguous [0, sz) region every poc-os
+  // process address space already is (see sys_mmap's doc comment in
+  // include/syscall.h for why that's also where the interpreter's own
+  // runtime mmap calls, e.g. for libc.so, end up landing).
+  struct elfhdr ielf;
+  struct proghdr iph;
+  struct inode *iip = 0;
+  char interp_path[64];
+  int has_interp = 0;
+  uintp interp_bias = 0, interp_entry = 0;
   // Not a real source of entropy - poc-os has no RNG yet - just a
   // stable 16-byte block for AT_RANDOM to point at. musl only
   // dereferences it from __init_ssp(), which is a no-op in this build
@@ -241,6 +260,19 @@ execve(char *path, char **argv, char **envp)
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, (char*)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
+    if(ph.type == ELF_PROG_INTERP){
+      // ph.filesz includes the interpreter path's NUL terminator (the
+      // linker always emits one) - reject anything that wouldn't leave
+      // room for it rather than silently truncating a path.
+      if(ph.filesz == 0 || ph.filesz > sizeof(interp_path))
+        goto bad;
+      if(readi(ip, interp_path, ph.off, ph.filesz) != ph.filesz)
+        goto bad;
+      if(interp_path[ph.filesz-1] != 0)
+        goto bad;
+      has_interp = 1;
+      continue;
+    }
     if(ph.type != ELF_PROG_LOAD)
       continue;
     if(ph.memsz < ph.filesz)
@@ -249,14 +281,68 @@ execve(char *path, char **argv, char **envp)
       goto bad;
     if((sz = allocuvm(pgdir, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
-    if(ph.vaddr % PGSIZE != 0)
-      goto bad;
+    // No "vaddr must be page-aligned" check - see the identical
+    // comment on the interpreter-loading loop below, which applies
+    // here too: a PIE (ET_DYN) main executable, not just a shared
+    // library, routinely has a second-and-later PT_LOAD segment
+    // that isn't page-aligned, and loaduvm() (kernel/vm.c) handles
+    // that correctly. Every poc-os binary this loop has ever loaded
+    // until now happened to be page-aligned already (a single,
+    // merged, OMAGIC-style LOAD segment - see the Makefile's -N
+    // linking), so this is a pure relaxation: nothing that passed
+    // before behaves any differently now.
     if(loaduvm(pgdir, (char*)ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
   }
   iunlockput(ip);
   end_op();
   ip = 0;
+
+  // Load the interpreter, if any, right above the main executable -
+  // still within the same contiguous sz region, so copyuvm()/
+  // deallocuvm()/freevm() (which all assume the whole live address
+  // space is exactly [0, sz)) need no changes at all to also cover it.
+  if(has_interp){
+    begin_op();
+    if((iip = namei(interp_path)) == 0){
+      end_op();
+      goto bad;
+    }
+    ilock(iip);
+    if(readi(iip, (char*)&ielf, 0, sizeof(ielf)) != sizeof(ielf))
+      goto bad;
+    if(ielf.magic != ELF_MAGIC)
+      goto bad;
+    interp_bias = PGROUNDUP(sz);
+    for(i=0, off=ielf.phoff; i<ielf.phnum; i++, off+=sizeof(iph)){
+      if(readi(iip, (char*)&iph, off, sizeof(iph)) != sizeof(iph))
+        goto bad;
+      if(iph.type != ELF_PROG_LOAD)
+        continue;
+      if(iph.memsz < iph.filesz)
+        goto bad;
+      if(interp_bias + iph.vaddr + iph.memsz < interp_bias)
+        goto bad;
+      // Unlike the main executable's own PT_LOAD loop above, no
+      // "vaddr must be page-aligned" check here - a real interpreter
+      // (like a real shared library generally) routinely has a
+      // second-and-later PT_LOAD segment that isn't, and loaduvm()
+      // (kernel/vm.c) now handles that correctly. allocuvm() already
+      // covers any leading partial page too: it always allocates
+      // starting from PGROUNDUP(sz) (see kernel/vm.c), which for a
+      // per-phdr-ascending-vaddr ELF (what every real toolchain
+      // produces) lands exactly at the start of whichever page this
+      // segment's vaddr falls within.
+      if((sz = allocuvm(pgdir, sz, interp_bias + iph.vaddr + iph.memsz)) == 0)
+        goto bad;
+      if(loaduvm(pgdir, (char*)(interp_bias + iph.vaddr), iip, iph.off, iph.filesz) < 0)
+        goto bad;
+    }
+    interp_entry = interp_bias + ielf.entry;
+    iunlockput(iip);
+    end_op();
+    iip = 0;
+  }
 
   sz = PGROUNDUP(sz);
   if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
@@ -301,13 +387,16 @@ execve(char *path, char **argv, char **envp)
   // AT_PHDR assumes the program headers ended up loaded at the same
   // address as their file offset - true for a normal non-PIE static
   // link (base address 0), which is all poc-os's toolchain produces
-  // today; a real load-bias calculation only matters once PIE/ET_DYN
-  // binaries (dynamic linking) are in the picture.
+  // for the *main executable* today (a PT_INTERP interpreter, if any,
+  // is ET_DYN and gets a real interp_bias - see AT_BASE below - but
+  // AT_PHDR/AT_PHENT/AT_PHNUM always describe the main executable's
+  // own program headers, never the interpreter's, exactly like a real
+  // Linux kernel's ELF loader).
   AUXENT(AT_PHDR, elf.phoff);
   AUXENT(AT_PHENT, elf.phentsize);
   AUXENT(AT_PHNUM, elf.phnum);
   AUXENT(AT_PAGESZ, PGSIZE);
-  AUXENT(AT_BASE, 0);
+  AUXENT(AT_BASE, has_interp ? interp_bias : 0);
   AUXENT(AT_ENTRY, elf.entry);
   AUXENT(AT_UID, 0);
   AUXENT(AT_EUID, 0);
@@ -333,7 +422,12 @@ execve(char *path, char **argv, char **envp)
   oldpgdir = curproc->pgdir;
   curproc->pgdir = pgdir;
   curproc->sz = sz;
-  curproc->tf->eip = elf.entry;
+  // Jump into the interpreter, if there is one, instead of straight to
+  // the main executable - it's the interpreter that reads AT_ENTRY
+  // back out of the auxv above and transfers control to the real
+  // entry point itself, once it's done relocating/mapping everything
+  // the main executable actually needs (see musl/ldso/dynlink.c).
+  curproc->tf->eip = has_interp ? interp_entry : elf.entry;
   curproc->tf->esp = sp;
   // A fresh address space invalidates any old %fs base - it pointed
   // into memory that's about to be freed below.
@@ -347,6 +441,10 @@ execve(char *path, char **argv, char **envp)
     freevm(pgdir);
   if(ip){
     iunlockput(ip);
+    end_op();
+  }
+  if(iip){
+    iunlockput(iip);
     end_op();
   }
   return -1;

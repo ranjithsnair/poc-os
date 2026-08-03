@@ -36,6 +36,18 @@ struct superblock sb;
 char zeroes[BSIZE];
 uint freeinode = 1;
 uint freeblock;
+uint rootino;
+
+// Directories created so far by ensure_dir() below, keyed by their
+// full path relative to the image root (no leading/trailing '/') -
+// e.g. "usr/lib". Small and linearly searched since a build only ever
+// needs a handful of directories (unlike NINODES/freeinode, which
+// track every inode mkfs allocates), not because paths in general are
+// few - mkfs is a one-shot build-time tool, not something that has to
+// scale.
+#define MAXDIRTAB 32
+struct dirtab { char path[DIRSIZ*4]; uint inum; } dirtab[MAXDIRTAB];
+int ndirtab = 0;
 
 
 void balloc(int);
@@ -45,6 +57,9 @@ void rinode(uint inum, struct dinode *ip);
 void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
+uint mkdirat(uint parentino, const char *name);
+uint ensure_dir(const char *path);
+void installfile(const char *imgpath, const char *hostpath);
 
 // Convert to little-endian (x86's byte order) explicitly, byte by byte,
 // rather than just writing x directly: this host tool might itself be
@@ -75,8 +90,8 @@ xint(uint x)
 int
 main(int argc, char *argv[])
 {
-  int i, cc, fd;
-  uint rootino, inum, off;
+  int i;
+  uint off;
   struct dirent de;
   char buf[BSIZE];
   struct dinode din;
@@ -136,35 +151,28 @@ main(int argc, char *argv[])
   iappend(rootino, &de, sizeof(de));
 
   for(i = 2; i < argc; i++){
-    // argv[i] is the on-disk path to the user binary (e.g. build/_cat);
-    // only its basename becomes the file's name inside the poc image.
-    char *path = argv[i];
-    char *name = strrchr(path, '/');
-    name = name ? name + 1 : path;
+    // Two forms: a bare host path (e.g. build/_cat, the original and
+    // still-default convention - root-placed, basename only, leading
+    // "_" stripped so the build OS doesn't try to execute these in
+    // place of real system binaries like rm/cat) or, if it contains a
+    // ':', "imgpath:hostpath" (e.g. usr/lib/libc.so:build/libc.so) -
+    // installed at that exact path, verbatim, creating any missing
+    // parent directories along the way (see ensure_dir()). No
+    // underscore-stripping for this form: the caller already spells
+    // out the exact name it wants.
+    char *arg = argv[i];
+    char *colon = strchr(arg, ':');
 
-    if((fd = open(path, 0)) < 0){
-      perror(path);
-      exit(1);
+    if(colon){
+      *colon = 0;
+      installfile(arg, colon + 1);
+    } else {
+      char *name = strrchr(arg, '/');
+      name = name ? name + 1 : arg;
+      if(name[0] == '_')
+        ++name;
+      installfile(name, arg);
     }
-
-    // Skip leading _ in name when writing to file system.
-    // The binaries are named _rm, _cat, etc. to keep the
-    // build operating system from trying to execute them
-    // in place of system binaries like rm and cat.
-    if(name[0] == '_')
-      ++name;
-
-    inum = ialloc(T_FILE);
-
-    bzero(&de, sizeof(de));
-    de.inum = xshort(inum);
-    strncpy(de.name, name, DIRSIZ);
-    iappend(rootino, &de, sizeof(de));
-
-    while((cc = read(fd, buf, sizeof(buf))) > 0)
-      iappend(inum, buf, cc);
-
-    close(fd);
   }
 
   // fix size of root inode dir
@@ -306,4 +314,133 @@ iappend(uint inum, void *xp, int n)
   }
   din.size = xint(off);
   winode(inum, &din);
+}
+
+// Create a directory named name inside the already-created directory
+// parentino, with "." and ".." entries, and link it into parentino
+// under that name - i.e. exactly what kernel/sysfile.c's create()
+// does for a T_DIR, including its parentino->nlink++ for the new
+// directory's ".." (see that function's own comment on why "." does
+// *not* also bump the new directory's own nlink), so a directory
+// mkfs creates is indistinguishable on disk from one a real mkdir()
+// syscall would have created at runtime.
+uint
+mkdirat(uint parentino, const char *name)
+{
+  uint inum = ialloc(T_DIR);
+  struct dirent de;
+  struct dinode din;
+
+  bzero(&de, sizeof(de));
+  de.inum = xshort(inum);
+  strcpy(de.name, ".");
+  iappend(inum, &de, sizeof(de));
+
+  bzero(&de, sizeof(de));
+  de.inum = xshort(parentino);
+  strcpy(de.name, "..");
+  iappend(inum, &de, sizeof(de));
+
+  bzero(&de, sizeof(de));
+  de.inum = xshort(inum);
+  strncpy(de.name, name, DIRSIZ);
+  iappend(parentino, &de, sizeof(de));
+
+  rinode(parentino, &din);
+  din.nlink = xshort(xshort(din.nlink) + 1);
+  winode(parentino, &din);
+
+  return inum;
+}
+
+// Return the inode number of the directory at path (relative to the
+// image root, no leading/trailing '/'), creating it - and any missing
+// parent directories - if it doesn't already exist. path == "" (or
+// NULL) means the root directory itself.
+uint
+ensure_dir(const char *path)
+{
+  int i;
+  char parent[DIRSIZ*8];
+  const char *name;
+  char *slash;
+  uint parentino, inum;
+
+  if(path == 0 || path[0] == 0)
+    return rootino;
+
+  for(i = 0; i < ndirtab; i++)
+    if(strcmp(dirtab[i].path, path) == 0)
+      return dirtab[i].inum;
+
+  strncpy(parent, path, sizeof(parent)-1);
+  parent[sizeof(parent)-1] = 0;
+  slash = strrchr(parent, '/');
+  if(slash){
+    *slash = 0;
+    // parent (up to slash) is an identical-prefix copy of path, so
+    // slash's offset within it is also name's starting offset within
+    // the original, untruncated path.
+    name = path + (slash - parent) + 1;
+    parentino = ensure_dir(parent);
+  } else {
+    name = path;
+    parentino = rootino;
+  }
+
+  if(ndirtab >= MAXDIRTAB){
+    fprintf(stderr, "mkfs: too many directories (MAXDIRTAB=%d)\n", MAXDIRTAB);
+    exit(1);
+  }
+  inum = mkdirat(parentino, name);
+  strncpy(dirtab[ndirtab].path, path, sizeof(dirtab[ndirtab].path)-1);
+  dirtab[ndirtab].path[sizeof(dirtab[ndirtab].path)-1] = 0;
+  dirtab[ndirtab].inum = inum;
+  ndirtab++;
+  return inum;
+}
+
+// Install the file at hostpath into the image at imgpath (relative to
+// the image root), creating any missing parent directories along the
+// way - see main()'s argv loop for the two ways a caller reaches this
+// (bare host path vs "imgpath:hostpath").
+void
+installfile(const char *imgpath, const char *hostpath)
+{
+  int fd, cc;
+  uint inum, parentino;
+  char dir[DIRSIZ*8];
+  const char *name;
+  char *slash;
+  struct dirent de;
+  char buf[BSIZE];
+
+  strncpy(dir, imgpath, sizeof(dir)-1);
+  dir[sizeof(dir)-1] = 0;
+  slash = strrchr(dir, '/');
+  if(slash){
+    *slash = 0;
+    name = imgpath + (slash - dir) + 1;
+    parentino = ensure_dir(dir);
+  } else {
+    name = imgpath;
+    parentino = rootino;
+  }
+
+  if((fd = open(hostpath, 0)) < 0){
+    perror(hostpath);
+    exit(1);
+  }
+
+  inum = ialloc(T_FILE);
+
+  bzero(&de, sizeof(de));
+  de.inum = xshort(inum);
+  strncpy(de.name, name, DIRSIZ);
+  iappend(parentino, &de, sizeof(de));
+
+  while((cc = read(fd, buf, sizeof(buf))) > 0)
+    iappend(inum, buf, cc);
+
+  close(fd);
 }

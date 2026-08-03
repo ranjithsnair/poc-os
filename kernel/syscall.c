@@ -138,6 +138,10 @@ extern int sys_mremap(void);
 extern int sys_writev(void);
 extern int sys_ioctl(void);
 extern int sys_lseek(void);
+extern int sys_mprotect(void);
+extern int sys_pread(void);
+extern int sys_fcntl(void);
+extern int sys_readv(void);
 #endif
 extern int sys_exec(void);
 extern int sys_exit(void);
@@ -194,6 +198,10 @@ static int (*syscalls[])(void) = {
 [SYS_writev]            sys_writev,
 [SYS_ioctl]             sys_ioctl,
 [SYS_lseek]             sys_lseek,
+[SYS_mprotect]          sys_mprotect,
+[SYS_pread]             sys_pread,
+[SYS_fcntl]             sys_fcntl,
+[SYS_readv]             sys_readv,
 #endif
 };
 
