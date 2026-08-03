@@ -164,6 +164,28 @@
 // read exactly like a real readv() would; same iov_base/iov_len-as-
 // low-32-bits caveat as sys_writev().
 #define SYS_readv 39
+// (fd, buf, count): real Linux getdents64 ABI - musl's readdir()
+// (musl/src/dirent/readdir.c) issues this raw syscall directly (not
+// through any C-level getdents() wrapper poc-os could override in
+// userspace), so real directory listing needs an actual kernel
+// implementation - see kernel/sysfile.c's sys_getdents() for the
+// translation from poc-os's own on-disk directory format.
+#define SYS_getdents 40
+// (fd): see kernel/sysfile.c's sys_fchdir() - the same real chdir()
+// backing logic, starting from an already-open directory fd instead
+// of a fresh path lookup.
+#define SYS_fchdir 41
+// (fd, length): needed for cp/mv (coreutils/src/copy.c calls a real
+// ftruncate() to record a sparse-copy's final length and, for mv's
+// cross-device rename fallback, to fix up a partial write) - see
+// kernel/sysfile.c's sys_ftruncate() and kernel/fs.c's itruncto().
+#define SYS_ftruncate 42
+// (old, new): a real rename(2) - see kernel/sysfile.c's sys_rename()
+// for why moving a directory needs this rather than the link()+
+// unlink() emulation coreutils_shims.c's rename() used to provide
+// (still musl's own real src/stdio/rename.c, not a shim, now that
+// this exists - see its own "#if defined(SYS_rename)" branch).
+#define SYS_rename 43
 
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value

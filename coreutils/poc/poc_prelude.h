@@ -30,6 +30,31 @@ extern void *rawmemchr(const void *, int);
  * merely exposes the real symbol, not a reimplementation. */
 extern void *memrchr(const void *, int, size_t);
 
+/* mempcpy(): same reasoning as memrchr() above - musl really does
+ * implement it (musl/src/string/mempcpy.c, real symbol, already
+ * linked in), just declared under #ifdef _GNU_SOURCE, which this
+ * build's -D_XOPEN_SOURCE=700 doesn't define. */
+extern void *mempcpy(void *, const void *, size_t);
+
+/* lchmod(): same reasoning as memrchr()/mempcpy() above - musl really
+ * does declare and implement it (musl/include/sys/stat.h, guarded by
+ * #if defined(_GNU_SOURCE) || defined(_BSD_SOURCE), which this
+ * build's -D_XOPEN_SOURCE=700 doesn't define; the real (poc-os-
+ * specific) definition lives in coreutils/poc/coreutils_shims.c,
+ * since poc-os's lchmod() is a no-op stub like chmod() itself, not
+ * musl's - see that file's own comment). */
+#include <sys/stat.h>
+extern int lchmod(const char *, mode_t);
+
+/* canonicalize_file_name(): a glibc extension musl doesn't provide at
+ * all (musl only has the POSIX realpath()) - copy.c relies on
+ * <stdlib.h> declaring it, the same way glibc's own does. The real
+ * (poc-os-appropriate) definition is gnulib's own, in
+ * coreutils/lib/canonicalize.c - already vendored, genuinely
+ * implementing it in terms of realpath()-equivalent logic, not
+ * something this port stands in for. */
+extern char *canonicalize_file_name(const char *);
+
 /* _GL_ATTRIBUTE_FORMAT_PRINTF_{STANDARD,SYSTEM}: normally defined by
  * gnulib's own lib/stdio.in.h (its <stdio.h> replacement) - we use
  * musl's real <stdio.h> directly instead (see the build script's -I
@@ -85,3 +110,51 @@ extern void *memrchr(const void *, int, size_t);
  * always available regardless, the same reasoning as arg-nonnull.h
  * above. */
 #include <limits.h>
+
+/* S_IRWXUGO: a Linux/glibc <bits/stat.h> macro ("S_IRWXU|S_IRWXG|
+ * S_IRWXO", i.e. 0777) musl's own <sys/stat.h> doesn't define under
+ * any exposure macro - mkdir.c uses it directly as the default mode
+ * before umask is applied (real mkdir(1) always creates at 0777 and
+ * lets the umask do the restricting, same as this expands to). */
+#include <sys/stat.h>
+#define S_IRWXUGO (S_IRWXU | S_IRWXG | S_IRWXO)
+#define S_IXUGO (S_IXUSR | S_IXGRP | S_IXOTH)
+
+/* S_ISCTG/S_ISMPB/S_ISMPC/S_ISMPX/S_ISNWK/S_ISPORT/S_ISWHT: a handful
+ * of legacy/exotic Unix file types (Cray "contiguous data", V7
+ * "multiplexed" files, HP-UX "network special", Solaris doors, BSD
+ * whiteouts) coreutils/lib/{c-file-type,filemode}.c check for - musl's
+ * <sys/stat.h> has no st_mode bits for any of them (real systems don't
+ * either, outside those specific historical Unixes); always false is
+ * the correct answer for a filesystem (poc-os's own) that has none of
+ * these file types at all, not an approximation. */
+#define S_ISCTG(mode) 0
+#define S_ISDOOR(mode) 0
+#define S_ISMPB(mode) 0
+#define S_ISMPC(mode) 0
+#define S_ISMPX(mode) 0
+#define S_ISNAM(mode) 0
+#define S_ISNWK(mode) 0
+#define S_ISOFD(mode) 0
+#define S_ISOFL(mode) 0
+#define S_ISPORT(mode) 0
+#define S_ISWHT(mode) 0
+
+/* libc_hidden_proto/libc_hidden_def/__glibc_likely/__glibc_unlikely/
+ * __set_errno: glibc-internal-build-only macros that
+ * coreutils/lib/malloc/scratch_buffer*.c (canonicalize.c's scratch-
+ * buffer dependency - see coreutils/lib/malloc/scratch_buffer.gl.h's
+ * own comment) expect some libc-config.h-like header to have already
+ * defined, the way building genuinely *inside* glibc would. None of
+ * them need a real implementation outside that context:
+ * libc_hidden_proto/_def exist purely as a faster same-DSO call-path
+ * optimization, moot here; __glibc_likely/unlikely are exactly
+ * __builtin_expect with friendlier names; __set_errno is exactly
+ * "errno = ...". */
+#define libc_hidden_proto(name)
+#define libc_hidden_def(name)
+#define __glibc_likely(cond) __builtin_expect((cond), 1)
+#define __glibc_unlikely(cond) __builtin_expect((cond), 0)
+#include <errno.h>
+#define __set_errno(val) (errno = (val))
+#define __always_inline __attribute__((__always_inline__)) inline

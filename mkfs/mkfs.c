@@ -280,6 +280,8 @@ iappend(uint inum, void *xp, int n)
   struct dinode din;
   char buf[BSIZE];
   uint indirect[NINDIRECT];
+  uint dindirect[NINDIRECT];
+  uint indirect2[NINDIRECT];
   uint x;
 
   rinode(inum, &din);
@@ -293,16 +295,40 @@ iappend(uint inum, void *xp, int n)
         din.addrs[fbn] = xint(freeblock++);
       }
       x = xint(din.addrs[fbn]);
-    } else {
+    } else if(fbn < NDIRECT + NINDIRECT){
+      uint ibn = fbn - NDIRECT;
       if(xint(din.addrs[NDIRECT]) == 0){
         din.addrs[NDIRECT] = xint(freeblock++);
       }
       rsect(xint(din.addrs[NDIRECT]), (char*)indirect);
-      if(indirect[fbn - NDIRECT] == 0){
-        indirect[fbn - NDIRECT] = xint(freeblock++);
+      if(indirect[ibn] == 0){
+        indirect[ibn] = xint(freeblock++);
         wsect(xint(din.addrs[NDIRECT]), (char*)indirect);
       }
-      x = xint(indirect[fbn-NDIRECT]);
+      x = xint(indirect[ibn]);
+    } else {
+      // Doubly-indirect range - mirrors kernel/fs.c's bmap() exactly
+      // (see include/fs.h's NDINDIRECT/MAXFILE comment): din.addrs
+      // [NDIRECT+1] holds NINDIRECT pointers to indirect blocks, each
+      // of which holds NINDIRECT data-block pointers in turn.
+      uint bn2 = fbn - NDIRECT - NINDIRECT;
+      uint idx1 = bn2 / NINDIRECT;
+      uint idx2 = bn2 % NINDIRECT;
+
+      if(xint(din.addrs[NDIRECT+1]) == 0){
+        din.addrs[NDIRECT+1] = xint(freeblock++);
+      }
+      rsect(xint(din.addrs[NDIRECT+1]), (char*)dindirect);
+      if(dindirect[idx1] == 0){
+        dindirect[idx1] = xint(freeblock++);
+        wsect(xint(din.addrs[NDIRECT+1]), (char*)dindirect);
+      }
+      rsect(xint(dindirect[idx1]), (char*)indirect2);
+      if(indirect2[idx2] == 0){
+        indirect2[idx2] = xint(freeblock++);
+        wsect(xint(dindirect[idx1]), (char*)indirect2);
+      }
+      x = xint(indirect2[idx2]);
     }
     n1 = min(n, (fbn + 1) * BSIZE - off);
     rsect(x, buf);

@@ -1744,8 +1744,12 @@
 /* Define to 1 if you have the 'fchown' function. */
 #define HAVE_FCHOWN 1
 
-/* Define to 1 if you have the 'fclonefileat' function. */
-#define HAVE_FCLONEFILEAT 1
+/* Define to 1 if you have the 'fclonefileat' function. poc-os has no
+ * APFS-style whole-file clone syscall of any kind - fclonefileat is
+ * macOS-only, which is where this config.h was otherwise adapted from
+ * (see this file's own st_atim/strmode/HAVE_FCLONEFILEAT-adjacent
+ * comments elsewhere for the same class of mismatch). */
+/* #undef HAVE_FCLONEFILEAT */
 
 /* Define to 1 if you have the 'fcntl' function. */
 #define HAVE_FCNTL 1
@@ -2832,7 +2836,7 @@
 /* #undef HAVE_SYSMP */
 
 /* Define to 1 if you have the <sys/acl.h> header file. */
-#define HAVE_SYS_ACL_H 1
+/* #undef HAVE_SYS_ACL_H */
 
 /* Define to 1 if you have the <sys/bitypes.h> header file. */
 /* #undef HAVE_SYS_BITYPES_H */
@@ -3782,7 +3786,7 @@
 /* #undef UNLINK_PARENT_BUG */
 
 /* Define to nonzero if you want access control list support. */
-#define USE_ACL 1
+#define USE_ACL 0
 
 /* Counting lines with AVX2 enabled */
 #define USE_AVX2_WC_LINECOUNT 1

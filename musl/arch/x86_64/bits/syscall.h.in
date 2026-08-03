@@ -38,3 +38,7 @@
 #define __NR_pread 37
 #define __NR_fcntl 38
 #define __NR_readv 39
+#define __NR_getdents 40
+#define __NR_fchdir 41
+#define __NR_ftruncate 42
+#define __NR_rename 43

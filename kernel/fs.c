@@ -374,7 +374,12 @@ iunlockput(struct inode *ip)
 // ip->addrs[0..NDIRECT-1]. Beyond that, ip->addrs[NDIRECT] points at one
 // more block - the "indirect block" - which itself holds up to NINDIRECT
 // more block addresses, extending the maximum file size at the cost of
-// one extra disk read per access to those blocks.
+// one extra disk read per access to those blocks. Beyond THAT,
+// ip->addrs[NDIRECT+1] points at a "doubly-indirect block": NINDIRECT
+// pointers to further indirect blocks, each in turn holding NINDIRECT
+// data-block addresses - two extra disk reads per access, but room for
+// NINDIRECT*NINDIRECT more blocks (see include/fs.h's MAXFILE/NDINDIRECT
+// comment for why this was added).
 static uint
 bmap(struct inode *ip, uint bn)
 {
@@ -401,8 +406,124 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  bn -= NINDIRECT;
+
+  if(bn < NDINDIRECT){
+    uint idx1 = bn / NINDIRECT;   // which indirect block, within the doubly-indirect block
+    uint idx2 = bn % NINDIRECT;   // which data block, within that indirect block
+    uint iaddr;
+    struct buf *bp2;
+    uint *a2;
+
+    // Load the doubly-indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((iaddr = a[idx1]) == 0){
+      a[idx1] = iaddr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+
+    // Load the singly-indirect block it points to, allocating if
+    // necessary.
+    bp2 = bread(ip->dev, iaddr);
+    a2 = (uint*)bp2->data;
+    if((addr = a2[idx2]) == 0){
+      a2[idx2] = addr = balloc(ip->dev);
+      log_write(bp2);
+    }
+    brelse(bp2);
+    return addr;
+  }
 
   panic("bmap: out of range");
+}
+
+// Free every data block of ip whose logical block number is >= startbn
+// (itrunc(ip)'s startbn==0 case discards everything; sys_ftruncate's
+// shrink case passes ceil(newsize/BSIZE) to keep the blocks before the
+// new size intact). An indirect/doubly-indirect block's own pointer
+// block is freed too, but only once every entry it can reach is at or
+// past startbn - i.e. iff startbn is at or before that level's first
+// logical block number - since otherwise an earlier, still-live entry
+// is hanging off the same pointer block. Doesn't touch ip->size or
+// call iupdate(); callers do that themselves (itrunc() always sets
+// size to 0, sys_ftruncate() to the caller-requested length, which
+// unlike itrunc() may be larger than the old size).
+static void
+itruncfrom(struct inode *ip, uint startbn)
+{
+  int i, j;
+  struct buf *bp;
+  uint *a;
+
+  for(i = 0; i < NDIRECT; i++){
+    if((uint)i >= startbn && ip->addrs[i]){
+      bfree(ip->dev, ip->addrs[i]);
+      ip->addrs[i] = 0;
+    }
+  }
+
+  if(ip->addrs[NDIRECT] && startbn < NDIRECT + NINDIRECT){
+    int changed = 0;
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if((uint)(NDIRECT + j) >= startbn && a[j]){
+        bfree(ip->dev, a[j]);
+        a[j] = 0;
+        changed = 1;
+      }
+    }
+    if(changed)
+      log_write(bp);
+    brelse(bp);
+    if(startbn <= NDIRECT){
+      bfree(ip->dev, ip->addrs[NDIRECT]);
+      ip->addrs[NDIRECT] = 0;
+    }
+  }
+
+  if(ip->addrs[NDIRECT+1] && startbn < NDIRECT + NINDIRECT + NDINDIRECT){
+    struct buf *bp2;
+    uint *a2;
+    int outer_changed = 0;
+
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++){
+      uint base = NDIRECT + NINDIRECT + (uint)i*NINDIRECT;
+      if(!a[i] || startbn >= base + NINDIRECT)
+        continue;
+      int inner_changed = 0;
+      bp2 = bread(ip->dev, a[i]);
+      a2 = (uint*)bp2->data;
+      for(j = 0; j < NINDIRECT; j++){
+        if(base + (uint)j >= startbn && a2[j]){
+          bfree(ip->dev, a2[j]);
+          a2[j] = 0;
+          inner_changed = 1;
+        }
+      }
+      if(inner_changed)
+        log_write(bp2);
+      brelse(bp2);
+      if(startbn <= base){
+        bfree(ip->dev, a[i]);
+        a[i] = 0;
+        outer_changed = 1;
+      }
+    }
+    if(outer_changed)
+      log_write(bp);
+    brelse(bp);
+    if(startbn <= NDIRECT + NINDIRECT){
+      bfree(ip->dev, ip->addrs[NDIRECT+1]);
+      ip->addrs[NDIRECT+1] = 0;
+    }
+  }
 }
 
 // Truncate inode (discard contents).
@@ -413,31 +534,46 @@ bmap(struct inode *ip, uint bn)
 static void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
-
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
-    }
-  }
-
-  if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
-    }
-    brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
-    ip->addrs[NDIRECT] = 0;
-  }
-
+  itruncfrom(ip, 0);
   ip->size = 0;
   iupdate(ip);
+}
+
+// ftruncate(2)'s real backing logic (sys_ftruncate, kernel/sysfile.c).
+// Shrinking frees blocks past the new size via itruncfrom(); growing
+// just raises ip->size - the newly-in-range blocks don't exist yet,
+// but that's fine: bmap() (called from readi()/writei() alike)
+// allocates - and balloc() zeroes - any block the first time it's
+// actually touched, direct or not, so a grow-then-read of the gap
+// reads back zeros exactly as a real sparse-file hole would, without
+// this port needing to track holes as a distinct concept at all.
+// Caller must hold ip->lock.
+int
+itruncto(struct inode *ip, uint length)
+{
+  if(length > MAXFILE*BSIZE)
+    return -1;
+  if(length < ip->size){
+    uint startbn = (length + BSIZE - 1) / BSIZE;
+    itruncfrom(ip, startbn);
+    // itruncfrom() only frees whole blocks at or past startbn - if
+    // length isn't block-aligned, the block it falls inside (index
+    // length/BSIZE, still very much alive: startbn is the block
+    // *after* it) keeps its old bytes past length on disk. A later
+    // grow back past length would otherwise resurface that stale
+    // data as if it were part of the new hole, instead of the zeros a
+    // real hole reads as everywhere else - the same information leak
+    // real filesystems avoid by zeroing a truncated block's tail.
+    if(length % BSIZE != 0){
+      struct buf *bp = bread(ip->dev, bmap(ip, length/BSIZE));
+      memset(bp->data + length%BSIZE, 0, BSIZE - length%BSIZE);
+      log_write(bp);
+      brelse(bp);
+    }
+  }
+  ip->size = length;
+  iupdate(ip);
+  return 0;
 }
 
 // Copy stat information from inode.

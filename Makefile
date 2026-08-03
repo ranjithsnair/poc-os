@@ -554,6 +554,10 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/legacy/getpagesize.o \
 	$(OBJDIR)/musl-pic/src/unistd/unlink.o \
 	$(OBJDIR)/musl-pic/src/unistd/link.o \
+	$(OBJDIR)/musl-pic/src/stat/mkdir.o \
+	$(OBJDIR)/musl-pic/src/stat/mknod.o \
+	$(OBJDIR)/musl-pic/src/unistd/getpid.o \
+	$(OBJDIR)/musl-pic/src/signal/kill.o \
 	$(OBJDIR)/musl-pic/src/exit/assert.o \
 	$(OBJDIR)/musl-pic/src/misc/getopt.o \
 	$(OBJDIR)/musl-pic/src/multibyte/mbtowc.o \
@@ -567,19 +571,53 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/stdio/__toread.o \
 	$(OBJDIR)/musl-pic/src/stdio/__uflow.o \
 	$(OBJDIR)/musl-pic/coreutils-shims/coreutils_shims.o \
+	$(OBJDIR)/musl-pic/src/conf/fpathconf.o \
+	$(OBJDIR)/musl-pic/src/conf/pathconf.o \
+	$(OBJDIR)/musl-pic/src/dirent/closedir.o \
+	$(OBJDIR)/musl-pic/src/dirent/dirfd.o \
+	$(OBJDIR)/musl-pic/src/dirent/fdopendir.o \
+	$(OBJDIR)/musl-pic/src/dirent/opendir.o \
+	$(OBJDIR)/musl-pic/src/dirent/readdir.o \
+	$(OBJDIR)/musl-pic/src/dirent/rewinddir.o \
+	$(OBJDIR)/musl-pic/src/exit/abort_lock.o \
+	$(OBJDIR)/musl-pic/src/internal/procfdname.o \
+	$(OBJDIR)/musl-pic/src/process/_Fork.o \
+	$(OBJDIR)/musl-pic/src/process/fork.o \
+	$(OBJDIR)/musl-pic/src/stat/mkfifoat.o \
+	$(OBJDIR)/musl-pic/src/stdio/fputc.o \
+	$(OBJDIR)/musl-pic/src/stdio/getchar.o \
+	$(OBJDIR)/musl-pic/src/stdio/puts.o \
+	$(OBJDIR)/musl-pic/src/stdlib/qsort.o \
+	$(OBJDIR)/musl-pic/src/stdlib/qsort_nr.o \
+	$(OBJDIR)/musl-pic/src/string/mempcpy.o \
+	$(OBJDIR)/musl-pic/src/string/strdup.o \
+	$(OBJDIR)/musl-pic/src/string/strstr.o \
+	$(OBJDIR)/musl-pic/src/unistd/chdir.o \
+	$(OBJDIR)/musl-pic/src/unistd/fchdir.o \
+	$(OBJDIR)/musl-pic/src/unistd/isatty.o \
+	$(OBJDIR)/musl-pic/src/unistd/ftruncate.o \
+	$(OBJDIR)/musl-pic/src/stdio/rename.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
 # rule) - a real ET_DYN with a real .dynsym/.dynamic/PLT/GOT, not
 # something poc-os invented a shape for. build/libc.so (this exact
 # name, not build/_libc.so) is also what -lc below resolves against.
+# -z defs (unlike a plain "ld -shared", which tolerates an unresolved
+# symbol in a shared object and only fails later, at runtime, if
+# something actually calls it) makes ld fail this build step itself
+# the moment MUSL_LDSO_OBJS's own object set has any real internal gap
+# (confirmed necessary the hard way: an earlier musl-pic/src/stat/
+# mkfifoat.o addition silently left a real, unresolved "mknodat"
+# reference sitting in a built-and-installed libc.so, invisible until
+# something happened to exercise that exact code path).
 # Debug info is stripped for the same MAXFILE-budget reason $(BUILD)/_%
 # strips it (see that rule's comment) - unstripped this is >250KB,
 # stripped it's ~55KB. Installed into the image at /usr/lib/libc.so -
 # see MKFS_INSTALL and $(BUILD)/fs.img below - not through UPROGS's
 # usual root-placed/underscore-stripped convention.
 $(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
-	$(LD) -m elf_x86_64 -shared -e _dlstart -o $@ $^
+	$(LD) -m elf_x86_64 -shared -e _dlstart -z defs -o $@ $^
 	$(OBJCOPY) --strip-debug $@
 	$(OBJCOPY) --strip-unneeded $@
 
@@ -768,16 +806,317 @@ $(BUILD)/_yes: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/yes.o 
 
 # head/tr/cut: all three compile and link fine (see git history if
 # reviving this), but real FILE*-buffered I/O (fopen/fgetc/ungetc/
-# setvbuf/...) pushes libc.so past MAXFILE (include/fs.h - 140 blocks,
-# ~70KB; xv6's inode has only a single indirect block, no double
-# indirect) once added on top of what true/false/cat/echo/basename/
-# dirname/yes already need. Shipping these three needs either a
-# smaller libc.so (dropping something else) or real double-indirect
-# block support in kernel/fs.c's bmap()/itrunc() and mkfs/mkfs.c's
-# iappend() - both bigger than this port currently has. Their build
-# rules (Scrt1.o + coreutils-pic/src/{head,tr,cut}.o + the gnulib
-# objects noted above + libc.so) are straightforward to recreate in the
-# same shape as $(BUILD)/_gcat below once one of those two is done.
+# setvbuf/...) pushes libc.so past MAXFILE. MAXFILE is no longer the
+# ~70KB single-indirect ceiling it once was (see include/fs.h's own
+# MAXFILE comment - kernel/fs.c's bmap()/itrunc() and mkfs/mkfs.c's
+# iappend() all grew real doubly-indirect block support specifically
+# because this ceiling kept blocking libc.so growth), so reviving these
+# three is now plausible again - just not yet done; nobody's re-run the
+# resolver against them since the filesystem was extended.
+
+# mkdir/rmdir/rm/ln/chmod/pwd: the first coreutils additions since the
+# doubly-indirect MAXFILE extension - real directory operations, which
+# is also why they needed SYS_getdents/SYS_fchdir (kernel/sysfile.c) to
+# exist at all (opendirat.o/fts.o's real getdents()-based directory
+# traversal, not just single-file open/read/write like cat/echo).
+# Object lists below came from the same resolver-driven, one-undefined-
+# symbol-at-a-time process as COREUTILS_GNULIB_OBJS/
+# COREUTILS_CAT_GNULIB_OBJS above.
+COREUTILS_MKDIR_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/mkdir-p.o \
+	$(OBJDIR)/coreutils-pic/lib/modechange.o \
+	$(OBJDIR)/coreutils-pic/src/prog-fprintf.o \
+	$(OBJDIR)/coreutils-pic/lib/savewd.o \
+	$(OBJDIR)/coreutils-pic/lib/dirchownmod.o \
+	$(OBJDIR)/coreutils-pic/lib/mkancesdirs.o \
+	$(OBJDIR)/coreutils-pic/lib/open-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+
+$(BUILD)/_mkdir: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/mkdir.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_MKDIR_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/mkdir.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_MKDIR_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/mkdir.dis
+	$(OBJCOPY) --strip-debug $@
+
+COREUTILS_RMDIR_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/src/prog-fprintf.o \
+	$(OBJDIR)/coreutils-pic/lib/stripslash.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+
+$(BUILD)/_rmdir: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/rmdir.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_RMDIR_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/rmdir.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_RMDIR_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/rmdir.dis
+	$(OBJCOPY) --strip-debug $@
+
+COREUTILS_RM_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/argmatch.o \
+	$(OBJDIR)/coreutils-pic/lib/closein.o \
+	$(OBJDIR)/coreutils-pic/lib/root-dev-ino.o \
+	$(OBJDIR)/coreutils-pic/src/remove.o \
+	$(OBJDIR)/coreutils-pic/lib/yesno.o \
+	$(OBJDIR)/coreutils-pic/lib/write-any-file.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat.o \
+	$(OBJDIR)/coreutils-pic/lib/file-type.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/fts.o \
+	$(OBJDIR)/coreutils-pic/lib/xfts.o \
+	$(OBJDIR)/coreutils-pic/lib/c-file-type.o \
+	$(OBJDIR)/coreutils-pic/lib/cycle-check.o \
+	$(OBJDIR)/coreutils-pic/lib/i-ring.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/open-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/openat-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/opendirat.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+
+$(BUILD)/_rm: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/rm.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_RM_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/rm.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_RM_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/rm.dis
+	$(OBJCOPY) --strip-debug $@
+
+# scratch_buffer_grow.o/scratch_buffer_grow_preserve.o genuinely live at
+# coreutils/lib/malloc/ (not coreutils/lib/ directly, unlike everything
+# else in this list) - $(OBJDIR)/coreutils-pic/%.o: coreutils/%.c's
+# pattern rule mirrors that nesting, so these two are the only entries
+# below with a lib/malloc/ path component rather than a flat lib/ one.
+COREUTILS_LN_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/unlinkdir.o \
+	$(OBJDIR)/coreutils-pic/lib/canonicalize.o \
+	$(OBJDIR)/coreutils-pic/lib/closein.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat.o \
+	$(OBJDIR)/coreutils-pic/lib/backup-find.o \
+	$(OBJDIR)/coreutils-pic/src/force-link.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/openat-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/file-set.o \
+	$(OBJDIR)/coreutils-pic/src/relpath.o \
+	$(OBJDIR)/coreutils-pic/lib/same.o \
+	$(OBJDIR)/coreutils-pic/lib/backupfile.o \
+	$(OBJDIR)/coreutils-pic/lib/stripslash.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple-simple.o \
+	$(OBJDIR)/coreutils-pic/lib/yesno.o \
+	$(OBJDIR)/coreutils-pic/lib/argmatch.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow_preserve.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-pjw.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/opendirat.o \
+	$(OBJDIR)/coreutils-pic/lib/renameatu.o \
+	$(OBJDIR)/coreutils-pic/lib/tempname.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+
+$(BUILD)/_ln: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ln.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_LN_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ln.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_LN_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/ln.dis
+	$(OBJCOPY) --strip-debug $@
+
+COREUTILS_CHMOD_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/xfts.o \
+	$(OBJDIR)/coreutils-pic/lib/root-dev-ino.o \
+	$(OBJDIR)/coreutils-pic/lib/modechange.o \
+	$(OBJDIR)/coreutils-pic/lib/fts.o \
+	$(OBJDIR)/coreutils-pic/lib/filemode.o \
+	$(OBJDIR)/coreutils-pic/lib/cycle-check.o \
+	$(OBJDIR)/coreutils-pic/lib/i-ring.o \
+	$(OBJDIR)/coreutils-pic/lib/open-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/openat-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/opendirat.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+
+$(BUILD)/_chmod: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/chmod.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_CHMOD_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/chmod.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_CHMOD_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/chmod.dis
+	$(OBJCOPY) --strip-debug $@
+
+COREUTILS_PWD_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/root-dev-ino.o \
+	$(OBJDIR)/coreutils-pic/lib/xgetcwd.o \
+
+$(BUILD)/_pwd: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/pwd.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_PWD_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/pwd.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_PWD_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/pwd.dis
+	$(OBJCOPY) --strip-debug $@
+
+# mv/cp: needed a real SYS_ftruncate (include/syscall.h, kernel/fs.c's
+# itruncto(), kernel/sysfile.c's sys_ftruncate()) - coreutils/src/
+# copy.c calls a real ftruncate() to record a sparse copy's final
+# length - plus qcopy_acl()/qset_acl() actually linking, which turned
+# out to be a config.h problem, not a missing-implementation one:
+# coreutils/poc/config.h's USE_ACL/HAVE_SYS_ACL_H were both left at the
+# values a native macOS ./configure run detected (macOS has its own
+# <sys/acl.h>), pulling in gnulib's real ACL codepath and its acl_t
+# type poc-os has no definition for. Flipped both off (see that file's
+# own history) so gnulib's own no-ACL fallback path (plain chmod, via
+# coreutils/lib/{qcopy,qset}-acl.c's USE_ACL==0 branch) compiles
+# instead - the same "config.h assumed the wrong host" class of fix as
+# HAVE_FCLONEFILEAT above, not a new shim.
+COREUTILS_MV_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/argmatch.o \
+	$(OBJDIR)/coreutils-pic/lib/closein.o \
+	$(OBJDIR)/coreutils-pic/src/copy.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat.o \
+	$(OBJDIR)/coreutils-pic/lib/root-dev-ino.o \
+	$(OBJDIR)/coreutils-pic/src/cp-hash.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/renameatu.o \
+	$(OBJDIR)/coreutils-pic/src/remove.o \
+	$(OBJDIR)/coreutils-pic/lib/backupfile.o \
+	$(OBJDIR)/coreutils-pic/lib/stripslash.o \
+	$(OBJDIR)/coreutils-pic/lib/targetdir.o \
+	$(OBJDIR)/coreutils-pic/lib/backup-find.o \
+	$(OBJDIR)/coreutils-pic/lib/areadlink-with-size.o \
+	$(OBJDIR)/coreutils-pic/lib/areadlinkat-with-size.o \
+	$(OBJDIR)/coreutils-pic/lib/backup-rename.o \
+	$(OBJDIR)/coreutils-pic/lib/buffer-lcm.o \
+	$(OBJDIR)/coreutils-pic/lib/write-any-file.o \
+	$(OBJDIR)/coreutils-pic/lib/canonicalize.o \
+	$(OBJDIR)/coreutils-pic/lib/copy-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname.o \
+	$(OBJDIR)/coreutils-pic/lib/fdutimensat.o \
+	$(OBJDIR)/coreutils-pic/lib/file-type.o \
+	$(OBJDIR)/coreutils-pic/src/force-link.o \
+	$(OBJDIR)/coreutils-pic/lib/chmodat.o \
+	$(OBJDIR)/coreutils-pic/lib/chownat.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/open-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/openat-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/opendirat.o \
+	$(OBJDIR)/coreutils-pic/lib/same-inode.o \
+	$(OBJDIR)/coreutils-pic/lib/qset-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/file-set.o \
+	$(OBJDIR)/coreutils-pic/lib/fts.o \
+	$(OBJDIR)/coreutils-pic/lib/same.o \
+	$(OBJDIR)/coreutils-pic/lib/savedir.o \
+	$(OBJDIR)/coreutils-pic/lib/set-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/filemode.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple-simple.o \
+	$(OBJDIR)/coreutils-pic/lib/utimecmp.o \
+	$(OBJDIR)/coreutils-pic/lib/xfts.o \
+	$(OBJDIR)/coreutils-pic/lib/yesno.o \
+	$(OBJDIR)/coreutils-pic/lib/c-file-type.o \
+	$(OBJDIR)/coreutils-pic/lib/cycle-check.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/acl-internal.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow_preserve.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-pjw.o \
+	$(OBJDIR)/coreutils-pic/lib/i-ring.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/opendir-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/qcopy-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/set-permissions.o \
+	$(OBJDIR)/coreutils-pic/lib/tempname.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/get-permissions.o \
+
+$(BUILD)/_mv: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/mv.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_MV_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/mv.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_MV_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/mv.dis
+	$(OBJCOPY) --strip-debug $@
+
+COREUTILS_CP_GNULIB_OBJS = \
+	$(OBJDIR)/coreutils-pic/lib/argmatch.o \
+	$(OBJDIR)/coreutils-pic/src/copy.o \
+	$(OBJDIR)/coreutils-pic/lib/closein.o \
+	$(OBJDIR)/coreutils-pic/lib/copy-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat.o \
+	$(OBJDIR)/coreutils-pic/lib/backup-find.o \
+	$(OBJDIR)/coreutils-pic/src/cp-hash.o \
+	$(OBJDIR)/coreutils-pic/lib/basename-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/chmodat.o \
+	$(OBJDIR)/coreutils-pic/lib/chownat.o \
+	$(OBJDIR)/coreutils-pic/lib/backupfile.o \
+	$(OBJDIR)/coreutils-pic/lib/stripslash.o \
+	$(OBJDIR)/coreutils-pic/lib/targetdir.o \
+	$(OBJDIR)/coreutils-pic/lib/areadlink-with-size.o \
+	$(OBJDIR)/coreutils-pic/lib/areadlinkat-with-size.o \
+	$(OBJDIR)/coreutils-pic/lib/backup-rename.o \
+	$(OBJDIR)/coreutils-pic/lib/buffer-lcm.o \
+	$(OBJDIR)/coreutils-pic/lib/write-any-file.o \
+	$(OBJDIR)/coreutils-pic/lib/canonicalize.o \
+	$(OBJDIR)/coreutils-pic/lib/dirname.o \
+	$(OBJDIR)/coreutils-pic/lib/fdutimensat.o \
+	$(OBJDIR)/coreutils-pic/src/force-link.o \
+	$(OBJDIR)/coreutils-pic/lib/filenamecat-lgpl.o \
+	$(OBJDIR)/coreutils-pic/lib/open-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/openat-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/opendirat.o \
+	$(OBJDIR)/coreutils-pic/lib/same-inode.o \
+	$(OBJDIR)/coreutils-pic/lib/qcopy-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/qset-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/file-set.o \
+	$(OBJDIR)/coreutils-pic/lib/renameatu.o \
+	$(OBJDIR)/coreutils-pic/lib/same.o \
+	$(OBJDIR)/coreutils-pic/lib/savedir.o \
+	$(OBJDIR)/coreutils-pic/lib/set-acl.o \
+	$(OBJDIR)/coreutils-pic/lib/filemode.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-triple-simple.o \
+	$(OBJDIR)/coreutils-pic/lib/utimecmp.o \
+	$(OBJDIR)/coreutils-pic/lib/yesno.o \
+	$(OBJDIR)/coreutils-pic/lib/fd-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/acl-internal.o \
+	$(OBJDIR)/coreutils-pic/lib/get-permissions.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow.o \
+	$(OBJDIR)/coreutils-pic/lib/malloc/scratch_buffer_grow_preserve.o \
+	$(OBJDIR)/coreutils-pic/lib/hash-pjw.o \
+	$(OBJDIR)/coreutils-pic/lib/opendir-safer.o \
+	$(OBJDIR)/coreutils-pic/lib/set-permissions.o \
+	$(OBJDIR)/coreutils-pic/lib/tempname.o \
+	$(OBJDIR)/coreutils-pic/lib/dup-safer.o \
+
+$(BUILD)/_cp: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/cp.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_CP_GNULIB_OBJS) \
+		$(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/cp.o \
+		$(COREUTILS_GNULIB_OBJS) $(COREUTILS_CAT_GNULIB_OBJS) $(COREUTILS_CP_GNULIB_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/cp.dis
+	$(OBJCOPY) --strip-debug $@
 
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
@@ -829,6 +1168,21 @@ MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 MKFS_INSTALL_DEPS += $(BUILD)/libc.so $(BUILD)/_true $(BUILD)/_false \
 	$(BUILD)/_gcat $(BUILD)/_gecho $(BUILD)/_basename $(BUILD)/_dirname \
 	$(BUILD)/_yes $(BUILD)/_runmusl
+
+# mkdir/rmdir/rm/ln/chmod/pwd: the first additions since include/fs.h's
+# doubly-indirect MAXFILE extension - see that comment and each
+# COREUTILS_*_GNULIB_OBJS variable's own comment above.
+MKFS_INSTALL += usr/bin/mkdir:$(BUILD)/_mkdir usr/bin/rmdir:$(BUILD)/_rmdir \
+	usr/bin/rm:$(BUILD)/_rm usr/bin/ln:$(BUILD)/_ln \
+	usr/bin/chmod:$(BUILD)/_chmod usr/bin/pwd:$(BUILD)/_pwd
+MKFS_INSTALL_DEPS += $(BUILD)/_mkdir $(BUILD)/_rmdir $(BUILD)/_rm \
+	$(BUILD)/_ln $(BUILD)/_chmod $(BUILD)/_pwd
+
+# mv/cp: needed real ftruncate() (SYS_ftruncate, kernel/fs.c's
+# itruncto()) plus config.h's USE_ACL/HAVE_SYS_ACL_H fixes - see
+# COREUTILS_MV_GNULIB_OBJS's own comment above.
+MKFS_INSTALL += usr/bin/mv:$(BUILD)/_mv usr/bin/cp:$(BUILD)/_cp
+MKFS_INSTALL_DEPS += $(BUILD)/_mv $(BUILD)/_cp
 
 endif
 

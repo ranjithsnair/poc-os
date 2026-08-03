@@ -22,6 +22,11 @@ void __inhibit_ptc(void) {}
 void __acquire_ptc(void) {}
 void __release_ptc(void) {}
 void __block_app_sigs(void *set) { (void)set; }
+// __block_all_sigs(): src/process/_Fork.c's own signal-blocking call
+// (block absolutely everything, not just app-catchable signals, around
+// the actual fork syscall) - same missing-SYS_rt_sigprocmask reasoning
+// as __block_app_sigs above, and the same __restore_sigs undoes either.
+void __block_all_sigs(void *set) { (void)set; }
 void __restore_sigs(void *set) { (void)set; }
 void __tl_lock(void) {}
 void __tl_unlock(void) {}
@@ -77,6 +82,21 @@ __fstat(int fd, struct stat *st)
 	st->st_size = pst.size;
 	st->st_mode = (pst.type == 1 /* T_DIR, include/stat.h */)
 		? (S_IFDIR|0755) : (S_IFREG|0644);
+	// st_blocks/st_blksize: left zeroed above until cp/mv needed them -
+	// coreutils/src/copy.c's infer_scantype() takes st_blocks==0 on a
+	// non-empty file as "fewer blocks allocated than st_size implies",
+	// its heuristic for "this file might be sparse", and probes with a
+	// real lseek(fd,0,SEEK_DATA) - which poc-os's sys_lseek() has no
+	// case for (see its own comment) and fails in a way infer_scantype()
+	// can't distinguish from a real error, aborting the copy entirely.
+	// Reporting the true block count (poc-os has no sparse files at
+	// all - every byte up to st_size, and now also up to any grown-via-
+	// ftruncate() extension, really is allocated, whether written or
+	// lazily zeroed on first touch - see kernel/fs.c's itruncto()) is
+	// the accurate answer, not a workaround: it makes the heuristic
+	// correctly conclude nothing here is sparse and skip the probe.
+	st->st_blksize = 512;
+	st->st_blocks = (pst.size + 511) / 512;
 	return 0;
 }
 

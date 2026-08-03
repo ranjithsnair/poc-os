@@ -16,6 +16,16 @@
 #include "file.h"
 #include "fcntl.h"
 
+// A few real errno values, needed only where a caller's control flow
+// genuinely depends on distinguishing one error from another (see
+// sys_lseek()'s and sys_open()'s own comments) - every other error
+// return in this file, as in the rest of this kernel, is still a bare
+// -1 (musl's __syscall_ret turns that into errno==EPERM, regardless of
+// what actually went wrong; fine as long as nothing needs to tell them
+// apart).
+#define ENOENT 2
+#define EINVAL 22
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -162,6 +172,68 @@ sys_readv(void)
   return total;
 }
 
+// (fd, buf, count): Linux getdents64 ABI - see include/syscall.h and
+// musl/src/dirent/readdir.c, the only caller that matters: it casts
+// the raw bytes this writes directly to struct dirent* and reads
+// d_reclen/d_ino/d_name straight out of them, no further translation.
+// Translates poc-os's own on-disk directory format (include/fs.h's
+// struct dirent - a flat array of fixed-size {inum, name[DIRSIZ]}
+// slots, some empty/deleted with inum 0) into that ABI's variable-
+// length records, resuming from f->off exactly like sys_read/sys_readv
+// already do for regular files.
+struct linux_dirent64 {
+  uint64 d_ino;
+  uint64 d_off;
+  ushort d_reclen;
+  uchar d_type;
+  char d_name[DIRSIZ+1];
+} __attribute__((packed));
+
+int
+sys_getdents(void)
+{
+  struct file *f;
+  char *buf;
+  int n, total, reclen;
+  struct dirent de;
+  struct linux_dirent64 ld;
+
+  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &buf, n) < 0)
+    return -1;
+  if(f->type != FD_INODE || f->ip->type != T_DIR)
+    return -1;
+
+  ilock(f->ip);
+  total = 0;
+  while(f->off + sizeof(de) <= f->ip->size){
+    if(readi(f->ip, (char*)&de, f->off, sizeof(de)) != sizeof(de))
+      panic("getdents: readi");
+    if(de.inum == 0){
+      // deleted/never-used slot (see sys_unlink's writei of a zeroed
+      // de) - not a real entry, skip without handing it to the caller.
+      f->off += sizeof(de);
+      continue;
+    }
+    memset(&ld, 0, sizeof(ld));
+    ld.d_ino = de.inum;
+    memmove(ld.d_name, de.name, DIRSIZ);
+    ld.d_name[DIRSIZ] = 0;  // de.name may fill all DIRSIZ bytes with no NUL
+    // Round up to keep the next record's d_ino/d_off naturally aligned
+    // (x86_64 tolerates unaligned access, but nothing here relies on
+    // that, matching what a real getdents64 buffer looks like).
+    reclen = (__builtin_offsetof(struct linux_dirent64, d_name) + strlen(ld.d_name) + 1 + 7) & ~7;
+    if(total + reclen > n)
+      break;  // caller's buffer is full - retry from here next call
+    f->off += sizeof(de);
+    ld.d_off = f->off;
+    ld.d_reclen = reclen;
+    memmove(buf + total, &ld, reclen);
+    total += reclen;
+  }
+  iunlock(f->ip);
+  return total;
+}
+
 // (fd, offset, whence): see include/syscall.h.
 int
 sys_lseek(void)
@@ -192,7 +264,15 @@ sys_lseek(void)
     newoff = f->ip->size + offset;
     break;
   default:
-    return -1;
+    // Real Linux whence values this kernel has no case for (SEEK_DATA/
+    // SEEK_HOLE, e.g. - poc-os has no sparse files, see __fstat()'s
+    // st_blocks comment) need a real -EINVAL, not the bare -1 every
+    // other error in this file returns: cp's infer_scantype() (real
+    // gnulib, coreutils/src/copy.c) checks errno==EINVAL specifically
+    // to fall back gracefully when a lseek() whence isn't supported,
+    // rather than treating it as a real error worth aborting the copy
+    // over.
+    return -EINVAL;
   }
   f->off = newoff;
   return newoff;
@@ -373,6 +453,207 @@ bad:
   return -1;
 }
 
+// (old, new): a real rename(2) - see coreutils_shims.c's own rename()
+// comment for why this exists: its previous link()+unlink() emulation
+// (the standard userspace fallback on a filesystem with hard links
+// but no native rename) could never move a directory, since
+// sys_link() correctly refuses to hard-link one - hard-linking a
+// directory would let it have two distinct parents, corrupting the
+// single-parent tree every ".." entry and nlink count assumes. A real
+// rename() sidesteps that entirely: it moves the *directory entry*
+// (rewrite an on-disk dirent's inum in the new parent, zero it in the
+// old one), never touching ip->nlink for the moved inode itself, so
+// sys_link()'s restriction never comes into play. Only ever locks one
+// inode/directory at a time (unlike a real rename() that would lock
+// both directories for true atomicity against a concurrent reverse
+// rename) - deliberately, to make deadlock structurally impossible
+// rather than relying on a lock-ordering discipline every future
+// caller would also have to get right; the whole move still happens
+// inside one begin_op()/end_op() transaction, so a crash mid-rename
+// still leaves a consistent on-disk state either fully before or
+// fully after, just not perfectly atomic against another rename
+// racing on the same two directories.
+static int
+samefile(struct inode *a, struct inode *b)
+{
+  return a->dev == b->dev && a->inum == b->inum;
+}
+
+int
+sys_rename(void)
+{
+  char oldname[DIRSIZ], newname[DIRSIZ];
+  char *oldpath, *newpath;
+  struct inode *olddp, *newdp, *ip, *xip;
+  uint oldoff, newoff;
+  int ip_is_dir;
+
+  if(argstr(0, &oldpath) < 0 || argstr(1, &newpath) < 0)
+    return -1;
+
+  begin_op();
+
+  if((olddp = nameiparent(oldpath, oldname)) == 0){
+    end_op();
+    return -1;
+  }
+  if(namecmp(oldname, ".") == 0 || namecmp(oldname, "..") == 0){
+    iput(olddp);
+    end_op();
+    return -1;
+  }
+
+  ilock(olddp);
+  ip = dirlookup(olddp, oldname, &oldoff);
+  iunlock(olddp);
+  if(ip == 0){
+    iput(olddp);
+    end_op();
+    return -1;
+  }
+
+  if((newdp = nameiparent(newpath, newname)) == 0){
+    iput(olddp);
+    iput(ip);
+    end_op();
+    return -1;
+  }
+  if(newdp->dev != ip->dev ||
+     namecmp(newname, ".") == 0 || namecmp(newname, "..") == 0){
+    iput(olddp);
+    iput(newdp);
+    iput(ip);
+    end_op();
+    return -1;
+  }
+
+  ilock(ip);
+  ip_is_dir = (ip->type == T_DIR);
+  iunlock(ip);
+
+  // Renaming X to (a path inside) itself would rewrite X's own ".."
+  // out from under this very walk, or leave some ancestor of newdp
+  // unreachable from the root once X is unlinked from oldname below -
+  // walk from newdp back up to the root via ".." (one directory
+  // locked at a time, same reasoning as this function's own top
+  // comment) and refuse if X itself is on that path.
+  if(ip_is_dir){
+    struct inode *walk = idup(newdp);
+    int cycle = samefile(walk, ip);
+    while(!cycle && walk->inum != ROOTINO){
+      ilock(walk);
+      struct inode *parent = dirlookup(walk, "..", 0);
+      iunlockput(walk);
+      if(parent == 0)
+        break;
+      walk = parent;
+      cycle = samefile(walk, ip);
+    }
+    iput(walk);
+    if(cycle){
+      iput(olddp);
+      iput(newdp);
+      iput(ip);
+      end_op();
+      return -1;
+    }
+  }
+
+  ilock(newdp);
+  xip = dirlookup(newdp, newname, &newoff);
+  if(xip != 0){
+    if(samefile(xip, ip)){
+      // Renaming a path onto itself: nothing to do, not an error.
+      iput(xip);
+      iunlockput(newdp);
+      iput(olddp);
+      iput(ip);
+      end_op();
+      return 0;
+    }
+    ilock(xip);
+    if(ip_is_dir != (xip->type == T_DIR) ||
+       (xip->type == T_DIR && !isdirempty(xip))){
+      iunlockput(xip);
+      iunlockput(newdp);
+      iput(olddp);
+      iput(ip);
+      end_op();
+      return -1;
+    }
+    // Replace: drop the destination's own link the same way
+    // sys_unlink() does (nlink--, and the parent's own nlink-- if it
+    // was a - necessarily empty, just checked above - directory).
+    if(xip->type == T_DIR){
+      newdp->nlink--;
+      iupdate(newdp);
+    }
+    xip->nlink--;
+    iupdate(xip);
+    iunlockput(xip);
+  }
+
+  // Point newname's dirent (freshly emptied above if it existed, or a
+  // never-used slot dirlink() finds on its own otherwise) at ip, then
+  // zero oldname's - the actual move. Directly overwriting newoff
+  // instead of calling dirlink() when xip existed, since dirlink()
+  // itself refuses a name that's already present and doesn't know
+  // this slot was just freed for reuse.
+  if(xip != 0){
+    struct dirent de;
+    memset(&de, 0, sizeof(de));
+    de.inum = ip->inum;
+    strncpy(de.name, newname, DIRSIZ);
+    if(writei(newdp, (char*)&de, newoff, sizeof(de)) != sizeof(de))
+      panic("rename: writei replace");
+  } else if(dirlink(newdp, newname, ip->inum) < 0){
+    iunlockput(newdp);
+    iput(olddp);
+    iput(ip);
+    end_op();
+    return -1;
+  }
+  int moved_across_dirs = !samefile(olddp, newdp);
+  if(ip_is_dir && moved_across_dirs){
+    newdp->nlink++;
+    iupdate(newdp);
+  }
+  iunlockput(newdp);
+
+  ilock(olddp);
+  struct dirent de;
+  memset(&de, 0, sizeof(de));
+  if(writei(olddp, (char*)&de, oldoff, sizeof(de)) != sizeof(de))
+    panic("rename: writei clear old");
+  if(ip_is_dir && moved_across_dirs){
+    olddp->nlink--;
+    iupdate(olddp);
+  }
+  iunlockput(olddp);
+
+  if(ip_is_dir && moved_across_dirs){
+    // Fix up the moved directory's own ".." to point at its new
+    // parent - the one piece of ip's own content a move (unlike a
+    // plain rename within the same parent) has to change.
+    ilock(ip);
+    uint dotdotoff;
+    struct inode *olddotdot = dirlookup(ip, "..", &dotdotoff);
+    if(olddotdot != 0)
+      iput(olddotdot);
+    struct dirent dotdot;
+    memset(&dotdot, 0, sizeof(dotdot));
+    dotdot.inum = newdp->inum;
+    strncpy(dotdot.name, "..", DIRSIZ);
+    if(writei(ip, (char*)&dotdot, dotdotoff, sizeof(dotdot)) != sizeof(dotdot))
+      panic("rename: writei ..");
+    iunlock(ip);
+  }
+
+  iput(ip);
+  end_op();
+  return 0;
+}
+
 // Shared by sys_open (O_CREATE), sys_mkdir, and sys_mknod: looks up the
 // parent directory, creates a new inode of the given type if the name
 // doesn't already exist (or, for plain files, returns the existing
@@ -428,6 +709,11 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// namei() returning "not found" below is the one sys_open() case that
+// needs to be told apart from every other failure (see the #define
+// ENOENT comment near the top of this file) - cp/mv's own gnulib
+// copy.c checks errno==ENOENT constantly to decide "this destination
+// doesn't exist yet, create it" vs. a real error worth reporting.
 int
 sys_open(void)
 {
@@ -450,10 +736,24 @@ sys_open(void)
   } else {
     if((ip = namei(path)) == 0){
       end_op();
-      return -1;
+      return -ENOENT;
     }
     ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+    // Only the access-mode bits (O_WRONLY/O_RDWR - numerically identical
+    // in xv6's own include/fcntl.h and every musl/Linux ABI, since POSIX
+    // fixes O_RDONLY/O_WRONLY/O_RDWR at 0/1/2) actually matter here: a
+    // directory can never be opened for writing, but any of musl's other
+    // flag bits (O_LARGEFILE - unconditionally ORed into every open() by
+    // musl/src/internal/syscall.h's __sys_open3, even a plain O_RDONLY
+    // one; O_DIRECTORY/O_NOFOLLOW/O_CLOEXEC - opendir()/fts.c's real
+    // diropen() sequence) are just flags this kernel doesn't otherwise
+    // interpret, not a sign of a write attempt. The old exact
+    // `omode != O_RDONLY` check rejected every single directory open
+    // from a musl-linked binary (O_LARGEFILE alone made omode nonzero),
+    // never noticed before because no earlier coreutils utility
+    // (true/false/cat/echo/basename/dirname/yes) ever opened a directory
+    // node itself.
+    if(ip->type == T_DIR && (omode & (O_WRONLY|O_RDWR))){
       iunlockput(ip);
       end_op();
       return -1;
@@ -537,6 +837,63 @@ sys_chdir(void)
   end_op();
   curproc->cwd = ip;
   return 0;
+}
+
+// (fd): fchdir()'s real backing syscall - same as sys_chdir() above,
+// just taking an already-open directory fd's inode (via idup(), since
+// curproc->cwd needs its own reference, separate from the file table
+// entry's) instead of doing a fresh namei() path lookup. Needed for
+// poc-os's own openat()/fstatat()/etc AT_FDCWD-only emulation
+// (coreutils/poc/coreutils_shims.c) to have a genuine fchdir() to sit
+// on top of - gnulib's fts.c/canonicalize.c call it directly.
+int
+sys_fchdir(void)
+{
+  struct file *f;
+  struct inode *ip;
+  struct proc *curproc = myproc();
+
+  if(argfd(0, 0, &f) < 0)
+    return -1;
+  if(f->type != FD_INODE || f->ip->type != T_DIR)
+    return -1;
+
+  begin_op();
+  ip = f->ip;
+  ilock(ip);
+  idup(ip);
+  iunlock(ip);
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = ip;
+  return 0;
+}
+
+// (fd, length): see include/syscall.h and kernel/fs.c's itruncto() -
+// this is just argument checking, same division of labor as every
+// other sys_* wrapper in this file. length is read via argint() (a
+// plain int, not a 64-bit off_t) like sys_lseek()'s offset above -
+// MAXFILE*BSIZE is a few MB, nowhere near INT_MAX, so poc-os has no
+// file a 32-bit length couldn't represent anyway.
+int
+sys_ftruncate(void)
+{
+  struct file *f;
+  int length;
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &length) < 0)
+    return -1;
+  if(f->type != FD_INODE || f->ip->type != T_FILE || length < 0)
+    return -1;
+  if(!f->writable)
+    return -1;
+
+  begin_op();
+  ilock(f->ip);
+  int r = itruncto(f->ip, (uint)length);
+  iunlock(f->ip);
+  end_op();
+  return r;
 }
 
 int

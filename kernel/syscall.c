@@ -142,6 +142,10 @@ extern int sys_mprotect(void);
 extern int sys_pread(void);
 extern int sys_fcntl(void);
 extern int sys_readv(void);
+extern int sys_getdents(void);
+extern int sys_fchdir(void);
+extern int sys_ftruncate(void);
+extern int sys_rename(void);
 #endif
 extern int sys_exec(void);
 extern int sys_exit(void);
@@ -202,6 +206,10 @@ static int (*syscalls[])(void) = {
 [SYS_pread]             sys_pread,
 [SYS_fcntl]             sys_fcntl,
 [SYS_readv]             sys_readv,
+[SYS_getdents]          sys_getdents,
+[SYS_fchdir]            sys_fchdir,
+[SYS_ftruncate]         sys_ftruncate,
+[SYS_rename]            sys_rename,
 #endif
 };
 
