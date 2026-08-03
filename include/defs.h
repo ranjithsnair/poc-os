@@ -24,6 +24,9 @@ void            panic(char*) __attribute__((noreturn));
 
 // exec.c
 int             exec(char*, char**);
+#ifdef X64
+int             execve(char*, char**, char**);
+#endif
 
 // file.c
 struct file*    filealloc(void);
@@ -52,6 +55,7 @@ struct inode*   nameiparent(char*, char*);
 int             readi(struct inode*, char*, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, char*, uint, uint);
+int             itruncto(struct inode*, uint);
 
 // ide.c
 void            ideinit(void);
@@ -180,6 +184,8 @@ int             deallocuvm(pde_t*, uintp, uintp);
 void            freevm(pde_t*);
 void            inituvm(pde_t*, char*, uint);
 int             loaduvm(pde_t*, char*, struct inode*, uint, uint);
+void            uvmzero(pde_t*, uintp, uintp);
+void            uvmsetperm(pde_t*, uintp, uintp, int);
 pde_t*          copyuvm(pde_t*, uintp);
 void            switchuvm(struct proc*);
 void            switchkvm(void);

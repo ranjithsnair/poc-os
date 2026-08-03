@@ -33,6 +33,15 @@ uintp rcr2(void);
 void lcr3(uintp val);
 
 #ifdef X64
+// WRMSR is only ever used here for MSR_FS_BASE (see include/mmu.h),
+// which takes a full 64-bit value - unlike lgdt/lidt's descriptor-table
+// registers, there's no 32-bit build counterpart that would need this
+// under a different implementation, so it's declared X64-only rather
+// than unconditionally like rcr2/lcr3 above.
+void wrmsr(uint msr, uint64 val);
+#endif
+
+#ifdef X64
 //PAGEBREAK: 36
 // Layout of the trap frame built on the stack by the hardware and by
 // kernel/trapasm64.asm, and passed to trap(). Long mode has no pusha, so

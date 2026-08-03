@@ -114,11 +114,43 @@ fileread(struct file *f, char *addr, int n)
   if(f->type == FD_PIPE)
     return piperead(f->pipe, addr, n);
   if(f->type == FD_INODE){
-    ilock(f->ip);
-    if((r = readi(f->ip, addr, f->off, n)) > 0)
-      f->off += r;
-    iunlock(f->ip);
-    return r;
+    // A transaction (matching filewrite()'s own, just below) is needed
+    // here now too, even though a read "obviously" never used to touch
+    // the log: itruncto() (kernel/fs.c, ftruncate(2)'s backing logic)
+    // can grow ip->size past every block that's actually been
+    // allocated, on the theory that bmap() lazily allocates - and
+    // zeroes - a block the first time anything touches it, read or
+    // write, so a read of that grown region reads back zeros without
+    // this port needing to track holes as their own concept. That
+    // lazy allocation calls balloc(), which calls log_write() - the
+    // one part of readi() that can now actually modify the disk,
+    // where before (nothing could ever grow ip->size without already
+    // having allocated every block up to the new size) it never did.
+    // Chunked like filewrite()'s own loop, for the same reason: a
+    // single read of a large enough hole could otherwise need to
+    // allocate more blocks than one transaction is sized for.
+    int max = ((MAXOPBLOCKS-1-1-2) / 2) * 512;
+    int i = 0;
+    while(i < n){
+      int n1 = n - i;
+      if(n1 > max)
+        n1 = max;
+
+      begin_op();
+      ilock(f->ip);
+      r = readi(f->ip, addr + i, f->off, n1);
+      if(r > 0)
+        f->off += r;
+      iunlock(f->ip);
+      end_op();
+
+      if(r < 0)
+        return i > 0 ? i : -1;
+      i += r;
+      if(r < n1)
+        break;  // short read: hit EOF, no point asking for more
+    }
+    return i;
   }
   panic("fileread");
 }

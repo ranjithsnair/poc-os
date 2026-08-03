@@ -574,28 +574,83 @@ inituvm(pde_t *pgdir, char *init, uint sz)
   memmove(mem, init, sz);
 }
 
-// Load a program segment into pgdir.  addr must be page-aligned
-// and the pages from addr to addr+sz must already be mapped.
+// Load a program segment into pgdir. The pages from PGROUNDDOWN(addr)
+// to addr+sz must already be mapped - addr itself need not be page-
+// aligned (every existing caller's addr always has been, so this is a
+// strict generalization: with addr page-aligned, off below is always
+// 0 and boundary always PGSIZE, so the loop is byte-for-byte what it
+// always was). A non-page-aligned addr is exactly what a shared
+// object's second-and-later PT_LOAD segment usually has (see
+// execve()'s interpreter-loading loop in kernel/exec.c): ELF only
+// requires p_vaddr and p_offset to be congruent mod the segment's
+// alignment, not that p_vaddr itself lands on a page boundary, and
+// two consecutive PT_LOAD segments legitimately share the one page
+// straddling their boundary.
 int
 loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
+{
+  uintp i, pa, n, off, boundary;
+  pte_t *pte;
+
+  for(i = 0; i < sz; i += n){
+    if((pte = walkpgdir(pgdir, addr+i, 0)) == 0)
+      panic("loaduvm: address should exist");
+    pa = PTE_ADDR(*pte);
+    off = ((uintp)addr + i) % PGSIZE;
+    boundary = PGSIZE - off;
+    n = (sz - i < boundary) ? sz - i : boundary;
+    if(readi(ip, P2V(pa) + off, offset+i, n) != n)
+      return -1;
+  }
+  return 0;
+}
+
+// Zero out len bytes starting at addr, exactly like loaduvm above but
+// filling with zeros instead of reading from an inode - the fd == -1
+// (anonymous) counterpart to loaduvm, for sys_mmap()'s MAP_FIXED
+// overlay path (kernel/sysproc.c): the range must already be mapped
+// (typically by an earlier growproc()/allocuvm() reservation, which
+// zero-fills on its own - this is for reusing that same reservation a
+// second time, e.g. because a shared library's segments no longer
+// cover a stale byte range a previous overlay of the same reservation
+// left non-zero).
+void
+uvmzero(pde_t *pgdir, uintp addr, uintp len)
 {
   uintp i, pa, n;
   pte_t *pte;
 
-  if((uintp) addr % PGSIZE != 0)
-    panic("loaduvm: addr must be page aligned");
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walkpgdir(pgdir, addr+i, 0)) == 0)
-      panic("loaduvm: address should exist");
+  if(addr % PGSIZE != 0)
+    panic("uvmzero: addr must be page aligned");
+  for(i = 0; i < len; i += PGSIZE){
+    if((pte = walkpgdir(pgdir, (char*)(addr+i), 0)) == 0)
+      panic("uvmzero: address should exist");
     pa = PTE_ADDR(*pte);
-    if(sz - i < PGSIZE)
-      n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, P2V(pa), offset+i, n) != n)
-      return -1;
+    n = (len - i < PGSIZE) ? len - i : PGSIZE;
+    memset(P2V(pa), 0, n);
   }
-  return 0;
+}
+
+// Set or clear PTE_W on every already-mapped page in [addr, addr+len)
+// (both must be page-aligned; callers round). Leaves PTE_P/PTE_U
+// alone - poc-os's page tables track no NX-style execute-disable bit
+// at all, so this is the only permission bit mprotect()/mmap() can
+// meaningfully change. See sys_mprotect() and sys_mmap()'s MAP_FIXED
+// path in kernel/sysproc.c.
+void
+uvmsetperm(pde_t *pgdir, uintp addr, uintp len, int writable)
+{
+  uintp a;
+  pte_t *pte;
+
+  for(a = addr; a < addr + len; a += PGSIZE){
+    if((pte = walkpgdir(pgdir, (char*)a, 0)) == 0)
+      panic("uvmsetperm: address should exist");
+    if(writable)
+      *pte |= PTE_W;
+    else
+      *pte &= ~PTE_W;
+  }
 }
 
 // Allocate page tables and physical memory to grow process from oldsz to

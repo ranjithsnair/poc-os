@@ -59,7 +59,7 @@ trap(struct trapframe *tf)
     syscall();
     if(myproc()->killed)
       exit();
-    return;
+    goto done;
   }
 
   switch(tf->trapno){
@@ -129,4 +129,24 @@ trap(struct trapframe *tf)
   // Check if the process has been killed since we yielded
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
     exit();
+
+ done:
+  // The trailing ";" makes this a valid (empty) statement on its own,
+  // since the 32-bit build compiles this whole label to nothing else -
+  // a label immediately followed by "}" is a syntax error in C.
+  ;
+#ifdef X64
+  // Reassert this process's %fs base right before it actually resumes
+  // in user mode. Needed on every return, not just when tls_base last
+  // changed: MSR_FS_BASE is CPU state, not part of what swtch() saves/
+  // restores per-process, so any context switch since the last time
+  // this process ran (a timer tick above via yield(), or another
+  // process entirely on this CPU) may have overwritten it with a
+  // different process's value. The T_SYSCALL branch above jumps
+  // straight here, since a syscall - arch_prctl in particular - is
+  // exactly the case where tls_base can change and the very next
+  // instruction executed in user mode needs to already see it.
+  if(myproc())
+    wrmsr(MSR_FS_BASE, myproc()->tls_base);
+#endif
 }

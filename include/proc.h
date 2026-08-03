@@ -67,6 +67,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uintp tls_base;               // %fs base (SYS_arch_prctl/ARCH_SET_FS);
+                                 // reasserted via WRMSR on every return
+                                 // to user mode - see kernel/trap.c
 };
 
 // Process memory is laid out contiguously, low addresses first:

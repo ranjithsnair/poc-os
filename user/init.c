@@ -12,9 +12,10 @@ main(void)
 {
   int pid, wpid;
 
-  // initcode.asm execs "/init" with no open file descriptors at all, so
-  // this open() is guaranteed to become fd 0; the two dup()s below then
-  // give fds 1 and 2 (stdout/stderr) the same underlying console file.
+  // initcode.asm execs "/usr/bin/init" with no open file descriptors at
+  // all, so this open() is guaranteed to become fd 0; the two dup()s
+  // below then give fds 1 and 2 (stdout/stderr) the same underlying
+  // console file.
   if(open("console", O_RDWR) < 0){
     mknod("console", 1, 1);
     open("console", O_RDWR);
@@ -30,7 +31,7 @@ main(void)
       exit();
     }
     if(pid == 0){
-      exec("sh", argv);
+      exec("/usr/bin/sh", argv);
       printf(1, "init: exec sh failed\n");
       exit();
     }

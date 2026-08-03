@@ -19,6 +19,8 @@
 #include "types.h"
 #include "user.h"
 #include "fcntl.h"
+#include "elf.h"
+#include "stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -69,6 +71,50 @@ int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
 
+// A deliberately tiny stand-in for a real $PATH search: a bare name (no
+// '/') that doesn't exist relative to the current directory is looked
+// up under /usr/bin instead, where poc-os installs every stock binary
+// (see the Makefile's MKFS_INSTALL) - so "true"/"cat"/"sh" keep working
+// as typed even though none of them actually live at the process's cwd.
+// A name that already contains '/', or that does exist as typed, is
+// left alone - cwd always wins over /usr/bin, same as a "./foo" would
+// in a real shell.
+static char*
+resolvepath(char *name, char *buf)
+{
+  struct stat st;
+
+  if(strchr(name, '/') || stat(name, &st) == 0)
+    return name;
+  strcpy(buf, "/usr/bin/");
+  strcpy(buf + strlen(buf), name);
+  return buf;
+}
+
+#ifdef X64
+// Peeks at path's ELF header to tell a poc-os-native static binary
+// (ET_EXEC, entered via plain SYS_exec's argc/argv convention) apart
+// from a musl-crt1/PIE binary (ET_DYN - true/false/cat and any future
+// GNU coreutils port), which instead needs SYS_execve's Linux-style
+// argc/argv/envp/auxv stack and PT_INTERP handling (see include/elf.h's
+// own comment on ELF_ET_DYN and kernel/exec.c's execve()) - the same
+// distinction musl/test/runmusl.c makes via raw syscalls, but done here
+// so plain "true"/"cat" work by name instead of needing a "runmusl"
+// prefix.
+static int
+isdyn(char *path)
+{
+  int fd, n;
+  struct elfhdr eh;
+
+  if((fd = open(path, O_RDONLY)) < 0)
+    return 0;
+  n = read(fd, &eh, sizeof(eh));
+  close(fd);
+  return n == sizeof(eh) && eh.magic == ELF_MAGIC && eh.type == ELF_ET_DYN;
+}
+#endif
+
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)
@@ -79,6 +125,7 @@ runcmd(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  char pathbuf[128], *path;
 
   if(cmd == 0)
     exit();
@@ -91,7 +138,16 @@ runcmd(struct cmd *cmd)
     ecmd = (struct execcmd*)cmd;
     if(ecmd->argv[0] == 0)
       exit();
-    exec(ecmd->argv[0], ecmd->argv);
+    path = resolvepath(ecmd->argv[0], pathbuf);
+#ifdef X64
+    if(isdyn(path)){
+      // Minimal fixed envp, same as musl/test/runmusl.c - poc-os's
+      // shell has no environment variables of its own to forward.
+      static char *envp[] = { "HOME=/", "PATH=/", 0 };
+      execve(path, ecmd->argv, envp);
+    } else
+#endif
+      exec(path, ecmd->argv);
     printf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 
@@ -150,10 +206,93 @@ runcmd(struct cmd *cmd)
   exit();
 }
 
+// cwd: this shell's own idea of its current directory, purely so the
+// prompt can show it - poc-os has no real getcwd() (no way to turn an
+// inode back into a path without directory-reading support, and even
+// with that, no reason for every process to redo the walk when this
+// one already knows every cd it did itself). Kept as a plain string,
+// updated locally after each successful chdir() rather than queried
+// from the kernel - accurate for exactly the reason a shell's own cwd
+// tracking always is: nothing but this process's own cd command ever
+// changes what its chdir() calls resolved against.
+#define MAXPATH 512
+static char cwd[MAXPATH] = "/";
+
+// Rewrites abspath in place into cwd: splits on '/', drops "." and
+// empty components, pops one component per ".." (the actual reason
+// this can't just be string concatenation - resolving ".." requires
+// already knowing what the prior component was), then rejoins.
+static void
+setcwd(char *abspath)
+{
+  char *comp[64];
+  int len[64];
+  int ncomp = 0;
+  char *s = abspath;
+
+  while(*s){
+    while(*s == '/')
+      s++;
+    if(*s == 0)
+      break;
+    char *start = s;
+    while(*s && *s != '/')
+      s++;
+    int n = s - start;
+    if(n == 1 && start[0] == '.'){
+      // skip
+    } else if(n == 2 && start[0] == '.' && start[1] == '.'){
+      if(ncomp > 0)
+        ncomp--;
+    } else if(ncomp < 64){
+      comp[ncomp] = start;
+      len[ncomp] = n;
+      ncomp++;
+    }
+  }
+
+  int pos = 0;
+  cwd[pos++] = '/';
+  for(int i = 0; i < ncomp; i++){
+    if(i > 0 && pos < MAXPATH - 1)
+      cwd[pos++] = '/';
+    int n = len[i];
+    if(pos + n >= MAXPATH - 1)
+      n = MAXPATH - 1 - pos;
+    if(n > 0){
+      memmove(cwd + pos, comp[i], n);
+      pos += n;
+    }
+  }
+  cwd[pos] = 0;
+}
+
+// Combines cwd with a cd argument (absolute or relative) into one
+// path and hands it to setcwd() to resolve - called only after a
+// chdir() to the same argument already succeeded.
+static void
+update_cwd(char *arg)
+{
+  char joined[MAXPATH];
+
+  if(arg[0] == '/'){
+    strcpy(joined, arg);
+  } else if(cwd[1] == 0){  // cwd is "/"
+    joined[0] = '/';
+    strcpy(joined + 1, arg);
+  } else {
+    strcpy(joined, cwd);
+    int l = strlen(joined);
+    joined[l] = '/';
+    strcpy(joined + l + 1, arg);
+  }
+  setcwd(joined);
+}
+
 int
 getcmd(char *buf, int nbuf)
 {
-  printf(2, "$ ");
+  printf(2, "%s $ ", cwd);
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -188,6 +327,8 @@ main(void)
       buf[strlen(buf)-1] = 0;  // chop \n
       if(chdir(buf+3) < 0)
         printf(2, "cannot cd %s\n", buf+3);
+      else
+        update_cwd(buf+3);
       continue;
     }
     if(fork1() == 0)

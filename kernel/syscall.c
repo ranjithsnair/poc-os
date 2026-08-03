@@ -125,6 +125,28 @@ argstr(int n, char **pp)
 extern int sys_chdir(void);
 extern int sys_close(void);
 extern int sys_dup(void);
+#ifdef X64
+extern int sys_execve(void);
+extern int sys_arch_prctl(void);
+extern int sys_mmap(void);
+extern int sys_munmap(void);
+extern int sys_set_tid_address(void);
+extern int sys_futex(void);
+extern int sys_brk(void);
+extern int sys_madvise(void);
+extern int sys_mremap(void);
+extern int sys_writev(void);
+extern int sys_ioctl(void);
+extern int sys_lseek(void);
+extern int sys_mprotect(void);
+extern int sys_pread(void);
+extern int sys_fcntl(void);
+extern int sys_readv(void);
+extern int sys_getdents(void);
+extern int sys_fchdir(void);
+extern int sys_ftruncate(void);
+extern int sys_rename(void);
+#endif
 extern int sys_exec(void);
 extern int sys_exit(void);
 extern int sys_fork(void);
@@ -166,6 +188,29 @@ static int (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+#ifdef X64
+[SYS_execve]            sys_execve,
+[SYS_arch_prctl]        sys_arch_prctl,
+[SYS_mmap]              sys_mmap,
+[SYS_munmap]            sys_munmap,
+[SYS_exit_group]        sys_exit,  // see include/syscall.h
+[SYS_set_tid_address]   sys_set_tid_address,
+[SYS_futex]             sys_futex,
+[SYS_brk]               sys_brk,
+[SYS_madvise]           sys_madvise,
+[SYS_mremap]            sys_mremap,
+[SYS_writev]            sys_writev,
+[SYS_ioctl]             sys_ioctl,
+[SYS_lseek]             sys_lseek,
+[SYS_mprotect]          sys_mprotect,
+[SYS_pread]             sys_pread,
+[SYS_fcntl]             sys_fcntl,
+[SYS_readv]             sys_readv,
+[SYS_getdents]          sys_getdents,
+[SYS_fchdir]            sys_fchdir,
+[SYS_ftruncate]         sys_ftruncate,
+[SYS_rename]            sys_rename,
+#endif
 };
 
 // Called from trap() for a T_SYSCALL trap. tf->eax holds the syscall
