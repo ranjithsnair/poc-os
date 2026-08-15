@@ -51,9 +51,49 @@ int COLS, LINES;
 
 static struct termios saved_termios;
 static int ended = 1;
-static WINDOW *cursor_win;	/* last window wnoutrefresh()'d - doupdate()
-				 * parks the real cursor at its position */
+static WINDOW *cursor_win;	/* window doupdate() parks the real cursor
+				 * in - the most recently positioned one
+				 * (wmove, or wnoutrefresh as a fallback) */
 static int pending = -1;	/* ungetch()'s one-slot pushback */
+
+/* Every window newwin() has ever created (not stdscr/curscr themselves,
+ * which are only ever built directly via mkwindow() in initscr(), never
+ * through newwin()). doupdate() blits every one of these into stdscr
+ * fresh on every call, rather than relying only on whatever a caller
+ * explicitly wnoutrefresh()'d - real nano (see nano/src/nano.c's main
+ * loop and nano/src/text.c's inject()) only calls wnoutrefresh(midwin)
+ * on a *full* redraw (refresh_needed); ordinary single-character typing
+ * writes straight into midwin's buffer via update_line()/waddch() and
+ * relies on the next doupdate() alone to show it - real curses supports
+ * that (once a window is part of the screen, its live content is what
+ * gets painted, not a frozen wnoutrefresh snapshot), so this doesn't
+ * try to be a byte-perfect ncurses clone, just correct for how nano
+ * actually drives it. Nano only ever has 3 non-overlapping windows, so
+ * blit order among them never matters. */
+#define MAX_KNOWN_WINDOWS 8
+static WINDOW *known_windows[MAX_KNOWN_WINDOWS];
+static int nknown_windows;
+
+static void
+blitwin(WINDOW *win)
+{
+	int r, c, sy, sx, idx, sidx;
+
+	for (r = 0; r < win->rows; r++) {
+		sy = win->begy + r;
+		if (sy < 0 || sy >= stdscr->rows)
+			continue;
+		for (c = 0; c < win->cols; c++) {
+			sx = win->begx + c;
+			if (sx < 0 || sx >= stdscr->cols)
+				continue;
+			idx = r * win->cols + c;
+			sidx = sy * stdscr->cols + sx;
+			stdscr->ch[sidx] = win->ch[idx];
+			stdscr->rev[sidx] = win->rev[idx];
+		}
+	}
+}
 
 /* poc-os's own kbd.c (include/kbd.h) special-key byte codes, translated
  * to this header's KEY_* values when a window has keypad(win, TRUE).
@@ -156,16 +196,28 @@ isendwin(void)
 WINDOW *
 newwin(int nlines, int ncols, int begin_y, int begin_x)
 {
-	return mkwindow(nlines, ncols, begin_y, begin_x);
+	WINDOW *win = mkwindow(nlines, ncols, begin_y, begin_x);
+
+	if (win && nknown_windows < MAX_KNOWN_WINDOWS)
+		known_windows[nknown_windows++] = win;
+	return win;
 }
 
 int
 delwin(WINDOW *win)
 {
+	int i;
+
 	if (win == stdscr)
 		return OK;
 	if (win == cursor_win)
 		cursor_win = NULL;
+	for (i = 0; i < nknown_windows; i++) {
+		if (known_windows[i] == win) {
+			known_windows[i] = known_windows[--nknown_windows];
+			break;
+		}
+	}
 	free(win->ch);
 	free(win->rev);
 	free(win);
@@ -358,6 +410,7 @@ wmove(WINDOW *win, int y, int x)
 		return ERR;
 	win->cury = y;
 	win->curx = x;
+	cursor_win = win;
 	return OK;
 }
 
@@ -378,22 +431,7 @@ wattroff(WINDOW *win, int attrs)
 int
 wnoutrefresh(WINDOW *win)
 {
-	int r, c, sy, sx, idx, sidx;
-
-	for (r = 0; r < win->rows; r++) {
-		sy = win->begy + r;
-		if (sy < 0 || sy >= stdscr->rows)
-			continue;
-		for (c = 0; c < win->cols; c++) {
-			sx = win->begx + c;
-			if (sx < 0 || sx >= stdscr->cols)
-				continue;
-			idx = r * win->cols + c;
-			sidx = sy * stdscr->cols + sx;
-			stdscr->ch[sidx] = win->ch[idx];
-			stdscr->rev[sidx] = win->rev[idx];
-		}
-	}
+	blitwin(win);
 	cursor_win = win;
 	return OK;
 }
@@ -402,7 +440,13 @@ int
 doupdate(void)
 {
 	char buf[256];
-	int len, row, col, idx, lastrev, r;
+	int len, row, col, idx, lastrev, r, i;
+
+	/* Refresh every known window's content into stdscr first - see
+	 * known_windows[]'s own comment for why this can't just rely on
+	 * whatever the caller last explicitly wnoutrefresh()'d. */
+	for (i = 0; i < nknown_windows; i++)
+		blitwin(known_windows[i]);
 
 	for (row = 0; row < LINES; row++) {
 		len = snprintf(buf, sizeof(buf), "\x1b[%d;1H", row + 1);
