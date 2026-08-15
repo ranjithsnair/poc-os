@@ -12,6 +12,15 @@
 ; INT13h call can address directly - then switches fully to protected
 ; mode and jumps to the kernel's real entry point.
 ;
+; Reads via CHS (AH=0x02), not INT13h extensions (AH=0x42/LBA) - see
+; boot/bootasm_bios.asm's own comment for why: this same image has to
+; boot from a plain USB/hard-disk-style drive *and* from an El-Torito
+; "hard disk emulation" CD-ROM (for one ISO that also works burned to
+; disc or attached as a virtual CD), and El-Torito hard-disk-emulation
+; drives were found to fail the INT13h-extensions-present check
+; outright, while the CD's own native drive number passes that check
+; but then hangs on the actual extended read. CHS sidesteps both.
+;
 ; KERNEL_LBA/KERNEL_SECTORS/FS_IMG_LBA/KERNEL_ENTRY are generated at
 ; build time (see the Makefile's bootconfig_bios.h rule) rather than
 ; hardcoded: the kernel's real size and entry point are properties of
@@ -24,12 +33,13 @@
 #include "bootconfig_bios.h"
 
 ; No ORG: this assembles to a relocatable ELF object - the linker's own
-; -Ttext 0x10000 (see the Makefile) places it, the same way
+; -Ttext 0x1000 (see the Makefile) places it, the same way
 ; boot2asm.asm's own build works.
 BITS 16
 
 %define STAGE_BUF_SEG   0x5000   ; 0x5000:0 = phys 0x50000, low staging buffer
-%define CHUNK_SECTORS   32       ; 32*512=16KB per BIOS call/copy
+%define CHUNK_SECTORS   32       ; 32*512=16KB per copy (read one CHS sector
+                                  ; at a time within the chunk - see read_sector)
 
 global entry2
 entry2:
@@ -47,12 +57,12 @@ entry2:
   sti
 
   call flatten_es
+  call get_geometry
 
   ; ---- Load the kernel (raw binary) to its real physical load
   ; address (EXTMEM, memlayout.h).
   mov dword [cur_dst], EXTMEM
-  mov word [cur_lba], KERNEL_LBA
-  mov word [cur_lba+2], 0
+  mov dword [cur_lba], KERNEL_LBA
   mov word [sectors_left], KERNEL_SECTORS
   call load_chunks
 
@@ -60,8 +70,7 @@ entry2:
   ; kernel/ide.c's own comment for why the kernel needs this already
   ; sitting in RAM rather than ever touching disk hardware itself.
   mov dword [cur_dst], RAMDISK_PADDR
-  mov word [cur_lba], FS_IMG_LBA
-  mov word [cur_lba+2], 0
+  mov dword [cur_lba], FS_IMG_LBA
   mov word [sectors_left], (RAMDISK_SIZE/512)
   call load_chunks
 
@@ -90,15 +99,14 @@ protected_entry:
 BITS 16
 ; flatten_es: (re)installs a flat (base 0, 4GB limit) descriptor into
 ; ES via a brief protected-mode round trip, then drops straight back
-; to real mode - see the long comment this used to carry, preserved
-; here: a real CPU only reloads a segment's cached descriptor when
-; something explicitly MOVs a new selector into it, not just because
-; CR0.PE changed, so ES keeps that 4GB limit even after we're back in
-; real mode, meaning ES-prefixed 32-bit-offset addressing (es:edi, not
-; a real-mode-style 16-bit segment:offset pair) reaches all 4GB from
-; here on - while INT13h (real-mode-only) still works normally because
-; the CPU itself genuinely is back in real mode. Standard, widely-used
-; technique - not specific to this project.
+; to real mode. A real CPU only reloads a segment's cached descriptor
+; when something explicitly MOVs a new selector into it, not just
+; because CR0.PE changed, so ES keeps that 4GB limit even after we're
+; back in real mode, meaning ES-prefixed 32-bit-offset addressing
+; (es:edi, not a real-mode-style 16-bit segment:offset pair) reaches
+; all 4GB from here on - while INT13h (real-mode-only) still works
+; normally because the CPU itself genuinely is back in real mode.
+; Standard, widely-used technique - not specific to this project.
 ;
 ; Callable repeatedly, not just once: BIOS's own INT13h implementation
 ; is free to reload ES for its own scratch use while handling our
@@ -131,12 +139,92 @@ flatten_es:
   pop eax
   ret
 
+; get_geometry: queries the boot drive's CHS geometry via INT13h
+; AH=0x08, storing sectors-per-track and head-count for lba_to_chs
+; below. Halts on failure - nothing sensible to do without it.
+get_geometry:
+  push es
+  push di
+  xor ax, ax
+  mov es, ax
+  mov di, ax              ; ES:DI = 0:0 - some BIOSes misbehave otherwise
+  mov ah, 0x08
+  mov dl, [drive]
+  int 0x13
+  jc geomfail
+  and cl, 0x3F             ; sectors/track = CL bits 0-5
+  mov [spt], cl
+  movzx ax, dh
+  inc ax                    ; heads = DH + 1 (DH is the max head *number*) -
+                              ; a WORD, not a byte: DH=0xFF (max legal value,
+                              ; the standard "large disk" 256-head geometry)
+                              ; gives heads=256, which doesn't fit in 8 bits -
+                              ; found via a real divide-by-zero crash when
+                              ; this wrapped to 0 in a byte-sized field.
+  mov [heads], ax
+  pop di
+  pop es
+  ret
+geomfail:
+  cli
+  hlt
+  jmp $
+
+; lba_to_chs: converts DWORD [cur_sec_lba] into cylinder/head/sector
+; using [spt]/[heads] (get_geometry above). Sector is 1-based, per
+; INT13h convention.
+lba_to_chs:
+  xor edx, edx
+  mov eax, [cur_sec_lba]
+  movzx ecx, byte [spt]
+  div ecx                   ; eax = lba/spt, edx = lba%spt
+  inc edx
+  mov [chs_sector], dl
+  xor edx, edx
+  movzx ecx, word [heads]
+  div ecx                   ; eax = cylinder, edx = head
+  mov [chs_cyl], ax
+  mov [chs_head], dl
+  ret
+
+; read_sector: reads the single sector at DWORD [cur_sec_lba] from
+; drive [drive] into ES:BX, retrying (with a controller reset) once
+; before giving up. Clobbers ax/bx/cx/dx.
+read_sector:
+  call lba_to_chs
+  mov cx, [chs_cyl]
+  mov ch, cl
+  mov cl, [chs_cyl+1]
+  shl cl, 6
+  or cl, [chs_sector]
+  mov dh, [chs_head]
+  mov dl, [drive]
+  mov ax, 0x0201
+  int 0x13
+  jnc .ok
+  xor ax, ax
+  mov dl, [drive]
+  int 0x13
+  mov cx, [chs_cyl]
+  mov ch, cl
+  mov cl, [chs_cyl+1]
+  shl cl, 6
+  or cl, [chs_sector]
+  mov dh, [chs_head]
+  mov dl, [drive]
+  mov ax, 0x0201
+  int 0x13
+  jc diskfail
+.ok:
+  ret
+
 ; load_chunks: reads [sectors_left] sectors from drive [drive],
 ; starting at LBA [cur_lba], to physical address [cur_dst] -
 ; CHUNK_SECTORS at a time, via the low (real-mode-reachable) staging
-; buffer at STAGE_BUF_SEG, each chunk copied up to its real
-; destination with an unreal-mode 32-bit rep movsb. Re-flattens ES
-; (see flatten_es above) after every BIOS call and before every copy,
+; buffer at STAGE_BUF_SEG (one CHS sector per INT13h call - see
+; read_sector), each chunk then copied up to its real destination
+; with an unreal-mode 32-bit rep movsb. Re-flattens ES (see
+; flatten_es above) after every BIOS call and before every copy,
 ; since the BIOS call itself is what silently invalidates ES.
 ; Clobbers ax/bx/cx/dx/si/di/es implicitly through the instructions
 ; below; callers don't rely on any of them surviving.
@@ -150,25 +238,31 @@ load_chunks:
   jbe .have_count
   mov ax, CHUNK_SECTORS
 .have_count:
-  mov [dap.count], ax
+  mov [chunk_count], ax
 
-  mov word [dap.seg], STAGE_BUF_SEG
-  mov word [dap.off], 0
-  mov ax, [cur_lba]
-  mov [dap.lba_lo], ax
-  mov ax, [cur_lba+2]
-  mov [dap.lba_lo+2], ax
-
-  mov dl, [drive]
-  mov si, dap
-  mov ah, 0x42
-  int 0x13
-  jc diskfail
+  ; Read this chunk's sectors, one CHS call at a time, into the
+  ; staging buffer at STAGE_BUF_SEG:0, STAGE_BUF_SEG:0x200, etc.
+  mov eax, [cur_lba]
+  mov [cur_sec_lba], eax
+  mov word [stage_off], 0
+  mov cx, [chunk_count]
+.readloop:
+  jcxz .readdone
+  push cx
+  mov ax, STAGE_BUF_SEG
+  mov es, ax
+  mov bx, [stage_off]
+  call read_sector
+  add word [stage_off], 512
+  inc dword [cur_sec_lba]
+  pop cx
+  loop .readloop
+.readdone:
 
   call flatten_es
 
   ; Copy this chunk from the low staging buffer up to cur_dst.
-  movzx ecx, word [dap.count]
+  movzx ecx, word [chunk_count]
   shl ecx, 9                  ; sectors -> bytes (*512)
   xor esi, esi
   mov si, STAGE_BUF_SEG
@@ -177,11 +271,9 @@ load_chunks:
   a32 rep es movsb
 
   ; advance cur_lba/cur_dst, decrement sectors_left, by this chunk's
-  ; real transfer count (dap.count - the BIOS may have transferred
-  ; fewer than requested; re-read it rather than assuming CHUNK_SECTORS).
-  mov cx, [dap.count]
+  ; sector count.
+  mov cx, [chunk_count]
   add [cur_lba], cx
-  adc word [cur_lba+2], 0
   sub [sectors_left], cx
   movzx ecx, cx
   shl ecx, 9
@@ -201,18 +293,14 @@ drive:        db 0
 sectors_left: dw 0
 cur_lba:      dd 0
 cur_dst:      dd 0
-
-; Disk Address Packet for INT13h AH=0x42 (16 bytes) - see
-; boot/bootasm_bios.asm's own copy for the field layout.
-align 4
-dap:
-  db 0x10
-  db 0
-.count: dw 0
-.off:   dw 0
-.seg:   dw 0
-.lba_lo: dd 0
-         dd 0
+chunk_count:  dw 0
+stage_off:    dw 0
+cur_sec_lba:  dd 0
+spt:          db 0
+heads:        dw 0
+chs_cyl:      dw 0
+chs_head:     db 0
+chs_sector:   db 0
 
 ; Bootstrap GDT - identical in shape to boot/bootasm.asm's own (flat,
 ; identity-mapped code/data descriptors): used both for the repeated

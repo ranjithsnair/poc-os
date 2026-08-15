@@ -373,6 +373,31 @@ $(BUILD)/poc_bios.img: $(BUILD)/bootblock_bios $(BUILD)/boot2_bios $(BUILD)/kern
 	fsimglba=$$(sed -n 's/^#define KERNEL_SECTORS //p' $(OBJDIR)/boot/bootconfig_bios.h | awk '{print $$1+$(BOOT2_BIOS_LBA)}'); \
 	dd if=$(BUILD)/fs.img of=$(BUILD)/poc_bios.img seek=$$fsimglba conv=notrunc
 
+# One ISO, bootable identically on real hardware (Legacy/CSM BIOS off
+# a USB stick), VirtualBox, and QEMU, whether attached as an optical
+# drive or dd'd straight to a USB stick (isohybrid-style: it's both a
+# valid ISO9660 filesystem *and* the same raw, MBR-bootable disk image
+# poc_bios.img already is - see boot/bootasm_bios.asm's own comment
+# for why that image reads via CHS, not LBA extensions: found the hard
+# way that El-Torito "hard disk emulation" CD-boot - the mechanism
+# that lets a plain BIOS bootloader address an El-Torito-mounted ISO
+# at all - fails INT13h-extensions-present outright on real BIOS/
+# QEMU/SeaBIOS alike, while CHS is the one interface universal across
+# real disks, USB, and El-Torito emulation). -hard-disk-boot tells
+# xorriso to register the whole image as a "hard disk emulation" El
+# Torito boot entry (not "no emulation", which handed back the CD's
+# native drive - passed the extensions check but then hung on the
+# actual extended read; a QEMU/SeaBIOS ATAPI-sector-size quirk, near
+# as can be told) - boot-load-size is irrelevant in that mode (BIOS
+# always loads exactly the one MBR sector, like any real hard disk
+# boot) but xorriso still wants a value.
+$(BUILD)/poc-os.iso: $(BUILD)/poc_bios.img | $(BUILD)
+	rm -rf $(BUILD)/isoroot
+	mkdir -p $(BUILD)/isoroot
+	cp $(BUILD)/poc_bios.img $(BUILD)/isoroot/boot.img
+	xorriso -as mkisofs -o $(BUILD)/poc-os.iso -V POCOS \
+		-b boot.img -hard-disk-boot -boot-load-size 1 $(BUILD)/isoroot
+
 # entryother and initcode are raw binary blobs the kernel embeds with
 # -b binary (see kernel/main.c's and kernel/proc.c's matching
 # _binary_build_..._start symbols) rather than programs run standalone,
