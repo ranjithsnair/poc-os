@@ -10,7 +10,13 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include "syscall.h"
+#include <sys/syscall.h>
+
+/* musl's real prototype for this is gated behind _GNU_SOURCE/
+ * _BSD_SOURCE (musl/include/unistd.h), which this build's
+ * -D_XOPEN_SOURCE=700 doesn't define - declaring it directly avoids
+ * pulling in a broader feature-test macro just for this one call. */
+extern long syscall(long, ...);
 
 static char *const argv[] = { "-bash", "-i", 0 };
 static char *const envp[] = { "PATH=/usr/bin", "HOME=/", "TERM=dumb", 0 };

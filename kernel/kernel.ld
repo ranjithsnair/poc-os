@@ -1,6 +1,4 @@
-/* Linker script for the 64-bit poc kernel - the elf64-x86-64 counterpart
-   of kernel.ld. Structurally identical; only the output format/arch and
-   the link address (KERNLINK, see memlayout.h) differ.
+/* Linker script for the 64-bit poc kernel.
    See the GNU ld 'info' manual ("info ld") to learn the syntax. */
 
 OUTPUT_FORMAT("elf64-x86-64", "elf64-x86-64", "elf64-x86-64")

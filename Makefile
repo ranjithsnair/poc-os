@@ -4,15 +4,6 @@
 # default explicitly so a bare `make` builds the OS image like `make all`.
 .DEFAULT_GOAL := all
 
-# ARCH selects the target: 64 (default) builds a native x86-64 long-mode
-# kernel; 32 builds the original x86 protected-mode kernel. Most C sources
-# are shared and branch on the X64 preprocessor macro (see CPPFLAGS below);
-# a handful of files that differ in kind rather than in a few constants -
-# entry, context switch, trap entry/return, the raw instruction-wrapper
-# asm, and the linker script - have distinct 32-bit and 64-bit versions,
-# selected below via ENTRYOBJ/SWTCHOBJ/TRAPASMOBJ/X86ASMOBJ/KERNELLD.
-ARCH ?= 64
-
 OBJS = \
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
@@ -41,27 +32,18 @@ OBJS = \
 	$(OBJDIR)/kernel/vectors.o\
 	$(OBJDIR)/kernel/vm.o\
 
-ifeq ($(ARCH),64)
-ENTRYOBJ = $(OBJDIR)/kernel/entry64.o
-SWTCHOBJ = $(OBJDIR)/kernel/swtch64.o
-TRAPASMOBJ = $(OBJDIR)/kernel/trapasm64.o
-X86ASMOBJ = $(OBJDIR)/kernel/x86_64.o
-KERNELLD = kernel/kernel64.ld
-INITCODEOBJ = $(OBJDIR)/user/initcode64.o
-else
 ENTRYOBJ = $(OBJDIR)/kernel/entry.o
 SWTCHOBJ = $(OBJDIR)/kernel/swtch.o
 TRAPASMOBJ = $(OBJDIR)/kernel/trapasm.o
 X86ASMOBJ = $(OBJDIR)/kernel/x86.o
 KERNELLD = kernel/kernel.ld
 INITCODEOBJ = $(OBJDIR)/user/initcode.o
-endif
 OBJS += $(SWTCHOBJ) $(TRAPASMOBJ) $(X86ASMOBJ)
 
 # Toolchain: x86_64-elf-gcc/ld (Homebrew, /usr/local/bin) is multilib - it
 # takes -m32 as well as -m64 (see BOOTCFLAGS/CFLAGS below) and its ld
 # supports both the elf_i386 and elf_x86_64 emulations - so this one
-# toolchain builds ARCH=32, ARCH=64, and the always-32-bit boot
+# toolchain builds the 64-bit kernel and the always-32-bit boot
 # sector/AP trampoline alike. No separate i686-elf- toolchain needed.
 TOOLPREFIX = x86_64-elf-
 CC = $(TOOLPREFIX)gcc
@@ -69,83 +51,55 @@ LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
-# qemu-system-x86_64's CPU is backwards compatible with 32-bit protected
-# mode, so the same binary boots an ARCH=32 kernel as well as ARCH=64.
 QEMU = qemu-system-x86_64
 
 # NASM assembles all the .asm (Intel-syntax) sources. The shared C headers
 # in include/ (constants, struct layouts) are still expanded into them with
 # the C preprocessor before NASM ever sees the file - see the %.o: %.asm
 # rules below. BOOTNASMFLAGS is for the always-32-bit boot sector/AP
-# trampoline; NASMFLAGS follows ARCH and is used for every other
-# hand-written .asm source.
+# trampoline; NASMFLAGS is used for every other hand-written .asm source.
 NASM = nasm
 BOOTNASMFLAGS = -f elf32 -g
-ifeq ($(ARCH),64)
 NASMFLAGS = -f elf64 -g
-else
-NASMFLAGS = -f elf32 -g
-endif
 
 # All headers live in include/, shared by boot/, kernel/, user/ and mkfs/.
-# -DX64 lets shared headers (types.h, mmu.h, memlayout.h, x86.h, proc.h,
-# elf.h) branch to their 64-bit struct/constant definitions.
 CPPFLAGS = -Iinclude
-ifeq ($(ARCH),64)
-CPPFLAGS += -DX64
-endif
 
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
-ifeq ($(ARCH),64)
-CFLAGS += -m64
-else
-CFLAGS += -m32
-endif
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -m64
 # Nothing here ever sets CR0/CR4 to enable SSE (no build does FPU/SSE
 # state management for kernel *or* user code) - but x86_64-elf-gcc's
-# codegen baseline includes SSE2 in both -m64 and -m32 mode (its -m32
-# multilib isn't the plain no-SSE i386 baseline a dedicated 32-bit-only
-# cross-gcc would default to), so GCC will happily autovectorize an
-# ordinary scalar loop into SSE instructions at -O2 with no other
-# prompting. Executing one with SSE disabled raises #UD/#NM; this early
-# in boot, with no IDT installed yet, that's an instant triple fault -
-# so -mgeneral-regs-only rules out vector codegen entirely, for both
-# ARCH values and for kernel and user code alike.
+# codegen baseline includes SSE2 even in -m64 mode, so GCC will happily
+# autovectorize an ordinary scalar loop into SSE instructions at -O2
+# with no other prompting. Executing one with SSE disabled raises
+# #UD/#NM; this early in boot, with no IDT installed yet, that's an
+# instant triple fault - so -mgeneral-regs-only rules out vector
+# codegen entirely, for kernel and user code alike.
 CFLAGS += -mgeneral-regs-only
-# x86_64-elf-gcc supports -fno-stack-protector and -fno-pie/-no-pie in
-# both -m32 and -m64 mode, so these are added unconditionally.
 CFLAGS += -fno-stack-protector -fno-pie -no-pie
 
 # boot/*.c and kernel/entryother.asm compile with the fixed-32-bit
 # BOOTNASMFLAGS above, but still want the same warning/codegen posture as
 # CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS directly
-# (whose -m64/-m32 tracks ARCH, not "always 32-bit") - including
-# -mgeneral-regs-only, for the same reason: boot code runs in
-# real/protected mode with no SSE state management either.
+# (whose -m64 doesn't apply here) - including -mgeneral-regs-only, for
+# the same reason: boot code runs in real/protected mode with no SSE
+# state management either.
 BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -mgeneral-regs-only -fno-stack-protector -fno-pie -no-pie
 
 # KCFLAGS adds flags needed only for kernel C code proper (not the boot
-# sector, not user programs) on the 64-bit build: -mcmodel=kernel because
-# KERNBASE (0xFFFFFFFF80000000, see memlayout.h) is in the top -2GB, which
-# is exactly the address range GCC's "kernel" code model - as opposed to
-# the default "small" model, which assumes symbols live in the *low* 2GB -
-# is for; -mno-red-zone because an interrupt can land on the kernel stack
-# at any instruction boundary and push a trap frame below the current
-# %rsp, which would silently corrupt a leaf function's red zone.
-ifeq ($(ARCH),64)
+# sector, not user programs): -mcmodel=kernel because KERNBASE
+# (0xFFFFFFFF80000000, see memlayout.h) is in the top -2GB, which is
+# exactly the address range GCC's "kernel" code model - as opposed to
+# the default "small" model, which assumes symbols live in the *low*
+# 2GB - is for; -mno-red-zone because an interrupt can land on the
+# kernel stack at any instruction boundary and push a trap frame below
+# the current %rsp, which would silently corrupt a leaf function's red
+# zone.
 KCFLAGS = -mcmodel=kernel -mno-red-zone
-else
-KCFLAGS =
-endif
 
 # ld's emulation name for each target, hardcoded (confirmed via
 # `x86_64-elf-ld -V` on this machine: elf_x86_64 / elf_i386, not the
 # FreeBSD elf_i386_fbsd variant).
-ifeq ($(ARCH),64)
 LDFLAGS += -m elf_x86_64
-else
-LDFLAGS += -m elf_i386
-endif
 BOOTLDFLAGS += -m elf_i386
 
 # Every generated file lives under build/: final binaries, disk images,
@@ -163,15 +117,14 @@ BOOTLDFLAGS += -m elf_i386
 # that's-the-point) source, never build output; `make clean` is just
 # `rm -rf build`.
 BUILD = build
-OBJDIR = $(BUILD)/obj$(ARCH)
+OBJDIR = $(BUILD)/obj
 
 $(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user $(OBJDIR)/musl-test:
 	mkdir -p $@
 
-# Compile a C source into build/obj<ARCH>/<dir>/<name>.o, keeping the same
+# Compile a C source into build/obj/<dir>/<name>.o, keeping the same
 # boot/kernel/user split the sources themselves use. boot/ always uses the
-# fixed-32-bit BOOTCFLAGS; kernel/ adds KCFLAGS on top of the
-# ARCH-selected CFLAGS.
+# fixed-32-bit BOOTCFLAGS; kernel/ adds KCFLAGS on top of CFLAGS.
 $(OBJDIR)/boot/%.o: boot/%.c | $(OBJDIR)/boot
 	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -c -o $@ $<
 
@@ -192,10 +145,11 @@ $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# kernel/entryother.asm is the one kernel/*.asm source that (until it grows
-# a 64-bit sibling in a later phase) always stays 16/32-bit real/protected
-# mode, like boot/*.asm - this explicit rule overrides the generic
-# ARCH-following pattern above for this file only.
+# kernel/entryother.asm is the one kernel/*.asm source that always stays
+# 16/32-bit real/protected mode, like boot/*.asm (the APs it bootstraps
+# start in real mode regardless of the main kernel's own bitness) -
+# this explicit rule overrides the generic NASMFLAGS pattern above for
+# this file only.
 $(OBJDIR)/kernel/entryother.o: kernel/entryother.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
@@ -404,11 +358,10 @@ $(BUILD)/poc-os.iso: $(BUILD)/poc_bios.img | $(BUILD)
 # so unlike everything else in $(OBJS)/ULIB they need their own two-step
 # ld+objcopy recipe instead of just landing in a link line. They're
 # final build products, not intermediates, so - like bootblock, kernel,
-# and mkfs - they live directly in build/, not build/obj<ARCH>/. entryother
+# and mkfs - they live directly in build/, not build/obj/. entryother
 # is always the fixed-32-bit trampoline, linked with BOOTLDFLAGS
 # (see entryother.o's rule above); initcode is $(INITCODEOBJ), which
-# already matches ARCH, so it links with the ARCH-selected LDFLAGS like
-# everything else in $(OBJS).
+# links with LDFLAGS like everything else in $(OBJS).
 $(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
 	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
@@ -445,14 +398,13 @@ tags:
 # pattern above, since vectors.asm's "source" is itself a build product,
 # not a file that exists under kernel/.
 $(OBJDIR)/kernel/vectors.asm: kernel/vectors.pl | $(OBJDIR)/kernel
-	./kernel/vectors.pl $(ARCH) > $(OBJDIR)/kernel/vectors.asm
+	./kernel/vectors.pl > $(OBJDIR)/kernel/vectors.asm
 
 $(OBJDIR)/kernel/vectors.o: $(OBJDIR)/kernel/vectors.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(OBJDIR)/kernel/vectors.i $(OBJDIR)/kernel/vectors.asm
 	$(NASM) $(NASMFLAGS) -o $@ $(OBJDIR)/kernel/vectors.i
 
-USYSOBJ = $(if $(filter 64,$(ARCH)),$(OBJDIR)/user/usys64.o,$(OBJDIR)/user/usys.o)
-ULIB = $(OBJDIR)/user/ulib.o $(USYSOBJ) $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(X86ASMOBJ)
+ULIB = $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(X86ASMOBJ)
 
 # Debug info (-ggdb, in CFLAGS) is generated for every user binary, same
 # as the kernel, but it's dead weight once mkfs packages the binary into
@@ -471,10 +423,10 @@ $(BUILD)/_%: $(OBJDIR)/user/%.o $(ULIB) | $(BUILD)
 	$(OBJCOPY) --strip-debug $@
 
 # musl-test/: home to runmusl.c (a manual launcher for a musl-crt1-style
-# binary via raw SYS_execve - "runmusl <path> [args...]"; user/sh.c's
-# own isdyn() check in runcmd() makes this unnecessary for the ordinary
-# case of just running true/false/cat by name, but it's still useful
-# standalone, e.g. to pass a path sh.c can't parse as a bare command)
+# binary via raw SYS_execve - "runmusl <path> [args...]" - a real
+# shell, bash, execve()s dynamic binaries directly and needs no such
+# helper for the ordinary case, but this is still useful standalone,
+# e.g. to pass a path bash itself can't reach yet during bring-up)
 # and ldso_stubs.c (linked into libc.so itself - see MUSL_LDSO_OBJS).
 # Unlike ordinary user/ programs these need neither ULIB nor an -e main convention shared
 # with xv6's own ulib.c (they don't link ulib.c at all). -Iinclude is
@@ -869,6 +821,7 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/temp/mkostemps.o \
 	$(OBJDIR)/musl-pic/src/temp/mkdtemp.o \
 	$(OBJDIR)/musl-pic/src/signal/x86_64/sigsetjmp.o \
+	$(OBJDIR)/musl-pic/src/misc/syscall.o \
 	$(OBJDIR)/musl-pic/bash-shims/bash_shims.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
@@ -1512,7 +1465,8 @@ $(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
 # --dynamic-linker /usr/lib/libc.so -lc) is now poc-os's *default*
 # convention for any future userland software, not just bash/
 # coreutils - the static ULIB/xv6-native path (user/*.c, include/
-# user.h) is legacy, kept only until user/sh.c itself is retired.
+# user.h) is retired (see git history for the old user/sh.c+user/
+# init.c pair this replaced).
 #
 # -DCONF_HOSTTYPE/-DCONF_OSTYPE/-DCONF_MACHTYPE: bash/conftypes.h
 # expects these predefined (normally by configure, from config.h's own
@@ -1723,7 +1677,7 @@ $(BUILD)/_bash: $(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) $(BUILD)/libc.so | $
 # starting bash -i instead of sh - see bash/poc/dinit.c's own comments.
 $(OBJDIR)/bash-pic/poc/dinit.o: bash/poc/dinit.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Imusl/src/include -Imusl/src/internal -c -o $@ $<
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
 
 $(BUILD)/_dinit: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o $(BUILD)/libc.so | $(BUILD)
 	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
@@ -1753,33 +1707,23 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # would still use.
 UPROGS=\
 
-# init/sh: not "commands" in the usual sense - init is PID 1 (the
-# kernel loads initcode.asm/initcode64.asm, which SYS_execs this exact
-# path - see those files' own "init:" string) - but installed under
-# /usr/bin like everything else rather than carved out as a root-level
-# exception. sh (the static xv6-native ULIB shell) is kept only for
-# ARCH=32, which has no musl/coreutils/bash in it at all to give init
-# anything else to start; ARCH=64's PID 1 is bash/poc/dinit.c (dynamic,
-# Scrt1.o+libc.so, like bash/coreutils - see its own comment), starting
-# bash directly rather than sh.
-ifeq ($(ARCH),64)
+# init: PID 1 (the kernel loads user/initcode.asm, which SYS_execs
+# this exact path - see that file's own "init:" string) - installed
+# under /usr/bin like everything else rather than carved out as a
+# root-level exception. bash/poc/dinit.c (dynamic, Scrt1.o+libc.so,
+# like bash/coreutils - see its own comment) is the only init poc-os
+# has now, starting bash directly; the static xv6-native user/init.c+
+# user/sh.c pair is gone - see git history if reviving it.
 MKFS_INSTALL = usr/bin/init:$(BUILD)/_dinit
 MKFS_INSTALL_DEPS = $(BUILD)/_dinit
-else
-MKFS_INSTALL = usr/bin/init:$(BUILD)/_init usr/bin/sh:$(BUILD)/_sh
-MKFS_INSTALL_DEPS = $(BUILD)/_init $(BUILD)/_sh
-endif
 
 # GNU coreutils ports (true/false/cat/echo/basename/dirname/yes,
 # runmusl - a manual musl-crt1-style launcher, see musl-test/%.o's own
-# comment): x86_64-only, like the rest of the musl port, so conditional
-# on ARCH rather than always built. libc.so has to live at exactly
-# /usr/lib/libc.so - that path is baked into every one of these
-# binaries' own PT_INTERP segment (--dynamic-linker /usr/lib/libc.so
-# above) as the dynamic linker to load. Kept deliberately small - see
-# $(BUILD)/_ghead's own comment above for why head/tr/cut aren't here
-# too (MAXFILE).
-ifeq ($(ARCH),64)
+# comment). libc.so has to live at exactly /usr/lib/libc.so - that
+# path is baked into every one of these binaries' own PT_INTERP
+# segment (--dynamic-linker /usr/lib/libc.so above) as the dynamic
+# linker to load. Kept deliberately small - see $(BUILD)/_ghead's own
+# comment above for why head/tr/cut aren't here too (MAXFILE).
 MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \
 	usr/bin/echo:$(BUILD)/_gecho usr/bin/basename:$(BUILD)/_basename \
@@ -1816,8 +1760,6 @@ MKFS_INSTALL_DEPS += $(BUILD)/_ls
 # built out.
 MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
 MKFS_INSTALL_DEPS += $(BUILD)/_bash
-
-endif
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

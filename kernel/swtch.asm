@@ -1,13 +1,12 @@
-; Context switch (64-bit build)
+; Context switch
 ;
 ;   void swtch(struct context **old, struct context *new);
 ;
 ; Save the current registers on the stack, creating a struct context,
 ; and save its address in *old. Switch stacks to new and pop
-; previously-saved registers. See kernel/swtch.asm (32-bit build) for
-; the full explanation - this is the same routine, just SysV AMD64
-; calling convention (old in rdi, new in rsi, instead of the stack) and
-; SysV's wider set of callee-saved registers (rbx, rbp, r12-r15).
+; previously-saved registers, using the SysV AMD64 calling convention
+; (old in rdi, new in rsi) and its callee-saved register set (rbx, rbp,
+; r12-r15).
 
 BITS 64
 

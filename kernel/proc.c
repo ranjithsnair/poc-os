@@ -155,16 +155,10 @@ userinit(void)
   p->sz = PGSIZE;
   memset(p->tf, 0, sizeof(*p->tf));
   p->tf->cs = (SEG_UCODE << 3) | DPL_USER;
-#ifdef X64
-  // No ds/es on the 64-bit build's trapframe (see the struct comment
-  // in x86.h) - segmentation is flat in long mode, so there's nothing
-  // for them to do; ss is still real hardware state, so it's still set.
+  // No ds/es on this trapframe (see the struct comment in x86.h) -
+  // segmentation is flat in long mode, so there's nothing for them to
+  // do; ss is still real hardware state, so it's still set.
   p->tf->ss = (SEG_UDATA << 3) | DPL_USER;
-#else
-  p->tf->ds = (SEG_UDATA << 3) | DPL_USER;
-  p->tf->es = p->tf->ds;
-  p->tf->ss = p->tf->ds;
-#endif
   p->tf->eflags = FL_IF;
   p->tf->esp = PGSIZE;
   p->tf->eip = 0;  // beginning of initcode.asm
@@ -563,11 +557,7 @@ procdump(void)
       state = "???";
     cprintf("%d %s %s", p->pid, state, p->name);
     if(p->state == SLEEPING){
-#ifdef X64
       getcallerpcs((uintp*)p->context->rbp+2, pc);
-#else
-      getcallerpcs((uintp*)p->context->ebp+2, pc);
-#endif
       for(i=0; i<10 && pc[i] != 0; i++)
         cprintf(" %p", pc[i]);
     }

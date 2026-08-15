@@ -1,6 +1,4 @@
-; Trap entry/return (64-bit build). See kernel/trapasm.asm (32-bit
-; build) for the overall structure - this is the same alltraps/trapret
-; pair, adapted for long mode:
+; Trap entry/return - the alltraps/trapret pair, for long mode:
 ;   - no pusha (doesn't exist in 64-bit mode), so registers are pushed
 ;     individually, in the order struct trapframe (x86.h) expects
 ;   - ds/es/fs/gs aren't saved/reloaded at all - segmentation is flat in

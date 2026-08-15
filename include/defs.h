@@ -24,9 +24,7 @@ void            panic(char*) __attribute__((noreturn));
 
 // exec.c
 int             exec(char*, char**);
-#ifdef X64
 int             execve(char*, char**, char**);
-#endif
 
 // file.c
 struct file*    filealloc(void);

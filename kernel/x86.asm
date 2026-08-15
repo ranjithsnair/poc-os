@@ -1,14 +1,13 @@
-; Routines to let C code use special x86 instructions (64-bit build).
-; See kernel/x86.asm (32-bit build) for the general design note - same
-; idea, but using the SysV AMD64 calling convention (arguments in
-; rdi, rsi, rdx, rcx, r8, r9, not the stack) instead of cdecl, and with
-; a couple of instructions - lgdt/lidt, rcr2/lcr3 - that genuinely
-; behave differently in 64-bit mode (a 10-byte pseudo-descriptor instead
-; of 6; a 64-bit CR2/CR3 instead of 32-bit), not just differently-sized.
+; Routines to let C code use special x86 instructions, using the SysV
+; AMD64 calling convention (arguments in rdi, rsi, rdx, rcx, r8, r9,
+; not the stack). A couple of instructions - lgdt/lidt, rcr2/lcr3 -
+; genuinely behave differently in 64-bit mode (a 10-byte pseudo-
+; descriptor instead of 6; a 64-bit CR2/CR3 instead of 32-bit), not
+; just differently-sized.
 ;
-; The same "$" - prefixed - label trick from x86.asm is used here for
-; the same reason: a handful of these names are themselves x86
-; instruction mnemonics that NASM's parser would otherwise swallow.
+; A "$" - prefixed - label is used for a handful of these names since
+; they're themselves x86 instruction mnemonics that NASM's parser
+; would otherwise swallow.
 
 BITS 64
 section .text

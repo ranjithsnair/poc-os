@@ -55,16 +55,14 @@ fetchstr(uintp addr, char **pp)
   return -1;
 }
 
-#ifdef X64
 // Fetch the nth system call argument. User code makes a system call
-// with INT T_SYSCALL, syscall number in %eax, and - since usys64.asm's
+// with INT T_SYSCALL, syscall number in %eax, and - since usys.asm's
 // stubs are ordinary C-callable functions - arguments already in
 // %rdi/%rsi/%rdx/%rcx/%r8/%r9 per the SysV AMD64 calling convention
-// (the same registers alltraps in trapasm64.asm saved into the
-// trapframe), rather than on the user stack the way the 32-bit build's
-// argint reads them. int (not %rcx) is safe to use here as arg 4
-// because this is an INT-based syscall, not the `syscall` instruction -
-// only the latter clobbers %rcx/%r11 on entry.
+// (the same registers alltraps in trapasm.asm saved into the
+// trapframe). int (not %rcx) is safe to use here as arg 4 because this
+// is an INT-based syscall, not the `syscall` instruction - only the
+// latter clobbers %rcx/%r11 on entry.
 int
 argint(int n, int *ip)
 {
@@ -83,14 +81,6 @@ argint(int n, int *ip)
   *ip = (int)v;
   return 0;
 }
-#else
-// Fetch the nth 32-bit system call argument.
-int
-argint(int n, int *ip)
-{
-  return fetchint((myproc()->tf->esp) + 4 + 4*n, ip);
-}
-#endif
 
 // Fetch the nth word-sized system call argument as a pointer
 // to a block of memory of size bytes.  Check that the pointer
@@ -125,7 +115,6 @@ argstr(int n, char **pp)
 extern int sys_chdir(void);
 extern int sys_close(void);
 extern int sys_dup(void);
-#ifdef X64
 extern int sys_execve(void);
 extern int sys_arch_prctl(void);
 extern int sys_mmap(void);
@@ -146,7 +135,6 @@ extern int sys_getdents(void);
 extern int sys_fchdir(void);
 extern int sys_ftruncate(void);
 extern int sys_rename(void);
-#endif
 extern int sys_exec(void);
 extern int sys_exit(void);
 extern int sys_fork(void);
@@ -188,7 +176,6 @@ static int (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
-#ifdef X64
 [SYS_execve]            sys_execve,
 [SYS_arch_prctl]        sys_arch_prctl,
 [SYS_mmap]              sys_mmap,
@@ -210,7 +197,6 @@ static int (*syscalls[])(void) = {
 [SYS_fchdir]            sys_fchdir,
 [SYS_ftruncate]         sys_ftruncate,
 [SYS_rename]            sys_rename,
-#endif
 };
 
 // Called from trap() for a T_SYSCALL trap. tf->eax holds the syscall

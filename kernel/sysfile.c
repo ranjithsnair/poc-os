@@ -100,7 +100,6 @@ sys_write(void)
   return filewrite(f, p, n);
 }
 
-#ifdef X64
 // (fd, iov, iovcnt): see include/syscall.h. struct iovec is
 // {void *iov_base; size_t iov_len;}, 16 bytes on the 64-bit build;
 // argptr isn't used here since iov_base/iov_len live inside a
@@ -303,7 +302,6 @@ sys_fcntl(void)
 {
   return 0;
 }
-#endif
 
 int
 sys_close(void)
@@ -926,7 +924,6 @@ sys_exec(void)
   return exec(path, argv);
 }
 
-#ifdef X64
 // Fetches a NUL-terminated, NULL-terminated-array-of-pointers argument
 // (argv or envp) the same way sys_exec()'s loop above does, into an
 // already zeroed uintp-per-slot array of the given capacity.
@@ -962,11 +959,17 @@ sys_execve(void)
   memset(envp, 0, sizeof(envp));
   if(fetchargv(uargv, argv, NELEM(argv)) < 0)
     return -1;
-  if(fetchargv(uenvp, envp, NELEM(envp)) < 0)
+  // A NULL envp is a real, valid execve() argument (execve() itself
+  // already treats it as "zero entries", not an error) - unlike argv,
+  // which every real caller always supplies a real (possibly empty)
+  // array for, so no such check exists above. Without this,
+  // fetchargv(0, ...) tries to fetch a user-memory word from address
+  // 0 and fails, silently turning a valid execve(path, argv, NULL)
+  // into an unconditional -1 before execve() itself ever runs.
+  if(uenvp && fetchargv(uenvp, envp, NELEM(envp)) < 0)
     return -1;
   return execve(path, argv, envp);
 }
-#endif
 
 int
 sys_pipe(void)

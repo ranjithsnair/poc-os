@@ -1,13 +1,13 @@
-; The poc kernel starts executing in this file (64-bit build). This file
-; is linked with the kernel C code, so it can refer to kernel symbols
-; such as main(). The boot block (boot/bootasm.asm and boot/bootmain.c) -
-; which never leaves 32-bit protected mode itself, see the Makefile's
+; The poc kernel starts executing in this file. This file is linked
+; with the kernel C code, so it can refer to kernel symbols such as
+; main(). The boot block (boot/bootasm.asm and boot/bootmain.c) - which
+; never leaves 32-bit protected mode itself, see the Makefile's
 ; BOOTCC - jumps to entry below.
 ;
-; Unlike entry.asm (32-bit build), this file's job is bigger than just
-; turning on paging: it has to take the CPU from 32-bit protected mode
-; all the way into 64-bit long mode before it can jump to main() at its
-; canonical high virtual address. In order:
+; This file's job is bigger than just turning on paging: it has to
+; take the CPU from 32-bit protected mode all the way into 64-bit long
+; mode before it can jump to main() at its canonical high virtual
+; address. In order:
 ;   1. build a boot-time PML4/PDPT/PD (4 levels, but using 2MB pages so
 ;      no PT level is needed yet) that both identity-maps low memory and
 ;      maps it again at KERNBASE - see the comment above entry, below,

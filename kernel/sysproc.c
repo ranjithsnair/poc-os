@@ -87,7 +87,6 @@ sys_sleep(void)
   return 0;
 }
 
-#ifdef X64
 // See include/syscall.h: poc-os has no per-thread ID distinct from
 // pid, so this just reports the caller's pid and otherwise ignores its
 // argument (a real Linux set_tid_address stores it for use by
@@ -288,7 +287,6 @@ sys_arch_prctl(void)
   myproc()->tls_base = (uintp)(uint)addr;
   return 0;
 }
-#endif
 
 // return how many clock tick interrupts have occurred
 // since start.
