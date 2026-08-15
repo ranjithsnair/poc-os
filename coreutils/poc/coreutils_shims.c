@@ -1115,6 +1115,24 @@ getgrgid(gid_t gid)
 	return NULL;
 }
 
+/* getpwent(): same "no user database" reasoning as getpwnam()/
+ * getpwuid() above - used by nano/src/files.c's real_dir_from_tilde()
+ * for ~user expansion. musl's own real getpwent.c (musl/src/passwd/
+ * getpwent.c) exists but isn't used here: it defines its own
+ * getpwnam()/getpwuid() too (a real /etc/passwd-backed implementation,
+ * conflicting with the stubs above) and needs internal helpers
+ * (__getpw_a/__getpwent_a) that assume a working /etc/passwd - more
+ * machinery than "there is no user database" needs. NULL/ENOENT (no
+ * more entries) is what a real getpwent() reports once the (here,
+ * always-empty) database is exhausted (errno left untouched, exactly
+ * like real getpwent() at true end-of-database), so this is a real,
+ * minimal caller-visible answer, not a stand-in. */
+struct passwd *
+getpwent(void)
+{
+	return NULL;
+}
+
 /* gethostname(): poc-os has no hostname concept at all (no uname(),
  * no configuration for one) - reporting a fixed name is more useful
  * to a caller than failing outright (ls itself never calls this

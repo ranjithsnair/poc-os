@@ -823,6 +823,16 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/signal/x86_64/sigsetjmp.o \
 	$(OBJDIR)/musl-pic/src/misc/syscall.o \
 	$(OBJDIR)/musl-pic/bash-shims/bash_shims.o \
+	$(OBJDIR)/musl-pic/src/signal/sigfillset.o \
+	$(OBJDIR)/musl-pic/src/misc/getopt_long.o \
+	$(OBJDIR)/musl-pic/src/string/strcasestr.o \
+	$(OBJDIR)/musl-pic/src/misc/dirname.o \
+	$(OBJDIR)/musl-pic/src/misc/realpath.o \
+	$(OBJDIR)/musl-pic/src/stdio/getc_unlocked.o \
+	$(OBJDIR)/musl-pic/src/temp/mkstemps.o \
+	$(OBJDIR)/musl-pic/src/multibyte/btowc.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_init.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_destroy.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -1478,6 +1488,105 @@ $(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
 # #include "jobs.h" in scope - a real, harmless upstream gap (GCC 16
 # defaults this to a hard error; older GCC/the native macOS build above
 # only ever warned, which is why nobody upstream noticed).
+# curses/: poc-os's own minimal curses (curses/curses.h's own comment -
+# not a vendored real ncurses, there's no upstream being tracked here),
+# built for the nano port. -fPIC like every other *-pic tree above, but
+# unlike musl-pic/coreutils-pic/bash-pic there's no libc.so involvement
+# at all - curses is nano-only, so its objects just link straight into
+# build/_nano's own PIE (once nano exists) the same way BASH_OBJS links
+# straight into _bash, rather than through -lc.
+CURSES_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall -MD
+CURSES_INC = -Icurses/include \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/curses-pic/%.o: curses/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CURSES_PIC_CFLAGS) $(CURSES_INC) -c -o $@ $<
+
+# nano/: real GNU nano 6.4 source (src/, lib/ - the latter is nano's own
+# vendored gnulib, pulled in the same unmodified-upstream way musl/
+# coreutils/bash are - see the "Stage 3" plan for why 6.4, not the
+# latest release: it avoids a whole bundled Unicode "c32" character-type
+# library newer nano versions carry, at the cost of a few years of
+# upstream history). nano/poc/ is poc-os's own small addition on top -
+# not part of nano's own gnulib, and not gnulib itself - handling real
+# poc-os/musl gaps, the same role coreutils/poc/ and bash/poc/ play for
+# their own ports (see coreutils/poc/config.h's own comment for how
+# nano/poc/config.h was produced from scratch: a real native ./configure
+# run's output, hand-corrected, not written from scratch).
+#
+# Every nano/gnulib object here is -fPIC (NANO_PIC_CFLAGS) and linked
+# into build/_nano as a real PIE executable importing libc from libc.so
+# via the ELF dynamic linker, exactly like bash/coreutils above - not
+# statically linked. curses/include is on the include path so nano's own
+# <config.h>-driven "#include <curses.h>" (definitions.h) picks up the
+# poc-os curses/ library (Stage 2) rather than a real ncurses, since
+# HAVE_NCURSES_H is never defined in nano/poc/config.h.
+NANO_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall \
+	-Wno-error=implicit-function-declaration -Wno-error=implicit-int -MD
+NANO_INC = -include nano/poc/nano_prelude.h -Inano/poc -Inano/lib -Inano/src -Icurses/include \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/nano-pic/%.o: nano/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(NANO_PIC_CFLAGS) $(NANO_INC) -c -o $@ $<
+
+$(OBJDIR)/nano-pic/poc/%.o: nano/poc/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(NANO_PIC_CFLAGS) $(NANO_INC) -c -o $@ $<
+
+# The real gnulib objects nano needs beyond libc.so/curses/, found the
+# same empirical way as COREUTILS_*_GNULIB_OBJS/BASH_LIB_OBJS above:
+# starting from "does nano/src/*.c compile and link" and adding
+# whichever gnulib source the linker complained was undefined - see the
+# "Stage 3" plan for how much smaller this ended up than the ~78-object
+# native-macOS-configure baseline once nano/poc/config.h's HAVE_* was
+# corrected for what musl actually provides directly (getopt_long,
+# strcasestr, dirname, realpath, getc_unlocked, mkstemps, sigfillset,
+# btowc, pthread_mutex_init/destroy - all added to MUSL_LDSO_OBJS above
+# instead, real musl code, not gnulib replacements). Just two real gaps
+# remained: nano/src/search.c's regex calls are compile-time redirected
+# to rpl_regcomp/rpl_regexec/etc (config.h's "#define regcomp
+# rpl_regcomp" family - the replacement really is required here, unlike
+# the functions above, since nano's own call sites are macro-rewritten
+# to the rpl_ names regardless of what musl provides), and regex.c's
+# own dynamic-array resizing (regmatch_list_resize) needs gnulib's
+# malloc/dynarray_resize.o.
+NANO_GNULIB_OBJS = \
+	$(OBJDIR)/nano-pic/lib/regex.o \
+	$(OBJDIR)/nano-pic/lib/malloc/dynarray_resize.o \
+
+NANO_SRC_OBJS = \
+	$(OBJDIR)/nano-pic/src/browser.o \
+	$(OBJDIR)/nano-pic/src/chars.o \
+	$(OBJDIR)/nano-pic/src/color.o \
+	$(OBJDIR)/nano-pic/src/cut.o \
+	$(OBJDIR)/nano-pic/src/files.o \
+	$(OBJDIR)/nano-pic/src/global.o \
+	$(OBJDIR)/nano-pic/src/help.o \
+	$(OBJDIR)/nano-pic/src/history.o \
+	$(OBJDIR)/nano-pic/src/move.o \
+	$(OBJDIR)/nano-pic/src/nano.o \
+	$(OBJDIR)/nano-pic/src/prompt.o \
+	$(OBJDIR)/nano-pic/src/rcfile.o \
+	$(OBJDIR)/nano-pic/src/search.o \
+	$(OBJDIR)/nano-pic/src/text.o \
+	$(OBJDIR)/nano-pic/src/utils.o \
+	$(OBJDIR)/nano-pic/src/winio.o \
+
+NANO_OBJS = $(NANO_SRC_OBJS) $(NANO_GNULIB_OBJS)
+
+$(BUILD)/_nano: $(OBJDIR)/musl-pic/crt/Scrt1.o $(NANO_OBJS) $(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(NANO_OBJS) $(OBJDIR)/curses-pic/curses.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/nano.dis
+	$(OBJCOPY) --strip-debug $@
+
 BASH_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -DSHELL -Os \
 	-DCONF_HOSTTYPE='"x86_64"' -DCONF_OSTYPE='"poc-os"' -DCONF_MACHTYPE='"x86_64-poc-os"' \
 	-DPACKAGE='"bash"' -DLOCALEDIR='"/usr/share/locale"' \
@@ -1686,6 +1795,42 @@ $(BUILD)/_dinit: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o $
 	$(OBJDUMP) -S $@ > $(BUILD)/dinit.dis
 	$(OBJCOPY) --strip-debug $@
 
+# rawtest: throwaway diagnostic for the raw-mode/ioctl kernel groundwork
+# (kernel/console.c, kernel/sysproc.c's sys_ioctl()) - see bash/poc/
+# rawtest.c's own comment. Same Scrt1.o+libc.so PIE recipe as _dinit
+# above, using the existing generic $(OBJDIR)/bash-pic/poc/%.o pattern
+# rule (no dedicated compile rule needed - rawtest.c is plain musl-
+# linked C, not bash source, but that rule's BASH_PIC_CFLAGS/BASH_INC
+# work fine for it unchanged).
+$(BUILD)/_rawtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/rawtest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
+# port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
+# include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
+# rule's BASH_INC, hence its own compile rule rather than reusing that
+# pattern outright (same reasoning as rawtest.o not needing one).
+# curses/curses.o itself is a $(CURSES_PIC_CFLAGS) object (see that
+# variable's own comment), linked straight into this PIE like
+# BASH_OBJS/COREUTILS_*_GNULIB_OBJS are into _bash/_true, not through
+# libc.so.
+$(OBJDIR)/bash-pic/poc/curses_test.o: bash/poc/curses_test.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) -Icurses/include $(BASH_INC) -c -o $@ $<
+
+$(BUILD)/_curses_test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
+		$(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
+		$(OBJDIR)/curses-pic/curses.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/curses_test.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -1695,7 +1840,7 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
-.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o $(OBJDIR)/bash-pic/%.o
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o $(OBJDIR)/bash-pic/%.o $(OBJDIR)/curses-pic/%.o $(OBJDIR)/nano-pic/%.o
 
 # UPROGS is mkfs/mkfs.c's usual root-placed/underscore-stripped
 # convention (a bare host path, e.g. build/_foo -> installed as /foo -
@@ -1761,10 +1906,28 @@ MKFS_INSTALL_DEPS += $(BUILD)/_ls
 MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
 MKFS_INSTALL_DEPS += $(BUILD)/_bash
 
+# rawtest: see $(BUILD)/_rawtest's own comment - a throwaway diagnostic
+# for the raw-mode/ioctl kernel groundwork the later curses/nano stages
+# depend on, kept installed since it's small and doubles as a
+# regression check for that groundwork going forward.
+MKFS_INSTALL += usr/bin/rawtest:$(BUILD)/_rawtest
+MKFS_INSTALL_DEPS += $(BUILD)/_rawtest
+
+# curses_test: see $(BUILD)/_curses_test's own comment - a throwaway
+# diagnostic for the curses layer, kept installed for the same
+# regression-check reasoning as rawtest.
+MKFS_INSTALL += usr/bin/curses_test:$(BUILD)/_curses_test
+MKFS_INSTALL_DEPS += $(BUILD)/_curses_test
+
+# nano: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
+# bash/coreutils above - see $(BUILD)/_nano's own comment.
+MKFS_INSTALL += usr/bin/nano:$(BUILD)/_nano
+MKFS_INSTALL_DEPS += $(BUILD)/_nano
+
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
--include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d
+-include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d $(OBJDIR)/curses-pic/*.d $(OBJDIR)/nano-pic/*.d $(OBJDIR)/nano-pic/poc/*.d $(OBJDIR)/nano-pic/src/*.d $(OBJDIR)/nano-pic/lib/*.d $(OBJDIR)/nano-pic/lib/malloc/*.d
 
 all: $(BUILD)/poc.img $(BUILD)/fs.img
 
