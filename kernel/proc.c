@@ -229,6 +229,14 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  // A forked child keeps the parent's TLS pointer (real fork() semantics -
+  // only exec() resets it, see kernel/exec.c) - not copying this left the
+  // child's %fs base as whatever allocproc() happened to leave in this
+  // proc slot (0, or a stale value from whichever process last used it),
+  // breaking every %fs-relative access musl's dynamic linker and libc
+  // internals make (thread-local errno, stdio locking, ...) in literally
+  // every forked child, regardless of what it went on to do next.
+  np->tls_base = curproc->tls_base;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;

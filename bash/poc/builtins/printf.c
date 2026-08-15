@@ -172,8 +172,9 @@ typedef double floatmax_t;
 #  define FLOATMAX_CONV	""
 #  define strtofltmax	strtod
 #endif
-static double getdouble PARAMS((void));
-static floatmax_t getfloatmax PARAMS((void));
+/* getdouble()/getfloatmax(): removed entirely, not just unreferenced -
+ * see their old definition site's own comment (near printf_erange()
+ * below). */
 
 static intmax_t asciicode PARAMS((void));
 
@@ -639,6 +640,22 @@ printf_builtin (list)
 		break;
 	      }
 
+	    /* poc-os: %e/%E/%f/%F/%g/%G/%a/%A (floating-point conversions)
+	       are intentionally unsupported, not merely unimplemented -
+	       this kernel never saves/restores FPU/SSE register state
+	       across a context switch (see the Makefile's own
+	       -mgeneral-regs-only comment), so a double/floatmax_t
+	       actually reaching the ABI here - a real function return in
+	       %xmm0, exactly what getdouble()/getfloatmax() used to do -
+	       isn't just a build error to work around (the way one poc-os
+	       source file relaxing the flag would trade it for): a
+	       context switch landing between the FPU write and the read
+	       back out would silently corrupt whatever unrelated
+	       process's live FP state was still sitting in the register
+	       file. Reusing printf(1)'s own existing "invalid format
+	       character" error path is the honest answer: these
+	       conversions are never safe to reach here, not narrowed to
+	       "not yet". */
 	    case 'e':
 	    case 'E':
 	    case 'f':
@@ -649,29 +666,6 @@ printf_builtin (list)
 	    case 'a':
 	    case 'A':
 #endif
-	      {
-		char *f;
-
-	      	if (use_Lmod || posixly_correct == 0)
-		  {
-		    floatmax_t p;
-
-		    p = getfloatmax ();
-		    f = mklong (start, "L", 1);
-		    PF (f, p);
-		  }
-		else		/* posixly_correct */
-		  {
-		    double p;
-
-		    p = getdouble ();
-		    f = mklong (start, "", 0);
-		    PF (f, p);
-		  }
-
-		break;
-	      }
-
 	    /* We don't output unrecognized format characters; we print an
 	       error message and return a failure exit status. */
 	    default:
@@ -1218,63 +1212,15 @@ getuintmax ()
   return (ret);
 }
 
-static double
-getdouble ()
-{
-  double ret;
-  char *ep;
-
-  if (garglist == 0)
-    return (0);
-
-  if (garglist->word->word[0] == '\'' || garglist->word->word[0] == '"')
-    return asciicode ();
-
-  errno = 0;
-  ret = strtod (garglist->word->word, &ep);
-
-  if (*ep)
-    {
-      sh_invalidnum (garglist->word->word);
-      conversion_error = 1;
-    }
-  else if (errno == ERANGE)
-    printf_erange (garglist->word->word);
-
-  garglist = garglist->next;
-  return (ret);
-}
-
-static floatmax_t
-getfloatmax ()
-{
-  floatmax_t ret;
-  char *ep;
-
-  if (garglist == 0)
-    return (0);
-
-  if (garglist->word->word[0] == '\'' || garglist->word->word[0] == '"')
-    return asciicode ();
-
-  errno = 0;
-  ret = strtofltmax (garglist->word->word, &ep);
-
-  if (*ep)
-    {
-      sh_invalidnum (garglist->word->word);
-#if 0
-      /* Same thing about POSIX.2 conversion error requirements. */
-      ret = 0;
-#endif
-      conversion_error = 1;
-    }
-  else if (errno == ERANGE)
-    printf_erange (garglist->word->word);
-
-  garglist = garglist->next;
-  return (ret);
-}
+/* getdouble()/getfloatmax() (strtod()/strtofltmax() into a double/
+ * floatmax_t argument for the printf builtin's %e/%f/%g/%a
+ * conversions) are gone entirely, not just unreferenced - see the
+ * case 'e'/'f'/'g'/'a' block above's own comment: a double/floatmax_t
+ * *function return* is exactly the ABI-level FPU/SSE register use
+ * -mgeneral-regs-only exists to rule out everywhere on this kernel,
+ * so these can't just become dead code, they have to not compile at
+ * all.
+ */
 
 /* NO check is needed for garglist here. */
 static intmax_t

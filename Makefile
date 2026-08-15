@@ -824,6 +824,51 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/unistd/dup.o \
 	$(OBJDIR)/musl-pic/src/termios/tcgetattr.o \
 	$(OBJDIR)/musl-pic/src/termios/tcsetattr.o \
+	$(OBJDIR)/musl-pic/src/stdlib/atoi.o \
+	$(OBJDIR)/musl-pic/src/stdlib/imaxdiv.o \
+	$(OBJDIR)/musl-pic/src/ctype/isxdigit.o \
+	$(OBJDIR)/musl-pic/src/ctype/ispunct.o \
+	$(OBJDIR)/musl-pic/src/ctype/isalnum.o \
+	$(OBJDIR)/musl-pic/src/ctype/wcswidth.o \
+	$(OBJDIR)/musl-pic/src/ctype/wcwidth.o \
+	$(OBJDIR)/musl-pic/src/locale/localeconv.o \
+	$(OBJDIR)/musl-pic/src/locale/wcscoll.o \
+	$(OBJDIR)/musl-pic/src/regex/regexec.o \
+	$(OBJDIR)/musl-pic/src/regex/regcomp.o \
+	$(OBJDIR)/musl-pic/src/regex/tre-mem.o \
+	$(OBJDIR)/musl-pic/src/stdio/vasprintf.o \
+	$(OBJDIR)/musl-pic/src/string/stpncpy.o \
+	$(OBJDIR)/musl-pic/src/time/gettimeofday.o \
+	$(OBJDIR)/musl-pic/src/time/localtime.o \
+	$(OBJDIR)/musl-pic/src/stdio/setvbuf.o \
+	$(OBJDIR)/musl-pic/src/stdio/asprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/__fdopen.o \
+	$(OBJDIR)/musl-pic/src/string/wcscmp.o \
+	$(OBJDIR)/musl-pic/src/string/wcscpy.o \
+	$(OBJDIR)/musl-pic/src/string/strcasecmp.o \
+	$(OBJDIR)/musl-pic/src/string/strncasecmp.o \
+	$(OBJDIR)/musl-pic/src/string/strcat.o \
+	$(OBJDIR)/musl-pic/src/string/strpbrk.o \
+	$(OBJDIR)/musl-pic/src/string/wmemchr.o \
+	$(OBJDIR)/musl-pic/src/string/wcsncmp.o \
+	$(OBJDIR)/musl-pic/src/string/strncpy.o \
+	$(OBJDIR)/musl-pic/src/string/bcopy.o \
+	$(OBJDIR)/musl-pic/src/string/strsignal.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wcsrtombs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wctob.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mblen.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbsrtowcs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbstowcs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbrlen.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbsnrtowcs.o \
+	$(OBJDIR)/musl-pic/src/conf/confstr.o \
+	$(OBJDIR)/musl-pic/src/signal/siginterrupt.o \
+	$(OBJDIR)/musl-pic/src/signal/sigdelset.o \
+	$(OBJDIR)/musl-pic/src/temp/mktemp.o \
+	$(OBJDIR)/musl-pic/src/temp/mkstemp.o \
+	$(OBJDIR)/musl-pic/src/temp/mkostemps.o \
+	$(OBJDIR)/musl-pic/src/temp/mkdtemp.o \
+	$(OBJDIR)/musl-pic/src/signal/x86_64/sigsetjmp.o \
 	$(OBJDIR)/musl-pic/bash-shims/bash_shims.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
@@ -1481,9 +1526,10 @@ $(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
 # only ever warned, which is why nobody upstream noticed).
 BASH_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -DSHELL -Os \
 	-DCONF_HOSTTYPE='"x86_64"' -DCONF_OSTYPE='"poc-os"' -DCONF_MACHTYPE='"x86_64-poc-os"' \
+	-DPACKAGE='"bash"' -DLOCALEDIR='"/usr/share/locale"' \
 	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
 	-fno-omit-frame-pointer -g -Wall -Wno-parentheses -Wno-format-security \
-	-Wno-error=implicit-function-declaration -Wno-error=implicit-int
+	-Wno-error=implicit-function-declaration -Wno-error=implicit-int -MD
 BASH_INC = -include bash/poc/bash_prelude.h \
 	-Ibash/poc -Ibash/poc/builtins -Ibash -Ibash/include -Ibash/builtins -Ibash/lib -Ibash/lib/sh -Ibash/lib/glob -Ibash/lib/tilde \
 	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
@@ -1542,8 +1588,6 @@ BASH_CORE_OBJS = \
 	$(OBJDIR)/bash-pic/locale.o \
 	$(OBJDIR)/bash-pic/findcmd.o \
 	$(OBJDIR)/bash-pic/redir.o \
-	$(OBJDIR)/bash-pic/pcomplete.o \
-	$(OBJDIR)/bash-pic/pcomplib.o \
 	$(OBJDIR)/bash-pic/xmalloc.o \
 	$(OBJDIR)/bash-pic/poc/syntax.o \
 	$(OBJDIR)/bash-pic/poc/builtins.o \
@@ -1598,7 +1642,6 @@ BASH_BUILTINS_OBJS = \
 	$(OBJDIR)/bash-pic/poc/builtins/ulimit.o \
 	$(OBJDIR)/bash-pic/poc/builtins/umask.o \
 	$(OBJDIR)/bash-pic/poc/builtins/wait.o \
-	$(OBJDIR)/bash-pic/poc/builtins/complete.o \
 
 # lib/sh, lib/glob, lib/tilde: bash's own portability/pattern-matching/
 # ~-expansion support libraries (the real gnulib-equivalent bash ships
@@ -1618,8 +1661,6 @@ BASH_LIB_OBJS = \
 	$(OBJDIR)/bash-pic/lib/sh/shtty.o \
 	$(OBJDIR)/bash-pic/lib/sh/shmatch.o \
 	$(OBJDIR)/bash-pic/lib/sh/eaccess.o \
-	$(OBJDIR)/bash-pic/lib/sh/netconn.o \
-	$(OBJDIR)/bash-pic/lib/sh/netopen.o \
 	$(OBJDIR)/bash-pic/lib/sh/timeval.o \
 	$(OBJDIR)/bash-pic/lib/sh/makepath.o \
 	$(OBJDIR)/bash-pic/lib/sh/pathcanon.o \
@@ -1675,6 +1716,22 @@ $(BUILD)/_bash: $(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) $(BUILD)/libc.so | $
 	$(OBJDUMP) -S $@ > $(BUILD)/bash.dis
 	$(OBJCOPY) --strip-debug $@
 
+# dinit: PID 1, replacing the static ULIB user/init.c - same
+# Scrt1.o+libc.so PIE recipe as bash/coreutils above, not the static
+# xv6-native path. Logic mirrors user/init.c exactly (console setup,
+# fork+exec+reap loop), just built as a real dynamic binary and
+# starting bash -i instead of sh - see bash/poc/dinit.c's own comments.
+$(OBJDIR)/bash-pic/poc/dinit.o: bash/poc/dinit.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Imusl/src/include -Imusl/src/internal -c -o $@ $<
+
+$(BUILD)/_dinit: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/dinit.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -1698,14 +1755,20 @@ UPROGS=\
 
 # init/sh: not "commands" in the usual sense - init is PID 1 (the
 # kernel loads initcode.asm/initcode64.asm, which SYS_execs this exact
-# path - see those files' own "init:" string) and sh is what init execs
-# in turn (see user/init.c) - but installed under /usr/bin like
-# everything else rather than carved out as a root-level exception.
-# Unlike the coreutils additions below, these apply to every ARCH: the
-# 32-bit build still needs an init/sh, even with no musl/coreutils in
-# it at all.
+# path - see those files' own "init:" string) - but installed under
+# /usr/bin like everything else rather than carved out as a root-level
+# exception. sh (the static xv6-native ULIB shell) is kept only for
+# ARCH=32, which has no musl/coreutils/bash in it at all to give init
+# anything else to start; ARCH=64's PID 1 is bash/poc/dinit.c (dynamic,
+# Scrt1.o+libc.so, like bash/coreutils - see its own comment), starting
+# bash directly rather than sh.
+ifeq ($(ARCH),64)
+MKFS_INSTALL = usr/bin/init:$(BUILD)/_dinit
+MKFS_INSTALL_DEPS = $(BUILD)/_dinit
+else
 MKFS_INSTALL = usr/bin/init:$(BUILD)/_init usr/bin/sh:$(BUILD)/_sh
 MKFS_INSTALL_DEPS = $(BUILD)/_init $(BUILD)/_sh
+endif
 
 # GNU coreutils ports (true/false/cat/echo/basename/dirname/yes,
 # runmusl - a manual musl-crt1-style launcher, see musl-test/%.o's own
@@ -1759,7 +1822,7 @@ endif
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
--include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d
+-include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d
 
 all: $(BUILD)/poc.img $(BUILD)/fs.img
 

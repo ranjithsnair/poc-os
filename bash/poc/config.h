@@ -423,11 +423,15 @@
 
 /* Characteristics of some of the system structures. */
 
+/* musl's struct dirent (per-arch bits/dirent.h) has real d_ino, but
+ * neither d_fileno (a BSD/Darwin alias for the same field the native
+ * macOS run detected) nor d_namlen (a BSD-only field; poc-os/musl
+ * callers get the name length via strlen(d_name) instead). */
 #define HAVE_STRUCT_DIRENT_D_INO 1
 
-#define HAVE_STRUCT_DIRENT_D_FILENO 1
+/* #undef HAVE_STRUCT_DIRENT_D_FILENO */
 
-#define HAVE_STRUCT_DIRENT_D_NAMLEN 1
+/* #undef HAVE_STRUCT_DIRENT_D_NAMLEN */
 
 #define TIOCSTAT_IN_SYS_IOCTL 1
 
@@ -570,7 +574,9 @@
 /* Presence of system and C library functions. */
 
 /* Define if you have the arc4random function.  */
-#define HAVE_ARC4RANDOM 1
+/* #undef HAVE_ARC4RANDOM */  /* poc-os/musl has no arc4random - falls
+   back to HAVE_GETRANDOM (coreutils_shims.c's real, honest ENOSYS)
+   instead, see bash/lib/sh/random.c */
 
 /* Define if you have the asprintf function.  */
 #define HAVE_ASPRINTF 1
@@ -588,13 +594,13 @@
 #define HAVE_CONFSTR 1
 
 /* Define if you have the dlclose function.  */
-#define HAVE_DLCLOSE 1
+/* #undef HAVE_DLCLOSE */  /* poc-os has no dlopen (no loadable-builtins support) */
 
 /* Define if you have the dlopen function.  */
 /* #undef HAVE_DLOPEN */  /* poc-os has no dlopen (no loadable-builtins support) */
 
 /* Define if you have the dlsym function.  */
-#define HAVE_DLSYM 1
+/* #undef HAVE_DLSYM */  /* poc-os has no dlopen (no loadable-builtins support) */
 
 /* Define if you don't have vprintf but do have _doprnt.  */
 /* #undef HAVE_DOPRNT */
@@ -650,7 +656,12 @@
 #define HAVE_GETPAGESIZE 1
 
 /* Define if you have the getpeername function.  */
-#define HAVE_GETPEERNAME 1
+/* #undef HAVE_GETPEERNAME */  /* poc-os has no socket syscalls at all -
+   undefining this (rather than HAVE_SYS_SOCKET_H/HAVE_NETINET_IN_H,
+   whose headers musl does ship) is what actually turns off
+   config-bot.h's HAVE_NETWORK auto-derivation, so redir.c's /dev/tcp
+   support cleanly falls back to its own "not supported without
+   networking" warning instead of calling into lib/sh/netopen.c. */
 
 /* Define if you have the getpwent function. */
 #define HAVE_GETPWENT 1
@@ -662,7 +673,14 @@
 #define HAVE_GETPWUID 1
 
 /* Define if you have the getrandom function.  */
-/* #undef HAVE_GETRANDOM */
+/* poc-os/musl's <sys/random.h> always declares a real (non-static)
+ * getrandom() - coreutils/poc/coreutils_shims.c already provides it
+ * (a real, honest ENOSYS: no hardware RNG/entropy source is wired up -
+ * see that file's own comment), part of libc.so already. Leaving this
+ * undefined would make bash/lib/sh/random.c try to add its *own*
+ * static fallback of the same name, which conflicts with musl's
+ * already-declared non-static prototype. */
+#define HAVE_GETRANDOM 1
 
 /* Define if you have the getrlimit function.  */
 #define HAVE_GETRLIMIT 1
@@ -953,7 +971,9 @@
 #define HAVE_WCSCOLL 1
 
 /* Define if you have the wcsdup function.  */
-#define HAVE_WCSDUP 1
+/* #undef HAVE_WCSDUP */  /* poc-os/musl has no wcsdup under our
+   _XOPEN_SOURCE=700 exposure - bash/lib/sh/wcsdup.c's own real
+   fallback implementation covers it instead. */
 
 /* Define if you have the wctype function.  */
 #define HAVE_WCTYPE 1
