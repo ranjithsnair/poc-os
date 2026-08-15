@@ -204,10 +204,17 @@ $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/kernel | $(BUILD)
+# poc.img layout: sector 0 = bootblock (stage 1, signed - see below),
+# sectors 1..256 = boot2 (stage 2, zero-padded to exactly that many
+# sectors - see boot/bootmain.c's own STAGE2_SECTORS and boot/
+# boot2main.c's matching KERNEL_LBA), sector 257 onward = the kernel
+# ELF image itself, exactly where it always was relative to stage 1
+# before stage 2 existed, just shifted by stage 2's own footprint.
+$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/boot2 $(BUILD)/kernel | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/poc.img count=10000
 	dd if=$(BUILD)/bootblock of=$(BUILD)/poc.img conv=notrunc
-	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=1 conv=notrunc
+	dd if=$(BUILD)/boot2 of=$(BUILD)/poc.img seek=1 conv=notrunc
+	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=257 conv=notrunc
 
 $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/pocmemfs.img count=10000
@@ -228,6 +235,143 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock.o > $(BUILD)/bootblock.dis
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
+
+# boot2main.c (stage 2): unlike bootmain.c (stage 1), no 510-byte
+# budget - the generic $(OBJDIR)/boot/%.o pattern's normal -O2 is fine
+# - but still freestanding (-nostdinc, -fno-pic) like every boot/ file.
+$(OBJDIR)/boot/boot2main.o: boot/boot2main.c | $(OBJDIR)/boot
+	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -nostdinc -c -o $@ $<
+
+# BOOT2_MAX_SECTORS must match boot/bootmain.c's own STAGE2_SECTORS -
+# how many sectors stage 1 reads stage 2 into before jumping to it.
+# Linked to run at 0x10000 (boot/bootmain.c's STAGE2_ADDR) with -N (no
+# separate page-aligned segments - same reason bootblock itself uses
+# it: this raw-binary-extracted image can only have one contiguous
+# blob, not a gap-separated set of segments) and -e entry2 - boot/
+# boot2asm.o's own tiny stub, linked *first* (see that file's own
+# comment for why -e alone, or source-order alone, isn't enough once
+# this gets flattened to a raw binary and jumped to by hardcoded
+# address).
+BOOT2_MAX_SECTORS = 256
+$(BUILD)/boot2: $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x10000 -o $(OBJDIR)/boot/boot2.o $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/boot2.o > $(BUILD)/boot2.dis
+	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2.o $(BUILD)/boot2
+	size=$$(stat -f%z $(BUILD)/boot2 2>/dev/null || stat -c%s $(BUILD)/boot2); \
+	max=$$(( $(BOOT2_MAX_SECTORS) * 512 )); \
+	if [ "$$size" -gt "$$max" ]; then \
+		echo "boot2 too large: $$size bytes (max $$max, $(BOOT2_MAX_SECTORS) sectors)" >&2; \
+		exit 1; \
+	fi
+
+# ============================================================
+# BIOS/INT13h boot path: real hardware (legacy IDE, or SATA in
+# AHCI mode via a real BIOS/CSM AHCI driver, or booted from USB),
+# VirtualBox, and QEMU all boot through BIOS/CSM firmware's own
+# INT13h disk services - unlike the ATA-PIO path above (poc.img,
+# fs.img as a *separate* drive), which only works when the disk is
+# attached as an emulated/real legacy IDE hard disk. See boot/
+# bootasm_bios.asm's and boot/boot2_bios.asm's own comments for the
+# full reasoning. Everything here - bootloader, kernel, and the
+# whole root filesystem image - lives on one combined disk image
+# (poc_bios.img), since a real USB stick or a real internal disk is
+# one physical device, not two.
+# ============================================================
+
+# kernel.bin: a raw, already-relocated flattening of the kernel ELF
+# (same idea as bootblock/boot2/entryother/initcode - objcopy -O
+# binary elsewhere in this Makefile - just applied to the kernel
+# itself here) so boot/boot2_bios.asm never needs to parse an ELF
+# header/program headers in real-mode assembly: the segments are
+# already contiguous (kernel64.ld places .text at EXTMEM with
+# .rodata/.data/.bss immediately following), so "load N bytes
+# starting at physical EXTMEM" is the entire job.
+# -O binary only ever contains *file-backed* content (PT_LOAD's
+# p_filesz, not p_memsz) - it silently drops .bss (p_memsz > p_filesz:
+# kernel/entry64.asm's own boot-time page tables, among other kernel
+# globals, live there, reserved but zero-initialized rather than
+# taking up file space) entirely. boot/boot2_bios.asm has no ELF
+# parser to notice this and zero the gap itself the way boot/
+# boot2main.c's real per-segment stosb() loop does (see its own
+# comment for why this port isn't writing one in real-mode assembly) -
+# so it has to already be zeroed *in the file*, by padding kernel.bin
+# out to the highest PT_LOAD segment's real (PhysAddr+MemSiz) extent,
+# here, once, at build time.
+$(BUILD)/kernel.bin: $(BUILD)/kernel | $(BUILD)
+	$(OBJCOPY) -S -O binary $(BUILD)/kernel $(BUILD)/kernel.bin
+	total=$$($(TOOLPREFIX)readelf -W -l $(BUILD)/kernel | python3 -c '\
+import sys; lines=[l.split() for l in sys.stdin if l.strip().startswith("LOAD")]; \
+paddrs=[int(f[3],16) for f in lines]; ends=[int(f[3],16)+int(f[5],16) for f in lines]; \
+print(max(ends)-min(paddrs))'); \
+	truncate -s $$total $(BUILD)/kernel.bin 2>/dev/null || dd if=/dev/zero bs=1 count=0 seek=$$total of=$(BUILD)/kernel.bin conv=notrunc 2>/dev/null
+
+# bootconfig_bios.h: KERNEL_SECTORS/FS_IMG_LBA/KERNEL_ENTRY are real
+# properties of a specific build (the kernel's actual size and entry
+# point), not constants boot2_bios.asm should hardcode by hand -
+# generated here the same way MUSL_GENH's headers are, and %included
+# by boot2_bios.asm via the usual cpp-then-nasm pipeline (see its own
+# build rule below for the extra -I this needs).
+# BOOT2_BIOS_MAX_SECTORS/BOOT2_BIOS_LBA must match boot/bootasm_bios.asm's
+# own STAGE2_SECTORS - how many sectors stage 1 reads stage 2 into
+# (starting at LBA 1) before jumping to it. Far smaller than the ATA-
+# PIO path's BOOT2_MAX_SECTORS: this stage 2 is hand-written assembly
+# with no ELF-parsing logic at all (see boot/boot2_bios.asm's own
+# comment for why), so it doesn't need nearly as much room.
+BOOT2_BIOS_MAX_SECTORS = 16
+BOOT2_BIOS_LBA = $(shell echo $$((1 + $(BOOT2_BIOS_MAX_SECTORS))))
+
+$(OBJDIR)/boot/bootconfig_bios.h: $(BUILD)/kernel.bin $(BUILD)/kernel | $(OBJDIR)/boot
+	kbytes=$$(stat -f%z $(BUILD)/kernel.bin 2>/dev/null || stat -c%s $(BUILD)/kernel.bin); \
+	ksectors=$$(( (kbytes + 511) / 512 )); \
+	kentry=$$($(OBJDUMP) -f $(BUILD)/kernel | sed -n 's/^start address //p'); \
+	{ \
+		echo "#define KERNEL_LBA $(BOOT2_BIOS_LBA)"; \
+		echo "#define KERNEL_SECTORS $$ksectors"; \
+		echo "#define FS_IMG_LBA (KERNEL_LBA + KERNEL_SECTORS)"; \
+		echo "#define KERNEL_ENTRY $$kentry"; \
+	} > $(OBJDIR)/boot/bootconfig_bios.h
+
+$(BUILD)/bootblock_bios: $(OBJDIR)/boot/bootasm_bios.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock_bios.o $(OBJDIR)/boot/bootasm_bios.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock_bios.o > $(BUILD)/bootblock_bios.dis
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock_bios.o $(BUILD)/bootblock_bios
+	./boot/sign.pl $(BUILD)/bootblock_bios
+
+# boot2_bios.asm needs bootconfig_bios.h visible on its own include
+# path - the one file in boot/ that does, hence its own rule rather
+# than the generic $(OBJDIR)/boot/%.o: boot/%.asm pattern.
+$(OBJDIR)/boot/boot2_bios.o: boot/boot2_bios.asm $(OBJDIR)/boot/bootconfig_bios.h | $(OBJDIR)/boot
+	$(CC) $(CPPFLAGS) -I$(OBJDIR)/boot -E -x assembler-with-cpp -o $(OBJDIR)/boot/boot2_bios.i boot/boot2_bios.asm
+	$(NASM) $(BOOTNASMFLAGS) -o $@ $(OBJDIR)/boot/boot2_bios.i
+
+# -Ttext 0x1000, not 0x10000 like the ATA-PIO path's boot2 - see boot/
+# bootasm_bios.asm's own comment on STAGE2_ADDR for why (16-bit ELF
+# relocations can't represent an address >= 0x10000).
+$(BUILD)/boot2_bios: $(OBJDIR)/boot/boot2_bios.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x1000 -o $(OBJDIR)/boot/boot2_bios_full.o $(OBJDIR)/boot/boot2_bios.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/boot2_bios_full.o > $(BUILD)/boot2_bios.dis
+	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2_bios_full.o $(BUILD)/boot2_bios
+	size=$$(stat -f%z $(BUILD)/boot2_bios 2>/dev/null || stat -c%s $(BUILD)/boot2_bios); \
+	max=$$(( $(BOOT2_BIOS_MAX_SECTORS) * 512 )); \
+	if [ "$$size" -gt "$$max" ]; then \
+		echo "boot2_bios too large: $$size bytes (max $$max, $(BOOT2_BIOS_MAX_SECTORS) sectors)" >&2; \
+		exit 1; \
+	fi
+
+# poc_bios.img layout: sector 0 = bootblock_bios (stage 1), sectors
+# 1..BOOT2_BIOS_MAX_SECTORS = boot2_bios (stage 2), sector KERNEL_LBA
+# (BOOT2_BIOS_LBA, bootconfig_bios.h) onward = kernel.bin, then
+# immediately following (FS_IMG_LBA = KERNEL_LBA + KERNEL_SECTORS) =
+# fs.img - one combined disk image, unlike poc.img+fs.img's two
+# separate drives, since real boot media (a USB stick, an internal
+# disk) is one physical device.
+$(BUILD)/poc_bios.img: $(BUILD)/bootblock_bios $(BUILD)/boot2_bios $(BUILD)/kernel.bin $(BUILD)/fs.img $(OBJDIR)/boot/bootconfig_bios.h | $(BUILD)
+	dd if=/dev/zero of=$(BUILD)/poc_bios.img count=15000
+	dd if=$(BUILD)/bootblock_bios of=$(BUILD)/poc_bios.img conv=notrunc
+	dd if=$(BUILD)/boot2_bios of=$(BUILD)/poc_bios.img seek=1 conv=notrunc
+	dd if=$(BUILD)/kernel.bin of=$(BUILD)/poc_bios.img seek=$(BOOT2_BIOS_LBA) conv=notrunc
+	fsimglba=$$(sed -n 's/^#define KERNEL_SECTORS //p' $(OBJDIR)/boot/bootconfig_bios.h | awk '{print $$1+$(BOOT2_BIOS_LBA)}'); \
+	dd if=$(BUILD)/fs.img of=$(BUILD)/poc_bios.img seek=$$fsimglba conv=notrunc
 
 # entryother and initcode are raw binary blobs the kernel embeds with
 # -b binary (see kernel/main.c's and kernel/proc.c's matching

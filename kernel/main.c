@@ -38,7 +38,14 @@ main(void)
   fileinit();      // file table
   ideinit();       // disk
   startothers();   // start other processors
-  kinit2(P2V(4*1024*1024), P2V(PHYSTOP)); // must come after startothers()
+  // Starts right past the ramdisk (RAMDISK_PADDR..RAMDISK_PADDR+
+  // RAMDISK_SIZE, memlayout.h - kernel/ide.c's whole backing store),
+  // not at a flat 4MB like the original xv6 kinit2 call this replaces:
+  // that pre-loaded fs.img image has to stay put for the ramdisk's
+  // entire lifetime, so its pages can never be handed out as ordinary
+  // free memory the way anything at a bare 4MB boundary otherwise
+  // would be.
+  kinit2(P2V(RAMDISK_PADDR + RAMDISK_SIZE), P2V(PHYSTOP)); // must come after startothers()
   userinit();      // first user process
   mpmain();        // finish this processor's setup
 }

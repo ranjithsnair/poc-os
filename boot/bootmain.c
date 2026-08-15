@@ -1,75 +1,58 @@
-// Boot loader.
+// Boot loader, stage 1.
 //
-// Part of the boot block, along with bootasm.asm, which calls bootmain().
-// bootasm.asm has put the processor into protected 32-bit mode.
-// bootmain() loads an ELF kernel image from the disk starting at
-// sector 1 and then jumps to the kernel entry routine.
+// Part of the boot block, along with bootasm.asm, which calls
+// bootmain(). bootasm.asm has put the processor into protected 32-bit
+// mode. This file's only job is to load stage 2 (boot/boot2main.c,
+// which does the real work: loading the kernel and the whole root
+// filesystem image - see its own comment) from disk into RAM and jump
+// to it.
+//
+// Kept this small deliberately, not just incidentally: this file,
+// linked together with bootasm.asm, has to fit in the 510-byte boot
+// sector (see boot/sign.pl) - there's no room here for the ELF-parsing
+// and multi-drive logic stage 2 needs, which is exactly why stage 2
+// exists as a separate, unconstrained-size stage instead of all of
+// this just living in one file the way the original xv6 bootloader
+// this is descended from did.
 
 #include "types.h"
-#include "elf.h"
-#include "memlayout.h"
 #include "bootx86.h"
 
-#define SECTSIZE  512
+#define SECTSIZE       512
+#define STAGE2_ADDR    0x10000
+// STAGE2_SECTORS: how many sectors after this boot sector hold stage
+// 2 - see the Makefine's own BOOT2_MAX_SECTORS check, which fails the
+// build if boot2main.c's actual compiled size ever exceeds this.
+#define STAGE2_SECTORS 256
 
-void readseg(uchar*, uint, uint);
+static void waitdisk(void);
+static void readsect(void *dst, uint offset);
 
 void
 bootmain(void)
 {
-  struct elfhdr *elf;
-  struct proghdr *ph, *eph;
-  void (*entry)(void);
-  uchar* pa;
+  uchar *dst;
+  uint i;
 
-  elf = (struct elfhdr*)0x10000;  // scratch space
+  dst = (uchar*)STAGE2_ADDR;
+  for(i = 0; i < STAGE2_SECTORS; i++)
+    readsect(dst + i*SECTSIZE, 1 + i);
 
-  // Read 1st page off disk
-  readseg((uchar*)elf, 4096, 0);
-
-  // Is this an ELF executable?
-  if(elf->magic != ELF_MAGIC)
-    return;  // let bootasm.asm handle error
-
-  // Load each program segment (ignores ph flags).
-  // ph->paddr, not ph->vaddr: the boot loader runs with paging off, so
-  // it can only write to physical addresses, and the kernel's linker
-  // script (kernel/kernel.ld / kernel/kernel64.ld) arranges for paddr to
-  // be exactly the low physical load address the kernel's entry code
-  // (kernel/entry.asm / kernel/entry64.asm) expects to find itself at
-  // before it enables paging - and, on the 64-bit build, before it's
-  // even reached long mode, so that address is always a plain 32-bit
-  // physical address (< 4GB) despite proghdr's fields being 64-bit wide
-  // there; the (uint) casts below make that truncation explicit rather
-  // than relying on an implicit one.
-  ph = (struct proghdr*)((uchar*)elf + (uint)elf->phoff);
-  eph = ph + elf->phnum;
-  for(; ph < eph; ph++){
-    pa = (uchar*)(uint)ph->paddr;
-    readseg(pa, (uint)ph->filesz, (uint)ph->off);
-    if(ph->memsz > ph->filesz)
-      stosb(pa + (uint)ph->filesz, 0, (uint)(ph->memsz - ph->filesz));
-  }
-
-  // Call the entry point from the ELF header.
-  // Does not return!
-  entry = (void(*)(void))(uint)elf->entry;
-  entry();
+  ((void(*)(void))STAGE2_ADDR)();
 }
 
-void
+static void
 waitdisk(void)
 {
-  // Wait for disk ready.
   while((inb(0x1F7) & 0xC0) != 0x40)
     ;
 }
 
-// Read a single sector at offset into dst.
-void
+// Read a single sector at offset (LBA) from drive 0 (the boot drive -
+// stage 2 and the kernel both live on it) into dst.
+static void
 readsect(void *dst, uint offset)
 {
-  // Issue command.
   waitdisk();
   outb(0x1F2, 1);   // count = 1
   outb(0x1F3, offset);
@@ -78,29 +61,6 @@ readsect(void *dst, uint offset)
   outb(0x1F6, (offset >> 24) | 0xE0);
   outb(0x1F7, 0x20);  // cmd 0x20 - read sectors
 
-  // Read data.
   waitdisk();
   insl(0x1F0, dst, SECTSIZE/4);
-}
-
-// Read 'count' bytes at 'offset' from kernel into physical address 'pa'.
-// Might copy more than asked.
-void
-readseg(uchar* pa, uint count, uint offset)
-{
-  uchar* epa;
-
-  epa = pa + count;
-
-  // Round down to sector boundary.
-  pa -= offset % SECTSIZE;
-
-  // Translate from bytes to sectors; kernel starts at sector 1.
-  offset = (offset / SECTSIZE) + 1;
-
-  // If this is too slow, we could read lots of sectors at a time.
-  // We'd write more to memory than asked, but it doesn't matter --
-  // we load in increasing order.
-  for(; pa < epa; pa += SECTSIZE, offset++)
-    readsect(pa, offset);
 }
