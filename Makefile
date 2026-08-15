@@ -590,6 +590,15 @@ $(OBJDIR)/musl-pic/coreutils-shims/coreutils_shims.o: coreutils/poc/coreutils_sh
 	@mkdir -p $(dir $@)
 	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
 
+# bash_shims.c (see its own comment): the same idea as coreutils_shims.c
+# just above (real libc-shaped gaps - dup2(), uname(), getrlimit()/
+# setrlimit(), times() - poc-os has no syscall for at all), also part of
+# libc.so rather than linked per-executable, so any future dynamically-
+# linked program needing dup2()/uname()/etc gets it for free too.
+$(OBJDIR)/musl-pic/bash-shims/bash_shims.o: bash/poc/bash_shims.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
+
 # The real musl objects libc.so needs beyond MUSL_LIBC_OBJS/
 # MUSL_MALLOC_OBJS/MUSL_STDIO_OBJS's already-proven subset - grown the
 # same file-by-file way those were (see this Makefile's own git log),
@@ -810,6 +819,12 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/time/strftime.o \
 	$(OBJDIR)/musl-pic/src/time/timegm.o \
 	$(OBJDIR)/musl-pic/src/unistd/tcgetpgrp.o \
+	$(OBJDIR)/musl-pic/src/process/execve.o \
+	$(OBJDIR)/musl-pic/src/unistd/pipe.o \
+	$(OBJDIR)/musl-pic/src/unistd/dup.o \
+	$(OBJDIR)/musl-pic/src/termios/tcgetattr.o \
+	$(OBJDIR)/musl-pic/src/termios/tcsetattr.o \
+	$(OBJDIR)/musl-pic/bash-shims/bash_shims.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -1407,6 +1422,259 @@ $(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
 	$(OBJDUMP) -S $@ > $(BUILD)/ls.dis
 	$(OBJCOPY) --strip-debug $@
 
+# bash/: real GNU bash 5.2 source, vendored the same way musl/ and
+# coreutils/ are (unmodified upstream) - bash/poc/ is poc-os's own
+# addition on top, same idea as coreutils/poc/: config.h (normally
+# produced by bash's own ./configure, here adapted from a real native,
+# non-cross ./configure + make run - see bash/poc/config.h's presence
+# for how HAVE_DLOPEN/HAVE_ICONV/HAVE_SYSLOG/HAVE_LIBDL/
+# HAVE_LOCALE_CHARSET got turned back off for poc-os, and JOB_CONTROL/
+# HISTORY/readline are off because --disable-job-control/--disable-
+# history/--disable-readline were passed to that native configure -
+# job control needs process groups/sessions/tcsetpgrp poc-os's kernel
+# doesn't have, and readline needs a termcap/terminfo library this
+# build has none of), pathnames.h/version.h/pipesize.h (pipesize.h
+# hand-corrected to poc-os's own real kernel/pipe.c PIPESIZE, 512 -
+# the native run's own probe measured *macOS's* pipe buffer, 64KB,
+# which would just be a wrong answer for `ulimit -p` here), syntax.c
+# and builtins.c/builtext.h (host-independent generated code, reused
+# as-is), bash/poc/builtins/*.c (also generated - by builtins/
+# mkbuiltins from builtins/*.def, which bash's own build deletes right
+# after compiling in the ordinary case; regenerated here via a direct
+# ./mkbuiltins invocation instead so they persist), and signames.h/
+# lsignames.h (NOT reused from the native run - mksignames normally
+# enumerates the *host's* <signal.h>, so a native run bakes in macOS's
+# BSD-flavored signal set (SIGEMT, SIGINFO, ...); hand-derived instead
+# from musl/arch/x86_64/bits/signal.h's real SIGHUP..SIGSYS numbering
+# plus the standard glibc/musl SIGRTMIN=34/SIGRTMAX=64 real-time-signal
+# convention - see bash/poc/signames.h's own comment). bash/poc/
+# bash_prelude.h/bash_shims.c fill the remaining real libc-shaped gaps
+# (dup2(), uname(), getrlimit()/setrlimit(), times() - poc-os has no
+# syscall for any of these), the same role coreutils/poc/
+# coreutils_shims.c plays for coreutils - part of libc.so itself (see
+# MUSL_LDSO_OBJS above), not linked per-executable.
+#
+# job control disabled (see config.h above) means bash/nojobs.c (the
+# stub job-control engine), not bash/jobs.c, is what actually gets
+# built into BASH_OBJS below - matching bash's own JOBS_O=nojobs.o
+# selection for this exact configuration.
+#
+# Every bash/gnulib-style object here is -fPIC (BASH_PIC_CFLAGS) and
+# linked into build/_bash as a real PIE executable importing libc from
+# libc.so via the ELF dynamic linker, exactly like coreutils'
+# COREUTILS_PIC_CFLAGS/true/false/cat/etc above - not statically
+# linked. This -fPIC+libc.so recipe (Scrt1.o + object set + -pie
+# --dynamic-linker /usr/lib/libc.so -lc) is now poc-os's *default*
+# convention for any future userland software, not just bash/
+# coreutils - the static ULIB/xv6-native path (user/*.c, include/
+# user.h) is legacy, kept only until user/sh.c itself is retired.
+#
+# -DCONF_HOSTTYPE/-DCONF_OSTYPE/-DCONF_MACHTYPE: bash/conftypes.h
+# expects these predefined (normally by configure, from config.h's own
+# uname-derived guess) to build $HOSTTYPE/$OSTYPE/$MACHTYPE - poc-os's
+# own identity, not a borrowed host one.
+# -Wno-error=implicit-function-declaration: bash/parse.y's own 'j' (job
+# count) prompt-expansion case calls count_all_jobs() (bash/nojobs.c -
+# JOB_CONTROL is off, see config.h - really does define it) without
+# #include "jobs.h" in scope - a real, harmless upstream gap (GCC 16
+# defaults this to a hard error; older GCC/the native macOS build above
+# only ever warned, which is why nobody upstream noticed).
+BASH_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -DSHELL -Os \
+	-DCONF_HOSTTYPE='"x86_64"' -DCONF_OSTYPE='"poc-os"' -DCONF_MACHTYPE='"x86_64-poc-os"' \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall -Wno-parentheses -Wno-format-security \
+	-Wno-error=implicit-function-declaration -Wno-error=implicit-int
+BASH_INC = -include bash/poc/bash_prelude.h \
+	-Ibash/poc -Ibash/poc/builtins -Ibash -Ibash/include -Ibash/builtins -Ibash/lib -Ibash/lib/sh -Ibash/lib/glob -Ibash/lib/tilde \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/bash-pic/%.o: bash/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+$(OBJDIR)/bash-pic/poc/%.o: bash/poc/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+$(OBJDIR)/bash-pic/poc/builtins/%.o: bash/poc/builtins/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+# Core shell engine (the top-level bash/*.c files the native build's
+# own final link line pulled in for this exact config - see this
+# section's own comment).
+BASH_CORE_OBJS = \
+	$(OBJDIR)/bash-pic/shell.o \
+	$(OBJDIR)/bash-pic/eval.o \
+	$(OBJDIR)/bash-pic/y.tab.o \
+	$(OBJDIR)/bash-pic/general.o \
+	$(OBJDIR)/bash-pic/make_cmd.o \
+	$(OBJDIR)/bash-pic/print_cmd.o \
+	$(OBJDIR)/bash-pic/dispose_cmd.o \
+	$(OBJDIR)/bash-pic/execute_cmd.o \
+	$(OBJDIR)/bash-pic/variables.o \
+	$(OBJDIR)/bash-pic/copy_cmd.o \
+	$(OBJDIR)/bash-pic/error.o \
+	$(OBJDIR)/bash-pic/expr.o \
+	$(OBJDIR)/bash-pic/flags.o \
+	$(OBJDIR)/bash-pic/nojobs.o \
+	$(OBJDIR)/bash-pic/subst.o \
+	$(OBJDIR)/bash-pic/hashcmd.o \
+	$(OBJDIR)/bash-pic/hashlib.o \
+	$(OBJDIR)/bash-pic/mailcheck.o \
+	$(OBJDIR)/bash-pic/trap.o \
+	$(OBJDIR)/bash-pic/input.o \
+	$(OBJDIR)/bash-pic/unwind_prot.o \
+	$(OBJDIR)/bash-pic/pathexp.o \
+	$(OBJDIR)/bash-pic/sig.o \
+	$(OBJDIR)/bash-pic/test.o \
+	$(OBJDIR)/bash-pic/version.o \
+	$(OBJDIR)/bash-pic/alias.o \
+	$(OBJDIR)/bash-pic/array.o \
+	$(OBJDIR)/bash-pic/arrayfunc.o \
+	$(OBJDIR)/bash-pic/assoc.o \
+	$(OBJDIR)/bash-pic/braces.o \
+	$(OBJDIR)/bash-pic/bracecomp.o \
+	$(OBJDIR)/bash-pic/bashhist.o \
+	$(OBJDIR)/bash-pic/bashline.o \
+	$(OBJDIR)/bash-pic/list.o \
+	$(OBJDIR)/bash-pic/stringlib.o \
+	$(OBJDIR)/bash-pic/locale.o \
+	$(OBJDIR)/bash-pic/findcmd.o \
+	$(OBJDIR)/bash-pic/redir.o \
+	$(OBJDIR)/bash-pic/pcomplete.o \
+	$(OBJDIR)/bash-pic/pcomplib.o \
+	$(OBJDIR)/bash-pic/xmalloc.o \
+	$(OBJDIR)/bash-pic/poc/syntax.o \
+	$(OBJDIR)/bash-pic/poc/builtins.o \
+
+# builtins/: the four hand-written (not .def-generated) support files
+# bash's own tarball ships pristine, plus every real builtin command
+# (bash/poc/builtins/*.c - .def-generated, see this section's own
+# comment for why they're regenerated into bash/poc/ instead of
+# bash/builtins/ directly).
+BASH_BUILTINS_OBJS = \
+	$(OBJDIR)/bash-pic/builtins/common.o \
+	$(OBJDIR)/bash-pic/builtins/evalfile.o \
+	$(OBJDIR)/bash-pic/builtins/evalstring.o \
+	$(OBJDIR)/bash-pic/builtins/bashgetopt.o \
+	$(OBJDIR)/bash-pic/builtins/getopt.o \
+	$(OBJDIR)/bash-pic/poc/builtins/alias.o \
+	$(OBJDIR)/bash-pic/poc/builtins/bind.o \
+	$(OBJDIR)/bash-pic/poc/builtins/break.o \
+	$(OBJDIR)/bash-pic/poc/builtins/builtin.o \
+	$(OBJDIR)/bash-pic/poc/builtins/caller.o \
+	$(OBJDIR)/bash-pic/poc/builtins/cd.o \
+	$(OBJDIR)/bash-pic/poc/builtins/colon.o \
+	$(OBJDIR)/bash-pic/poc/builtins/command.o \
+	$(OBJDIR)/bash-pic/poc/builtins/declare.o \
+	$(OBJDIR)/bash-pic/poc/builtins/echo.o \
+	$(OBJDIR)/bash-pic/poc/builtins/enable.o \
+	$(OBJDIR)/bash-pic/poc/builtins/eval.o \
+	$(OBJDIR)/bash-pic/poc/builtins/exec.o \
+	$(OBJDIR)/bash-pic/poc/builtins/exit.o \
+	$(OBJDIR)/bash-pic/poc/builtins/fc.o \
+	$(OBJDIR)/bash-pic/poc/builtins/fg_bg.o \
+	$(OBJDIR)/bash-pic/poc/builtins/getopts.o \
+	$(OBJDIR)/bash-pic/poc/builtins/hash.o \
+	$(OBJDIR)/bash-pic/poc/builtins/help.o \
+	$(OBJDIR)/bash-pic/poc/builtins/kill.o \
+	$(OBJDIR)/bash-pic/poc/builtins/let.o \
+	$(OBJDIR)/bash-pic/poc/builtins/mapfile.o \
+	$(OBJDIR)/bash-pic/poc/builtins/printf.o \
+	$(OBJDIR)/bash-pic/poc/builtins/pushd.o \
+	$(OBJDIR)/bash-pic/poc/builtins/read.o \
+	$(OBJDIR)/bash-pic/poc/builtins/return.o \
+	$(OBJDIR)/bash-pic/poc/builtins/set.o \
+	$(OBJDIR)/bash-pic/poc/builtins/setattr.o \
+	$(OBJDIR)/bash-pic/poc/builtins/shift.o \
+	$(OBJDIR)/bash-pic/poc/builtins/shopt.o \
+	$(OBJDIR)/bash-pic/poc/builtins/source.o \
+	$(OBJDIR)/bash-pic/poc/builtins/suspend.o \
+	$(OBJDIR)/bash-pic/poc/builtins/test.o \
+	$(OBJDIR)/bash-pic/poc/builtins/times.o \
+	$(OBJDIR)/bash-pic/poc/builtins/trap.o \
+	$(OBJDIR)/bash-pic/poc/builtins/type.o \
+	$(OBJDIR)/bash-pic/poc/builtins/ulimit.o \
+	$(OBJDIR)/bash-pic/poc/builtins/umask.o \
+	$(OBJDIR)/bash-pic/poc/builtins/wait.o \
+	$(OBJDIR)/bash-pic/poc/builtins/complete.o \
+
+# lib/sh, lib/glob, lib/tilde: bash's own portability/pattern-matching/
+# ~-expansion support libraries (the real gnulib-equivalent bash ships
+# itself) - member lists taken directly from the native run's own
+# libsh.a/libglob.a/libtilde.a (no lib/readline/libhistory.a: HISTORY
+# is off - see config.h - so bash's own code never calls into it).
+BASH_LIB_OBJS = \
+	$(OBJDIR)/bash-pic/lib/sh/clktck.o \
+	$(OBJDIR)/bash-pic/lib/sh/clock.o \
+	$(OBJDIR)/bash-pic/lib/sh/getenv.o \
+	$(OBJDIR)/bash-pic/lib/sh/oslib.o \
+	$(OBJDIR)/bash-pic/lib/sh/setlinebuf.o \
+	$(OBJDIR)/bash-pic/lib/sh/strnlen.o \
+	$(OBJDIR)/bash-pic/lib/sh/itos.o \
+	$(OBJDIR)/bash-pic/lib/sh/zread.o \
+	$(OBJDIR)/bash-pic/lib/sh/zwrite.o \
+	$(OBJDIR)/bash-pic/lib/sh/shtty.o \
+	$(OBJDIR)/bash-pic/lib/sh/shmatch.o \
+	$(OBJDIR)/bash-pic/lib/sh/eaccess.o \
+	$(OBJDIR)/bash-pic/lib/sh/netconn.o \
+	$(OBJDIR)/bash-pic/lib/sh/netopen.o \
+	$(OBJDIR)/bash-pic/lib/sh/timeval.o \
+	$(OBJDIR)/bash-pic/lib/sh/makepath.o \
+	$(OBJDIR)/bash-pic/lib/sh/pathcanon.o \
+	$(OBJDIR)/bash-pic/lib/sh/pathphys.o \
+	$(OBJDIR)/bash-pic/lib/sh/tmpfile.o \
+	$(OBJDIR)/bash-pic/lib/sh/stringlist.o \
+	$(OBJDIR)/bash-pic/lib/sh/stringvec.o \
+	$(OBJDIR)/bash-pic/lib/sh/spell.o \
+	$(OBJDIR)/bash-pic/lib/sh/shquote.o \
+	$(OBJDIR)/bash-pic/lib/sh/strtrans.o \
+	$(OBJDIR)/bash-pic/lib/sh/snprintf.o \
+	$(OBJDIR)/bash-pic/lib/sh/mailstat.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtulong.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtullong.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtumax.o \
+	$(OBJDIR)/bash-pic/lib/sh/zcatfd.o \
+	$(OBJDIR)/bash-pic/lib/sh/zmapfd.o \
+	$(OBJDIR)/bash-pic/lib/sh/winsize.o \
+	$(OBJDIR)/bash-pic/lib/sh/wcsdup.o \
+	$(OBJDIR)/bash-pic/lib/sh/fpurge.o \
+	$(OBJDIR)/bash-pic/lib/sh/zgetline.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbscmp.o \
+	$(OBJDIR)/bash-pic/lib/sh/uconvert.o \
+	$(OBJDIR)/bash-pic/lib/sh/ufuncs.o \
+	$(OBJDIR)/bash-pic/lib/sh/casemod.o \
+	$(OBJDIR)/bash-pic/lib/sh/input_avail.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbscasecmp.o \
+	$(OBJDIR)/bash-pic/lib/sh/fnxform.o \
+	$(OBJDIR)/bash-pic/lib/sh/unicode.o \
+	$(OBJDIR)/bash-pic/lib/sh/shmbchar.o \
+	$(OBJDIR)/bash-pic/lib/sh/strvis.o \
+	$(OBJDIR)/bash-pic/lib/sh/utf8.o \
+	$(OBJDIR)/bash-pic/lib/sh/random.o \
+	$(OBJDIR)/bash-pic/lib/sh/gettimeofday.o \
+	$(OBJDIR)/bash-pic/lib/sh/timers.o \
+	$(OBJDIR)/bash-pic/lib/sh/wcsnwidth.o \
+	$(OBJDIR)/bash-pic/lib/sh/mktime.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbschr.o \
+	$(OBJDIR)/bash-pic/lib/sh/strtoimax.o \
+	$(OBJDIR)/bash-pic/lib/glob/glob.o \
+	$(OBJDIR)/bash-pic/lib/glob/strmatch.o \
+	$(OBJDIR)/bash-pic/lib/glob/smatch.o \
+	$(OBJDIR)/bash-pic/lib/glob/xmbsrtowcs.o \
+	$(OBJDIR)/bash-pic/lib/glob/gmisc.o \
+	$(OBJDIR)/bash-pic/lib/tilde/tilde.o \
+
+BASH_OBJS = $(BASH_CORE_OBJS) $(BASH_BUILTINS_OBJS) $(BASH_LIB_OBJS)
+
+$(BUILD)/_bash: $(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/bash.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -1416,7 +1684,7 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
-.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o $(OBJDIR)/bash-pic/%.o
 
 # UPROGS is mkfs/mkfs.c's usual root-placed/underscore-stripped
 # convention (a bare host path, e.g. build/_foo -> installed as /foo -
@@ -1478,6 +1746,13 @@ MKFS_INSTALL_DEPS += $(BUILD)/_mv $(BUILD)/_cp
 # getdents/opendir infrastructure.
 MKFS_INSTALL += usr/bin/ls:$(BUILD)/_ls
 MKFS_INSTALL_DEPS += $(BUILD)/_ls
+
+# bash: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
+# every coreutils entry above - see $(BUILD)/_bash's own comment for
+# what this needed beyond the musl/coreutils infrastructure already
+# built out.
+MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
+MKFS_INSTALL_DEPS += $(BUILD)/_bash
 
 endif
 
