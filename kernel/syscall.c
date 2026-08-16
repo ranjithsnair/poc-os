@@ -148,20 +148,6 @@ extern int sys_fchmod(void);
 extern int sys_chown(void);
 extern int sys_fchown(void);
 extern int sys_umask(void);
-// Wayland IPC primitives (GUI roadmap phase 3) - kernel/sysnet.c,
-// kernel/shm.c, kernel/epoll.c.
-extern int sys_socket(void);
-extern int sys_bind(void);
-extern int sys_listen(void);
-extern int sys_accept(void);
-extern int sys_connect(void);
-extern int sys_sendmsg(void);
-extern int sys_recvmsg(void);
-extern int sys_socketpair(void);
-extern int sys_shm_create(void);
-extern int sys_epoll_create1(void);
-extern int sys_epoll_ctl(void);
-extern int sys_epoll_pwait(void);
 extern int sys_exec(void);
 extern int sys_exit(void);
 extern int sys_fork(void);
@@ -237,18 +223,6 @@ static int (*syscalls[])(void) = {
 [SYS_chown]             sys_chown,
 [SYS_fchown]            sys_fchown,
 [SYS_umask]             sys_umask,
-[SYS_socket]            sys_socket,
-[SYS_bind]              sys_bind,
-[SYS_listen]            sys_listen,
-[SYS_accept]            sys_accept,
-[SYS_connect]           sys_connect,
-[SYS_sendmsg]           sys_sendmsg,
-[SYS_recvmsg]           sys_recvmsg,
-[SYS_socketpair]        sys_socketpair,
-[SYS_shm_create]        sys_shm_create,
-[SYS_epoll_create1]     sys_epoll_create1,
-[SYS_epoll_ctl]         sys_epoll_ctl,
-[SYS_epoll_pwait]       sys_epoll_pwait,
 };
 
 // Called from trap() for a T_SYSCALL trap. tf->eax holds the syscall

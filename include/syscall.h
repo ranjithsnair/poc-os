@@ -206,33 +206,6 @@
 #define SYS_fchown   55
 #define SYS_umask    56
 
-// Wayland IPC primitives (GUI roadmap phase 3): AF_UNIX stream sockets
-// with SCM_RIGHTS fd-passing, POSIX-ish shared memory, and epoll - see
-// include/socket.h, include/shm.h, kernel/sysnet.c, kernel/epoll.c.
-// poc-os's own syscall ABI, not Linux's - numbers are free to assign,
-// they just need to match what musl/tools/gen-poc-syscall.sh derives
-// __NR_x from (musl's own socket()/bind()/.../epoll_*() wrappers call
-// these directly, confirmed by reading musl/src/network/*.c and
-// musl/src/linux/epoll.c - no SYS_socketcall multiplexer is defined
-// for this arch, so each socket op needs its own direct syscall).
-#define SYS_socket   57
-#define SYS_bind     58
-#define SYS_listen   59
-#define SYS_accept   60
-#define SYS_connect  61
-#define SYS_sendmsg  62
-#define SYS_recvmsg  63
-#define SYS_socketpair 64
-// Not a real Linux/musl syscall name - shm_open() is a plain open() in
-// musl with no dedicated syscall (see include/shm.h's own comment for
-// why this port doesn't hook that path yet). Called directly via a raw
-// syscall(SYS_shm_create, size) the same way bash/poc/fbtest.c already
-// calls syscall(SYS_mknod, ...) raw.
-#define SYS_shm_create 65
-#define SYS_epoll_create1 66
-#define SYS_epoll_ctl 67
-#define SYS_epoll_pwait 68
-
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value
 // musl already hardcodes doesn't also need to change - poc-os's

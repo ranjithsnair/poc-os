@@ -87,12 +87,7 @@ fileclose(struct file *f)
     begin_op();
     iput(ff.ip);
     end_op();
-  } else if(ff.type == FD_SOCK)
-    sockclose(ff.sock);
-  else if(ff.type == FD_SHM)
-    shmclose(ff.shm);
-  else if(ff.type == FD_EPOLL)
-    kfree((char*)ff.epoll);
+  }
 }
 
 // Get metadata about file f.
@@ -118,17 +113,6 @@ fileread(struct file *f, char *addr, int n)
     return -1;
   if(f->type == FD_PIPE)
     return piperead(f->pipe, addr, n);
-  // FD_SOCK: plain read() falls back to sockrecv() with no fd slots -
-  // any SCM_RIGHTS ancillary data riding along a message consumed this
-  // way is dropped, matching real recvmsg()-vs-read() semantics on a
-  // real Unix socket (see include/socket.h's own scope-cut comment on
-  // why sendmsg()/recvmsg() are the primary path here).
-  if(f->type == FD_SOCK){
-    int nfds;
-    return sockrecv(f->sock, addr, n, 0, &nfds, 0);
-  }
-  if(f->type == FD_SHM || f->type == FD_EPOLL)
-    return -1;  // mmap()/epoll_ctl() only - not a byte stream
   if(f->type == FD_INODE){
     // A transaction (matching filewrite()'s own, just below) is needed
     // here now too, even though a read "obviously" never used to touch
@@ -182,10 +166,6 @@ filewrite(struct file *f, char *addr, int n)
     return -1;
   if(f->type == FD_PIPE)
     return pipewrite(f->pipe, addr, n);
-  if(f->type == FD_SOCK)
-    return socksend(f->sock, addr, n, 0, 0);
-  if(f->type == FD_SHM || f->type == FD_EPOLL)
-    return -1;  // mmap()/epoll_ctl() only - not a byte stream
   if(f->type == FD_INODE){
     // write a few blocks at a time to avoid exceeding
     // the maximum log transaction size, including

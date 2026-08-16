@@ -106,32 +106,6 @@ pipewrite(struct pipe *p, char *addr, int n)
   return n;
 }
 
-// Readiness checks for kernel/epoll.c's fdready() - EOF (the other end
-// already closed) counts as "ready" too, matching real epoll (a read()
-// or write() on such a pipe returns immediately, 0 or EPIPE, rather
-// than blocking).
-int
-pipereadable(struct pipe *p)
-{
-  int r;
-
-  acquire(&p->lock);
-  r = (p->nread != p->nwrite) || !p->writeopen;
-  release(&p->lock);
-  return r;
-}
-
-int
-pipewritable(struct pipe *p)
-{
-  int r;
-
-  acquire(&p->lock);
-  r = (p->nwrite < p->nread + PIPESIZE) || !p->readopen;
-  release(&p->lock);
-  return r;
-}
-
 int
 piperead(struct pipe *p, char *addr, int n)
 {

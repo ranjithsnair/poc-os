@@ -19,7 +19,6 @@
 #include "termios.h"
 #include "vbe.h"
 #include "fb.h"
-#include "shm.h"
 
 extern struct vbeinfo vbe;
 
@@ -262,7 +261,7 @@ sys_mmap(void)
     return -1;
   if(fd != -1){
     if(fd < 0 || fd >= NOFILE || (f = curproc->ofile[fd]) == 0 ||
-       (f->type != FD_INODE && f->type != FD_SHM))
+       f->type != FD_INODE)
       return -1;
   }
 
@@ -289,37 +288,6 @@ sys_mmap(void)
     if(mapuvm_phys(curproc->pgdir, base, n,
                     PGROUNDDOWN(vbe.phys_base) + (uint)offset, PTE_W|PTE_U) < 0)
       return -1;
-    curproc->sz = base + n;
-    switchuvm(curproc);
-    uvmsetperm(curproc->pgdir, base, n, (prot & PROT_WRITE) != 0);
-    return base;
-  }
-
-  // Shared memory (kernel/shm.c, GUI roadmap phase 3): map the
-  // object's own kalloc()'d pages directly, the same mapuvm_phys()
-  // path the framebuffer branch above uses - two processes mmap()ing
-  // the same underlying shmobj (same fd, or one received via
-  // SCM_RIGHTS/dup()/fork()) land PTEs pointing at the same physical
-  // pages. PTE_SHM (include/mmu.h) marks them so kernel/vm.c's
-  // deallocuvm() knows not to kfree() them on unmap/exit - the object
-  // is only actually freed once its own struct file's ref count hits
-  // zero (kernel/shm.c's shmclose(), called from fileclose()).
-  if(f && f->type == FD_SHM){
-    uint shmsize, pgoff, i;
-
-    if(flags & MAP_FIXED)
-      return -1;
-    shmsize = PGROUNDUP(f->shm->size);
-    if(offset < 0 || (offset % PGSIZE) != 0 ||
-       (uint)offset + n > shmsize || (uint)offset + n < (uint)offset)
-      return -1;
-    pgoff = (uint)offset / PGSIZE;
-    base = curproc->sz;
-    for(i = 0; i < n / PGSIZE; i++){
-      if(mapuvm_phys(curproc->pgdir, base + i*PGSIZE, PGSIZE,
-                      V2P(f->shm->pages[pgoff + i]), PTE_W|PTE_U|PTE_SHM) < 0)
-        return -1;
-    }
     curproc->sz = base + n;
     switchuvm(curproc);
     uvmsetperm(curproc->pgdir, base, n, (prot & PROT_WRITE) != 0);

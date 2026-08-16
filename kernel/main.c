@@ -39,8 +39,6 @@ main(void)
   tvinit();        // trap vectors
   binit();         // buffer cache
   fileinit();      // file table
-  sockinit();      // AF_UNIX socket table (GUI roadmap phase 3)
-  shminit();       // shared-memory object table (GUI roadmap phase 3)
   ideinit();       // disk
   startothers();   // start other processors
   // Starts right past the ramdisk (RAMDISK_PADDR..RAMDISK_PADDR+

@@ -28,9 +28,6 @@
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
-// Not static: kernel/sysnet.c/shm.c/epoll.c (sockets/shm/epoll
-// syscalls, GUI roadmap phase 3) reuse this and fdalloc() below rather
-// than duplicating them - declared in defs.h.
 int
 argfd(int n, int *pfd, struct file **pf)
 {
