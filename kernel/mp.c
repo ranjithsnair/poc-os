@@ -141,4 +141,9 @@ mpinit(void)
     outb(0x22, 0x70);   // Select IMCR
     outb(0x23, inb(0x23) | 1);  // Mask external interrupts.
   }
+
+  // The legacy table above only reliably lists the boot processor on
+  // any modern BIOS - see kernel/acpi.c's own comment for why. If ACPI
+  // is present, its MADT is the real source of truth for cpus[]/ncpu.
+  acpiinit();
 }

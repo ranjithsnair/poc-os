@@ -1,7 +1,8 @@
-// Kernel entry point (reached from kernel/entry.asm): main() runs on
-// the boot CPU and initializes every subsystem in dependency order.
-// startothers() (AP/multiprocessor bring-up) is currently a stub - see
-// its own comment - so poc runs single-CPU for now.
+// Kernel entry point (reached from kernel/entry.asm) and multiprocessor
+// bring-up: main() runs on the boot CPU and initializes every subsystem
+// in dependency order, then wakes the other CPUs (startothers()), each
+// of which lands in mpenter() below and runs its own much shorter
+// per-CPU setup (mpmain()).
 
 #include "types.h"
 #include "defs.h"
@@ -59,16 +60,56 @@ mpmain(void)
   scheduler();     // start running processes
 }
 
+// Other CPUs jump here (in 64-bit mode, courtesy of kernel/entryother.asm)
+// once startothers() below wakes them up.
+static void
+mpenter(void)
+{
+  switchkvm();
+  seginit();
+  lapicinit();
+  mpmain();
+}
+
+// The boot-time page table kernel/entry.asm built, for use in
+// startothers() below.
+extern pde_t entrypml4[];
+
 // Start the non-boot (AP) processors.
 static void
 startothers(void)
 {
-  // SMP bring-up isn't implemented yet: APs need the same real-mode ->
-  // protected-mode -> long-mode transition kernel/entry.asm does for
-  // the boot processor, which kernel/entryother.asm (never leaves
-  // 32-bit protected mode - see the Makefile) doesn't do. Every CPU
-  // past cpu0 just stays parked; poc runs single-CPU here.
-  return;
+  extern uchar _binary_build_entryother_start[], _binary_build_entryother_size[];
+  uchar *code;
+  struct cpu *c;
+  char *stack;
+
+  // Write entry code to unused memory at 0x7000. The linker has placed
+  // the image of entryother.asm in _binary_build_entryother_start (the
+  // symbol name is derived from the build/entryother path given to
+  // ld's -b binary option).
+  code = P2V(0x7000);
+  memmove(code, _binary_build_entryother_start, (uint64)_binary_build_entryother_size);
+
+  for(c = cpus; c < cpus+ncpu; c++){
+    if(c == mycpu())  // We've started already.
+      continue;
+
+    // Tell entryother.asm what stack to use, where to enter, and what
+    // pgdir to use. We cannot use kpgdir yet, because the AP processor
+    // is running in low memory, so we use entrypml4 for the APs too -
+    // see the comment atop kernel/entryother.asm.
+    stack = kalloc();
+    *(uint64*)(code-8)  = (uint64)stack + KSTACKSIZE;
+    *(uint64*)(code-16) = (uint64)mpenter;
+    *(uint64*)(code-24) = (uint64)V2P(entrypml4);
+
+    lapicstartap(c->apicid, (uint)V2P(code));
+
+    // wait for cpu to finish mpmain()
+    while(c->started == 0)
+      ;
+  }
 }
 
 //PAGEBREAK!

@@ -323,6 +323,38 @@ deallocuvm(pde_t *pgdir, uintp oldsz, uintp newsz)
 }
 
 
+// Make sure [pa, pa+size) is readable/writable at its own P2V(pa)
+// virtual address in kpgdir, leaving any page that's already mapped
+// there alone (unlike mappages(), which panics on a remap - callers
+// like kernel/acpi.c's table walk map the same table's address twice,
+// once by a conservative guess and once by its real length once
+// that's known, and the two can overlap).
+//
+// Needed because kmap[]'s "kern data+memory" entry (see kmap[] above)
+// only identity-maps physical memory up to PHYSTOP: real hardware and
+// QEMU alike are free to place ACPI's tables anywhere in RAM, and on a
+// large-enough -m size that can land above PHYSTOP even though
+// PHYSTOP itself is an artificial cap this kernel imposes, not a
+// description of how much RAM actually exists (see PHYSTOP's own
+// comment in memlayout.h).
+void
+kmapphys(uintp pa, uintp size)
+{
+  char *a, *last;
+  pte_t *pte;
+
+  a = (char*)PGROUNDDOWN((uintp)P2V(pa));
+  last = (char*)PGROUNDDOWN((uintp)P2V(pa) + size - 1);
+  for(;; a += PGSIZE){
+    if((pte = walkpgdir(kpgdir, a, 1)) == 0)
+      panic("kmapphys: out of memory");
+    if(!(*pte & PTE_P))
+      *pte = V2P(a) | PTE_W | PTE_P;
+    if(a == last)
+      break;
+  }
+}
+
 // Allocate one page table for the machine for the kernel address
 // space for scheduler processes.
 void

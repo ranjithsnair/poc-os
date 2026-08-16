@@ -5,6 +5,7 @@
 .DEFAULT_GOAL := all
 
 OBJS = \
+	$(OBJDIR)/kernel/acpi.o\
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
 	$(OBJDIR)/kernel/exec.o\
@@ -77,12 +78,12 @@ CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb 
 CFLAGS += -mgeneral-regs-only
 CFLAGS += -fno-stack-protector -fno-pie -no-pie
 
-# boot/*.c and kernel/entryother.asm compile with the fixed-32-bit
-# BOOTNASMFLAGS above, but still want the same warning/codegen posture as
-# CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS directly
-# (whose -m64 doesn't apply here) - including -mgeneral-regs-only, for
-# the same reason: boot code runs in real/protected mode with no SSE
-# state management either.
+# boot/*.c compiles with the fixed-32-bit BOOTNASMFLAGS above, but still
+# wants the same warning/codegen posture as CFLAGS, so BOOTCFLAGS
+# mirrors it rather than reusing CFLAGS directly (whose -m64 doesn't
+# apply here) - including -mgeneral-regs-only, for the same reason:
+# boot code runs in real/protected mode with no SSE state management
+# either.
 BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -mgeneral-regs-only -fno-stack-protector -fno-pie -no-pie
 
 # KCFLAGS adds flags needed only for kernel C code proper (not the boot
@@ -144,15 +145,6 @@ $(OBJDIR)/boot/%.o: boot/%.asm | $(OBJDIR)/boot
 $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
-
-# kernel/entryother.asm is the one kernel/*.asm source that always stays
-# 16/32-bit real/protected mode, like boot/*.asm (the APs it bootstraps
-# start in real mode regardless of the main kernel's own bitness) -
-# this explicit rule overrides the generic NASMFLAGS pattern above for
-# this file only.
-$(OBJDIR)/kernel/entryother.o: kernel/entryother.asm | $(OBJDIR)/kernel
-	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
-	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
 
 $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
@@ -359,11 +351,13 @@ $(BUILD)/poc-os.iso: $(BUILD)/poc_bios.img | $(BUILD)
 # ld+objcopy recipe instead of just landing in a link line. They're
 # final build products, not intermediates, so - like bootblock, kernel,
 # and mkfs - they live directly in build/, not build/obj/. entryother
-# is always the fixed-32-bit trampoline, linked with BOOTLDFLAGS
-# (see entryother.o's rule above); initcode is $(INITCODEOBJ), which
-# links with LDFLAGS like everything else in $(OBJS).
+# is linked on its own below (like kernel/entry.asm, it mixes 16/32/64-
+# bit code in one file - see its own comment - so it needs the regular
+# 64-bit LDFLAGS, just at its own fixed -Ttext 0x7000 rather than
+# KERNLINK); initcode is $(INITCODEOBJ), which links with LDFLAGS like
+# everything else in $(OBJS).
 $(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
-	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
 	$(OBJDUMP) -S $(OBJDIR)/kernel/bootblockother.o > $(BUILD)/entryother.dis
 

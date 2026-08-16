@@ -98,6 +98,9 @@ void            end_op();
 extern int      ismp;
 void            mpinit(void);
 
+// acpi.c
+void            acpiinit(void);
+
 // picirq.c
 void            picenable(int);
 void            picinit(void);
@@ -194,6 +197,7 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uintp, void*, uintp);
 void            clearpteu(pde_t *pgdir, char *uva);
+void            kmapphys(uintp, uintp);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
