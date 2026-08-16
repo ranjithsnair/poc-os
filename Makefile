@@ -1818,80 +1818,6 @@ $(BUILD)/_su: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/su.o $(BUILD
 	$(OBJDUMP) -S $@ > $(BUILD)/su.dis
 	$(OBJCOPY) --strip-debug $@
 
-# rawtest: throwaway diagnostic for the raw-mode/ioctl kernel groundwork
-# (kernel/console.c, kernel/sysproc.c's sys_ioctl()) - see bash/poc/
-# rawtest.c's own comment. Same Scrt1.o+libc.so PIE recipe as _dinit
-# above, using the existing generic $(OBJDIR)/bash-pic/poc/%.o pattern
-# rule (no dedicated compile rule needed - rawtest.c is plain musl-
-# linked C, not bash source, but that rule's BASH_PIC_CFLAGS/BASH_INC
-# work fine for it unchanged).
-$(BUILD)/_rawtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/rawtest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# fbtest: see bash/poc/fbtest.c's own comment - a throwaway diagnostic
-# for the VBE linear-framebuffer driver, same Scrt1.o+libc.so PIE
-# recipe as rawtest above.
-$(BUILD)/_fbtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/fbtest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# guitest: see bash/poc/guitest.c's own comment - a throwaway
-# diagnostic for a real, mouse-clickable GUI button (GUI roadmap phase
-# 5). Same Scrt1.o+libc.so PIE recipe as fbtest/mousetest above.
-$(BUILD)/_guitest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guitest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guitest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/guitest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# bashpipetest: see bash/poc/bashpipetest.c's own comment - validates
-# GUI roadmap phase 6's one real unverified risk (bash over plain
-# pipes instead of the console) before gui/wm.c is built around it.
-$(BUILD)/_bashpipetest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/bashpipetest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/bashpipetest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/bashpipetest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# ipctest: see bash/poc/ipctest.c's own comment - verifies GUI roadmap
-# phase 6's restored socket/shm/epoll kernel code (kernel/socket.c,
-# shm.c, epoll.c, sysnet.c) still works end-to-end before Phase 7
-# builds libgui.so on top of it.
-$(BUILD)/_ipctest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/ipctest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/ipctest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/ipctest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# libguitest: see bash/poc/libguitest.c's own comment - verifies GUI
-# roadmap phase 7's libgui.so (rasterizer + font rendering + bespoke
-# client wire protocol) against a minimal stub compositor. Needs
-# -Igui/libgui on top of the generic bash-pic/poc/%.o pattern rule's
-# shape, same precedent as curses_test.o's -Icurses/include below -
-# and links against libgui.so in addition to libc.so, the first
-# executable in this codebase to do so.
-$(OBJDIR)/bash-pic/poc/libguitest.o: bash/poc/libguitest.c $(MUSL_GENH)
-	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) -Igui/libgui $(BASH_INC) -c -o $@ $<
-
-$(BUILD)/_libguitest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/libguitest.o \
-                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/libguitest.o \
-		-L $(BUILD) -lgui -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/libguitest.dis
-	$(OBJCOPY) --strip-debug $@
-
 # compositor: gui/compositor.c's own comment - GUI roadmap phase 8's
 # real yutani-equivalent daemon. Compiled via the gui-pic/%.o generic
 # pattern rule above (already has -Igui/libgui built in), linked
@@ -1904,52 +1830,28 @@ $(BUILD)/_compositor: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/composito
 	$(OBJDUMP) -S $@ > $(BUILD)/compositor.dis
 	$(OBJCOPY) --strip-debug $@
 
-# guiclient: bash/poc/guiclient.c's own comment - an ordinary libgui.so
-# client for exercising the real compositor above (unlike libguitest's
-# own built-in stub compositor). Same -Igui/libgui + libgui.so linking
-# as libguitest.
-$(OBJDIR)/bash-pic/poc/guiclient.o: bash/poc/guiclient.c $(MUSL_GENH)
-	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) -Igui/libgui $(BASH_INC) -c -o $@ $<
-
-$(BUILD)/_guiclient: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guiclient.o \
+# login_gui: gui/login_gui.c's own comment - GUI roadmap phase 9's
+# graphical login screen. Compiled via the gui-pic/%.o generic pattern
+# rule (already has -Igui/libgui built in), linked against libgui.so
+# same as compositor above.
+$(BUILD)/_login_gui: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.o \
                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
 	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guiclient.o \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.o \
 		-L $(BUILD) -lgui -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/guiclient.dis
+	$(OBJDUMP) -S $@ > $(BUILD)/login_gui.dis
 	$(OBJCOPY) --strip-debug $@
 
-# phase8test: see bash/poc/phase8test.c's own comment - launches
-# compositor + two guiclient windows via fork()+exec() directly,
-# bypassing bash's own broken "&" background-job stdin redirection.
-$(BUILD)/_phase8test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/phase8test.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/phase8test.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/phase8test.dis
-	$(OBJCOPY) --strip-debug $@
-
-# curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
-# port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
-# include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
-# rule's BASH_INC, hence its own compile rule rather than reusing that
-# pattern outright (same reasoning as rawtest.o not needing one).
-# curses/curses.o itself is a $(CURSES_PIC_CFLAGS) object (see that
-# variable's own comment), linked straight into this PIE like
-# BASH_OBJS/COREUTILS_*_GNULIB_OBJS are into _bash/_true, not through
-# libc.so.
-$(OBJDIR)/bash-pic/poc/curses_test.o: bash/poc/curses_test.c $(MUSL_GENH)
-	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) -Icurses/include $(BASH_INC) -c -o $@ $<
-
-$(BUILD)/_curses_test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
-		$(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
-		$(OBJDIR)/curses-pic/curses.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/curses_test.dis
+# terminal: gui/terminal.c's own comment - GUI roadmap phase 10's
+# terminal emulator client. Compiled via the gui-pic/%.o generic
+# pattern rule (already has -Igui/libgui built in), linked against
+# libgui.so same as compositor/login_gui above.
+$(BUILD)/_terminal: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
+                     $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/terminal.dis
 	$(OBJCOPY) --strip-debug $@
 
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
@@ -2030,19 +1932,6 @@ MKFS_INSTALL_DEPS += $(BUILD)/_ls
 MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
 MKFS_INSTALL_DEPS += $(BUILD)/_bash
 
-# rawtest: see $(BUILD)/_rawtest's own comment - a throwaway diagnostic
-# for the raw-mode/ioctl kernel groundwork the later curses/nano stages
-# depend on, kept installed since it's small and doubles as a
-# regression check for that groundwork going forward.
-MKFS_INSTALL += usr/bin/rawtest:$(BUILD)/_rawtest
-MKFS_INSTALL_DEPS += $(BUILD)/_rawtest
-
-# curses_test: see $(BUILD)/_curses_test's own comment - a throwaway
-# diagnostic for the curses layer, kept installed for the same
-# regression-check reasoning as rawtest.
-MKFS_INSTALL += usr/bin/curses_test:$(BUILD)/_curses_test
-MKFS_INSTALL_DEPS += $(BUILD)/_curses_test
-
 # nano: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
 # bash/coreutils above - see $(BUILD)/_nano's own comment.
 MKFS_INSTALL += usr/bin/nano:$(BUILD)/_nano
@@ -2057,40 +1946,16 @@ MKFS_INSTALL += usr/bin/login:$(BUILD)/_login usr/bin/su:$(BUILD)/_su \
 	etc/passwd:etc/passwd etc/group:etc/group
 MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 
-# fbtest: see $(BUILD)/_fbtest's own comment - a throwaway diagnostic
-# for the VBE linear-framebuffer driver, kept installed for the same
-# regression-check reasoning as rawtest/curses_test.
-MKFS_INSTALL += usr/bin/fbtest:$(BUILD)/_fbtest
-MKFS_INSTALL_DEPS += $(BUILD)/_fbtest
-
-# guitest: see $(BUILD)/_guitest's own comment - a throwaway diagnostic
-# for a real, mouse-clickable GUI button (GUI roadmap phase 5), kept
-# installed for the same regression-check reasoning as the other
-# poc/*test binaries.
-MKFS_INSTALL += usr/bin/guitest:$(BUILD)/_guitest
-MKFS_INSTALL_DEPS += $(BUILD)/_guitest
-
-# bashpipetest: see $(BUILD)/_bashpipetest's own comment above.
-MKFS_INSTALL += usr/bin/bashpipetest:$(BUILD)/_bashpipetest
-MKFS_INSTALL_DEPS += $(BUILD)/_bashpipetest
-
-# ipctest: see $(BUILD)/_ipctest's own comment above.
-MKFS_INSTALL += usr/bin/ipctest:$(BUILD)/_ipctest
-MKFS_INSTALL_DEPS += $(BUILD)/_ipctest
-
-# libguitest: see $(BUILD)/_libguitest's own comment above.
-MKFS_INSTALL += usr/bin/libguitest:$(BUILD)/_libguitest
-MKFS_INSTALL_DEPS += $(BUILD)/_libguitest
-
-# compositor/guiclient: see their own Makefile build rules above -
-# GUI roadmap phase 8's real compositor daemon and an ordinary client
-# to exercise it.
+# compositor/login_gui/terminal: see their own Makefile build rules
+# above - GUI roadmap phases 8-10's real compositor daemon, graphical
+# login screen, and terminal emulator (what dinit.c actually boots
+# into by default - see its own comment).
 MKFS_INSTALL += usr/bin/compositor:$(BUILD)/_compositor
 MKFS_INSTALL_DEPS += $(BUILD)/_compositor
-MKFS_INSTALL += usr/bin/guiclient:$(BUILD)/_guiclient
-MKFS_INSTALL_DEPS += $(BUILD)/_guiclient
-MKFS_INSTALL += usr/bin/phase8test:$(BUILD)/_phase8test
-MKFS_INSTALL_DEPS += $(BUILD)/_phase8test
+MKFS_INSTALL += usr/bin/login_gui:$(BUILD)/_login_gui
+MKFS_INSTALL_DEPS += $(BUILD)/_login_gui
+MKFS_INSTALL += usr/bin/terminal:$(BUILD)/_terminal
+MKFS_INSTALL_DEPS += $(BUILD)/_terminal
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

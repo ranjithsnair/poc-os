@@ -72,6 +72,12 @@ struct window {
 	int inuse;
 	int fd;
 	int surface_id;
+	int shmfd;                /* kept open for the surface's lifetime -
+	                            * see gui/libgui/client.c's own comment:
+	                            * kernel/shm.c only refcounts open fds,
+	                            * not active mmap() mappings, so closing
+	                            * this early frees the pages while still
+	                            * mapped. */
 	struct gfx_surface surf; /* client's content area, mmap'd shm */
 	int x, y;                /* top-left of the DECORATION (title bar) */
 	char title[GUI_TITLE_MAX];
@@ -147,6 +153,7 @@ remove_window(int epfd, int idx)
 
 	epoll_ctl(epfd, EPOLL_CTL_DEL, w->fd, 0);
 	close(w->fd);
+	close(w->shmfd);
 	zorder_remove(idx);
 	if (focus_idx == idx)
 		focus_idx = nz > 0 ? zorder[nz - 1] : -1;
@@ -238,13 +245,14 @@ handle_create_surface(int epfd, int fd, struct gui_msg_create_surface *req)
 
 	windows[idx].surf.pixels = mmap(0, (unsigned long)req->w * 4 * (unsigned long)req->h,
 	                                 PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, 0);
-	close(shmfd);
 	if (windows[idx].surf.pixels == MAP_FAILED) {
+		close(shmfd);
 		close(fd);
 		return;
 	}
 	windows[idx].inuse = 1;
 	windows[idx].fd = fd;
+	windows[idx].shmfd = shmfd;
 	windows[idx].surface_id = reply.surface_created.surface_id;
 	windows[idx].surf.w = (unsigned int)req->w;
 	windows[idx].surf.h = (unsigned int)req->h;

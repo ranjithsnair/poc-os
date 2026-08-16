@@ -67,7 +67,17 @@ gui_create_surface(struct gui_conn *c, int w, int h, const char *title)
 
   c->surface.pixels = mmap(0, (unsigned long)resp.surface_created.pitch * resp.surface_created.h,
                             PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, 0);
-  close(shmfd);
+  // Deliberately not close(shmfd): kernel/shm.c's refcounting only
+  // tracks open struct file references, not active mmap() mappings -
+  // closing here would drop this side's only reference the moment
+  // both this client and the compositor have mmap()'d once each,
+  // freeing the pages back to the kernel's kalloc() pool while still
+  // actively mapped and written to (a real bug found and root-caused
+  // via GDB during GUI roadmap phase 10 - the freed pages' contents
+  // got corrupted by this surface's own pixel writes, then handed out
+  // again elsewhere, corrupting the kernel's free-page list itself).
+  // Kept open for the surface's lifetime instead; it's one fd per
+  // surface for a client's whole process lifetime, not a real leak.
   return c->surface.pixels == MAP_FAILED ? -1 : 0;
 }
 
