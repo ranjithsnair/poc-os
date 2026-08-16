@@ -156,18 +156,6 @@ $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# poc.img layout: sector 0 = bootblock (stage 1, signed - see below),
-# sectors 1..256 = boot2 (stage 2, zero-padded to exactly that many
-# sectors - see boot/bootmain.c's own STAGE2_SECTORS and boot/
-# boot2main.c's matching KERNEL_LBA), sector 257 onward = the kernel
-# ELF image itself, exactly where it always was relative to stage 1
-# before stage 2 existed, just shifted by stage 2's own footprint.
-$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/boot2 $(BUILD)/kernel | $(BUILD)
-	dd if=/dev/zero of=$(BUILD)/poc.img count=10000
-	dd if=$(BUILD)/bootblock of=$(BUILD)/poc.img conv=notrunc
-	dd if=$(BUILD)/boot2 of=$(BUILD)/poc.img seek=1 conv=notrunc
-	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=257 conv=notrunc
-
 $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/pocmemfs.img count=10000
 	dd if=$(BUILD)/bootblock of=$(BUILD)/pocmemfs.img conv=notrunc
@@ -188,40 +176,12 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
 
-# boot2main.c (stage 2): unlike bootmain.c (stage 1), no 510-byte
-# budget - the generic $(OBJDIR)/boot/%.o pattern's normal -O2 is fine
-# - but still freestanding (-nostdinc, -fno-pic) like every boot/ file.
-$(OBJDIR)/boot/boot2main.o: boot/boot2main.c | $(OBJDIR)/boot
-	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -nostdinc -c -o $@ $<
-
-# BOOT2_MAX_SECTORS must match boot/bootmain.c's own STAGE2_SECTORS -
-# how many sectors stage 1 reads stage 2 into before jumping to it.
-# Linked to run at 0x10000 (boot/bootmain.c's STAGE2_ADDR) with -N (no
-# separate page-aligned segments - same reason bootblock itself uses
-# it: this raw-binary-extracted image can only have one contiguous
-# blob, not a gap-separated set of segments) and -e entry2 - boot/
-# boot2asm.o's own tiny stub, linked *first* (see that file's own
-# comment for why -e alone, or source-order alone, isn't enough once
-# this gets flattened to a raw binary and jumped to by hardcoded
-# address).
-BOOT2_MAX_SECTORS = 256
-$(BUILD)/boot2: $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o | $(BUILD)
-	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x10000 -o $(OBJDIR)/boot/boot2.o $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o
-	$(OBJDUMP) -S $(OBJDIR)/boot/boot2.o > $(BUILD)/boot2.dis
-	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2.o $(BUILD)/boot2
-	size=$$(stat -f%z $(BUILD)/boot2 2>/dev/null || stat -c%s $(BUILD)/boot2); \
-	max=$$(( $(BOOT2_MAX_SECTORS) * 512 )); \
-	if [ "$$size" -gt "$$max" ]; then \
-		echo "boot2 too large: $$size bytes (max $$max, $(BOOT2_MAX_SECTORS) sectors)" >&2; \
-		exit 1; \
-	fi
-
 # ============================================================
 # BIOS/INT13h boot path: real hardware (legacy IDE, or SATA in
 # AHCI mode via a real BIOS/CSM AHCI driver, or booted from USB),
 # VirtualBox, and QEMU all boot through BIOS/CSM firmware's own
-# INT13h disk services - unlike the ATA-PIO path above (poc.img,
-# fs.img as a *separate* drive), which only works when the disk is
+# INT13h disk services - unlike the original ATA-PIO path (removed;
+# fs.img as a *separate* drive), which only worked when the disk was
 # attached as an emulated/real legacy IDE hard disk. See boot/
 # bootasm_bios.asm's and boot/boot2_bios.asm's own comments for the
 # full reasoning. Everything here - bootloader, kernel, and the
@@ -1890,6 +1850,16 @@ $(BUILD)/_wltest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/wltest.o
 	$(OBJDUMP) -S $@ > $(BUILD)/wltest.dis
 	$(OBJCOPY) --strip-debug $@
 
+# guitest: see bash/poc/guitest.c's own comment - a throwaway
+# diagnostic for a real, mouse-clickable GUI button (GUI roadmap phase
+# 5). Same Scrt1.o+libc.so PIE recipe as fbtest/mousetest above.
+$(BUILD)/_guitest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guitest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guitest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/guitest.dis
+	$(OBJCOPY) --strip-debug $@
+
 # curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
 # port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
 # include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
@@ -2040,6 +2010,13 @@ MKFS_INSTALL_DEPS += $(BUILD)/_mousetest
 MKFS_INSTALL += usr/bin/wltest:$(BUILD)/_wltest
 MKFS_INSTALL_DEPS += $(BUILD)/_wltest
 
+# guitest: see $(BUILD)/_guitest's own comment - a throwaway diagnostic
+# for a real, mouse-clickable GUI button (GUI roadmap phase 5), kept
+# installed for the same regression-check reasoning as the other
+# poc/*test binaries.
+MKFS_INSTALL += usr/bin/guitest:$(BUILD)/_guitest
+MKFS_INSTALL_DEPS += $(BUILD)/_guitest
+
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
@@ -2054,22 +2031,6 @@ clean:
 	rm -rf $(BUILD)
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg .gdbinit
 
-# make a printout
-FILES = $(shell grep -v '^\#' tools/runoff.list)
-PRINT = tools/runoff.list tools/runoff.spec README docs/toc.hdr docs/toc.ftr $(FILES)
-
-poc.pdf: $(PRINT)
-	./tools/runoff
-	ls -l poc.pdf
-
-print: poc.pdf
-
-# run in emulators
-
-bochs : $(BUILD)/fs.img $(BUILD)/poc.img
-	if [ ! -e .bochsrc ]; then ln -s dot-bochsrc .bochsrc; fi
-	bochs -q
-
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
 # QEMU's gdb stub command line changed in 0.11
@@ -2079,20 +2040,19 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -drive file=$(BUILD)/fs.img,index=1,media=disk,format=raw -drive file=$(BUILD)/poc.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
 # poc_bios.img (boot/bootasm_bios.asm+boot2_bios.asm, BIOS/INT13h) is
 # one combined disk image - fs.img is already embedded in it (see its
-# own build rule's comment) - unlike poc.img+fs.img's two separate
-# drives, so this needs only one -drive, not two. This is the image the
-# VBE linear-framebuffer driver (boot2_bios.asm's setup_vbe,
-# kernel/vbe.c) actually lives in - poc.img's bootasm.asm switches to
-# protected mode in its very first boot sector, with no real-mode
-# window left for VBE's BIOS calls at all - and boots identically under
-# QEMU/VirtualBox's BIOS emulation, not just real hardware, so this is
-# now the default `all`/`run`/`qemu`/`qemu-nox`/`qemu-gdb` target
-# rather than a separate real-hardware-only path. poc.img/QEMUOPTS
-# above still build and work if ever needed directly.
+# own build rule's comment), so this needs only one -drive. This is the
+# image the VBE linear-framebuffer driver (boot2_bios.asm's setup_vbe,
+# kernel/vbe.c) actually lives in - the original ATA-PIO boot path
+# (bootasm.asm) switched to protected mode in its very first boot
+# sector, with no real-mode window left for VBE's BIOS calls at all,
+# and was removed once this BIOS/INT13h path proved it boots
+# identically under QEMU/VirtualBox's BIOS emulation, not just real
+# hardware - see the pocmemfs.img rule above for the one other thing
+# (bootasm.asm/bootmain.c/bootblock) still shared with that removed
+# path.
 QEMUOPTS_BIOS = -drive file=$(BUILD)/poc_bios.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
 # `run` launches QEMU detached from this shell's stdio (</dev/null so
@@ -2121,45 +2081,4 @@ qemu-nox-gdb: $(BUILD)/poc_bios.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -nographic $(QEMUOPTS_BIOS) -S $(QEMUGDB)
 
-# CUT HERE
-# prepare dist for students
-# after running make dist, probably want to
-# rename it to rev0 or rev1 or so on and then
-# check in that version.
-
-EXTRA=\
-	mkfs/mkfs.c user/ulib.c include/user.h\
-	user/printf.c user/umalloc.c\
-	README dot-bochsrc tools/*.pl docs/toc.* tools/runoff tools/runoff1 tools/runoff.list\
-	.gdbinit.tmpl tools/gdbutil\
-
-dist:
-	rm -rf dist
-	mkdir dist
-	for i in $(FILES); \
-	do \
-		grep -v PAGEBREAK $$i >dist/$$i; \
-	done
-	sed '/CUT HERE/,$$d' Makefile >dist/Makefile
-	echo >dist/tools/runoff.spec
-	cp $(EXTRA) dist
-
-dist-test:
-	rm -rf dist
-	make dist
-	rm -rf dist-test
-	mkdir dist-test
-	cp dist/* dist-test
-	cd dist-test; $(MAKE) print
-	cd dist-test; $(MAKE) bochs || true
-	cd dist-test; $(MAKE) qemu
-
-# update this rule (change rev#) when it is time to
-# make a new revision.
-tar:
-	rm -rf /tmp/poc
-	mkdir -p /tmp/poc
-	cp dist/* dist/.gdbinit.tmpl /tmp/poc
-	(cd /tmp; tar cf - poc) | gzip >poc-rev10.tar.gz  # the next one will be 10 (9/17)
-
-.PHONY: all run clean dist-test dist tags print
+.PHONY: all run clean tags
