@@ -339,8 +339,30 @@ sys_mmap(void)
   }
 
   if(f){
+    uint loadlen;
+
     ilock(f->ip);
-    if(loaduvm(curproc->pgdir, (char*)(uintp)base, f->ip, (uint)offset, (uint)len) < 0){
+    // Clamp to what the file actually has: a real mmap() lets a
+    // caller map past a file's EOF (the tail just reads as zero,
+    // never written back) - musl/ldso/dynlink.c's map_library()
+    // relies on exactly this ("we map too much, possibly even more
+    // than the length of the file... we will not use the invalid
+    // part") for its initial whole-span reservation mmap, sized from
+    // the ELF's addr_max/addr_min, not the file's own byte length.
+    // loaduvm() below would otherwise readi() past ip->size, get a
+    // short read, and fail the whole mmap() - the first real second
+    // shared object (build/libgui.so, GUI roadmap phase 7) to load
+    // via this path (unlike libc.so, loaded directly by exec.c's own
+    // PT_INTERP code, never through here) is what exposed this: it
+    // surfaced to userspace as a misleading EPERM, since musl's
+    // __syscall_ret() maps any bare kernel -1 return to errno 1.
+    // allocuvm() above already memset() zeroed every newly allocated
+    // page, so simply not reading into the overhang leaves it zero,
+    // exactly like a real mmap's beyond-EOF behavior.
+    loadlen = (uint)offset >= f->ip->size ? 0 : f->ip->size - (uint)offset;
+    if(loadlen > (uint)len)
+      loadlen = (uint)len;
+    if(loadlen > 0 && loaduvm(curproc->pgdir, (char*)(uintp)base, f->ip, (uint)offset, loadlen) < 0){
       iunlock(f->ip);
       return -1;
     }

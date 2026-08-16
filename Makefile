@@ -156,18 +156,6 @@ $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# poc.img layout: sector 0 = bootblock (stage 1, signed - see below),
-# sectors 1..256 = boot2 (stage 2, zero-padded to exactly that many
-# sectors - see boot/bootmain.c's own STAGE2_SECTORS and boot/
-# boot2main.c's matching KERNEL_LBA), sector 257 onward = the kernel
-# ELF image itself, exactly where it always was relative to stage 1
-# before stage 2 existed, just shifted by stage 2's own footprint.
-$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/boot2 $(BUILD)/kernel | $(BUILD)
-	dd if=/dev/zero of=$(BUILD)/poc.img count=10000
-	dd if=$(BUILD)/bootblock of=$(BUILD)/poc.img conv=notrunc
-	dd if=$(BUILD)/boot2 of=$(BUILD)/poc.img seek=1 conv=notrunc
-	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=257 conv=notrunc
-
 $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/pocmemfs.img count=10000
 	dd if=$(BUILD)/bootblock of=$(BUILD)/pocmemfs.img conv=notrunc
@@ -188,40 +176,12 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
 
-# boot2main.c (stage 2): unlike bootmain.c (stage 1), no 510-byte
-# budget - the generic $(OBJDIR)/boot/%.o pattern's normal -O2 is fine
-# - but still freestanding (-nostdinc, -fno-pic) like every boot/ file.
-$(OBJDIR)/boot/boot2main.o: boot/boot2main.c | $(OBJDIR)/boot
-	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -nostdinc -c -o $@ $<
-
-# BOOT2_MAX_SECTORS must match boot/bootmain.c's own STAGE2_SECTORS -
-# how many sectors stage 1 reads stage 2 into before jumping to it.
-# Linked to run at 0x10000 (boot/bootmain.c's STAGE2_ADDR) with -N (no
-# separate page-aligned segments - same reason bootblock itself uses
-# it: this raw-binary-extracted image can only have one contiguous
-# blob, not a gap-separated set of segments) and -e entry2 - boot/
-# boot2asm.o's own tiny stub, linked *first* (see that file's own
-# comment for why -e alone, or source-order alone, isn't enough once
-# this gets flattened to a raw binary and jumped to by hardcoded
-# address).
-BOOT2_MAX_SECTORS = 256
-$(BUILD)/boot2: $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o | $(BUILD)
-	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x10000 -o $(OBJDIR)/boot/boot2.o $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o
-	$(OBJDUMP) -S $(OBJDIR)/boot/boot2.o > $(BUILD)/boot2.dis
-	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2.o $(BUILD)/boot2
-	size=$$(stat -f%z $(BUILD)/boot2 2>/dev/null || stat -c%s $(BUILD)/boot2); \
-	max=$$(( $(BOOT2_MAX_SECTORS) * 512 )); \
-	if [ "$$size" -gt "$$max" ]; then \
-		echo "boot2 too large: $$size bytes (max $$max, $(BOOT2_MAX_SECTORS) sectors)" >&2; \
-		exit 1; \
-	fi
-
 # ============================================================
 # BIOS/INT13h boot path: real hardware (legacy IDE, or SATA in
 # AHCI mode via a real BIOS/CSM AHCI driver, or booted from USB),
 # VirtualBox, and QEMU all boot through BIOS/CSM firmware's own
-# INT13h disk services - unlike the ATA-PIO path above (poc.img,
-# fs.img as a *separate* drive), which only works when the disk is
+# INT13h disk services - unlike the original ATA-PIO path (removed;
+# fs.img as a *separate* drive), which only worked when the disk was
 # attached as an emulated/real legacy IDE hard disk. See boot/
 # bootasm_bios.asm's and boot/boot2_bios.asm's own comments for the
 # full reasoning. Everything here - bootloader, kernel, and the
@@ -864,6 +824,30 @@ $(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
 	$(LD) -m elf_x86_64 -shared -e _dlstart -z defs -o $@ $^
 	$(OBJCOPY) --strip-debug $@
 	$(OBJCOPY) --strip-unneeded $@
+
+# libgui.so (GUI roadmap phase 7): a real second shared object,
+# DT_NEEDED-linked by every gui/ client instead of statically
+# duplicating this code into each one (rasterizer + font rendering +
+# the bespoke client wire protocol - see gui/libgui/'s own files).
+# Unlike libc.so above, this is a normal shared library loaded via
+# ld.so's own DT_NEEDED walk (musl/ldso/dynlink.c's load_library(),
+# real unmodified upstream code, confirmed to already work for
+# anything libc.so itself needs) - not an ELF interpreter, so no -e
+# entry point, and no explicit -soname: consuming binaries link with
+# -lgui -L $(BUILD), which records a plain "libgui.so" DT_NEEDED
+# entry, found at runtime via ld.so's default /lib:/usr/local/lib:
+# /usr/lib search path once installed at /usr/lib/libgui.so (see
+# MKFS_INSTALL below) - exactly how /usr/lib/libc.so itself is
+# already found today, just for a second .so for the first time.
+$(BUILD)/libgui.so: $(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
+                     $(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+                     $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -shared -z defs -o $@ \
+		$(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
+		$(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/libgui.dis
+	$(OBJCOPY) --strip-debug $@
 
 # Scrt1: musl/crt/Scrt1.c is just "#include crt1.c" (see musl/crt/
 # crt1.c) - the *-fPIC compiled* variant of the same _start real musl
@@ -1613,6 +1597,17 @@ $(OBJDIR)/bash-pic/poc/%.o: bash/poc/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
 
+# gui/ (GUI roadmap phases 6-10: libgui.so + compositor/login/terminal
+# clients) isn't under bash/, so it needs its own explicit pattern rule
+# - same BASH_PIC_CFLAGS/BASH_INC environment as bash-pic/poc/%.o
+# above (proven by fbtest.c/guitest.c/bashpipetest.c's own needs:
+# fork/pipe/mmap/ioctl and bash_prelude.h's uname/getrlimit/times
+# shims), plus -Igui/libgui so any gui/*.c can #include "libgui.h"
+# without a relative path.
+$(OBJDIR)/gui-pic/%.o: gui/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libgui -c -o $@ $<
+
 $(OBJDIR)/bash-pic/poc/builtins/%.o: bash/poc/builtins/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
@@ -1823,93 +1818,40 @@ $(BUILD)/_su: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/su.o $(BUILD
 	$(OBJDUMP) -S $@ > $(BUILD)/su.dis
 	$(OBJCOPY) --strip-debug $@
 
-# rawtest: throwaway diagnostic for the raw-mode/ioctl kernel groundwork
-# (kernel/console.c, kernel/sysproc.c's sys_ioctl()) - see bash/poc/
-# rawtest.c's own comment. Same Scrt1.o+libc.so PIE recipe as _dinit
-# above, using the existing generic $(OBJDIR)/bash-pic/poc/%.o pattern
-# rule (no dedicated compile rule needed - rawtest.c is plain musl-
-# linked C, not bash source, but that rule's BASH_PIC_CFLAGS/BASH_INC
-# work fine for it unchanged).
-$(BUILD)/_rawtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/rawtest.dis
+# compositor: gui/compositor.c's own comment - GUI roadmap phase 8's
+# real yutani-equivalent daemon. Compiled via the gui-pic/%.o generic
+# pattern rule above (already has -Igui/libgui built in), linked
+# against libgui.so (rasterizer/font) same as libguitest above.
+$(BUILD)/_compositor: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/compositor.o \
+                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/compositor.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/compositor.dis
 	$(OBJCOPY) --strip-debug $@
 
-# fbtest: see bash/poc/fbtest.c's own comment - a throwaway diagnostic
-# for the VBE linear-framebuffer driver, same Scrt1.o+libc.so PIE
-# recipe as rawtest above.
-$(BUILD)/_fbtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/fbtest.dis
+# login_gui: gui/login_gui.c's own comment - GUI roadmap phase 9's
+# graphical login screen. Compiled via the gui-pic/%.o generic pattern
+# rule (already has -Igui/libgui built in), linked against libgui.so
+# same as compositor above.
+$(BUILD)/_login_gui: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.o \
+                      $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/login_gui.dis
 	$(OBJCOPY) --strip-debug $@
 
-# socktest/shmtest/epolltest/mousetest: throwaway diagnostics for the
-# Wayland IPC primitives + PS/2 mouse driver (GUI roadmap phase 3) -
-# see each source file's own comment. Same Scrt1.o+libc.so PIE recipe
-# as fbtest/rawtest above.
-$(BUILD)/_socktest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/socktest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/socktest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/socktest.dis
-	$(OBJCOPY) --strip-debug $@
-
-$(BUILD)/_shmtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/shmtest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/shmtest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/shmtest.dis
-	$(OBJCOPY) --strip-debug $@
-
-$(BUILD)/_epolltest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/epolltest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/epolltest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/epolltest.dis
-	$(OBJCOPY) --strip-debug $@
-
-$(BUILD)/_mousetest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/mousetest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/mousetest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/mousetest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# wltest: see bash/poc/wltest.c's own comment - a throwaway diagnostic
-# for a minimal, wire-correct Wayland handshake (GUI roadmap phase 4).
-# Same Scrt1.o+libc.so PIE recipe as fbtest/socktest above; wire.h is
-# header-only (included by wltest.c), no separate object of its own.
-$(BUILD)/_wltest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/wltest.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/wltest.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/wltest.dis
-	$(OBJCOPY) --strip-debug $@
-
-# curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
-# port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
-# include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
-# rule's BASH_INC, hence its own compile rule rather than reusing that
-# pattern outright (same reasoning as rawtest.o not needing one).
-# curses/curses.o itself is a $(CURSES_PIC_CFLAGS) object (see that
-# variable's own comment), linked straight into this PIE like
-# BASH_OBJS/COREUTILS_*_GNULIB_OBJS are into _bash/_true, not through
-# libc.so.
-$(OBJDIR)/bash-pic/poc/curses_test.o: bash/poc/curses_test.c $(MUSL_GENH)
-	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) -Icurses/include $(BASH_INC) -c -o $@ $<
-
-$(BUILD)/_curses_test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
-		$(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
-		$(OBJDIR)/curses-pic/curses.o \
-		-L $(BUILD) -lc
-	$(OBJDUMP) -S $@ > $(BUILD)/curses_test.dis
+# terminal: gui/terminal.c's own comment - GUI roadmap phase 10's
+# terminal emulator client. Compiled via the gui-pic/%.o generic
+# pattern rule (already has -Igui/libgui built in), linked against
+# libgui.so same as compositor/login_gui above.
+$(BUILD)/_terminal: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
+                     $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/terminal.dis
 	$(OBJCOPY) --strip-debug $@
 
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
@@ -1950,6 +1892,9 @@ MKFS_INSTALL_DEPS = $(BUILD)/_dinit
 # segment (--dynamic-linker /usr/lib/libc.so above) as the dynamic
 # linker to load. Kept deliberately small - see $(BUILD)/_ghead's own
 # comment above for why head/tr/cut aren't here too (MAXFILE).
+MKFS_INSTALL += usr/lib/libgui.so:$(BUILD)/libgui.so
+MKFS_INSTALL_DEPS += $(BUILD)/libgui.so
+
 MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \
 	usr/bin/echo:$(BUILD)/_gecho usr/bin/basename:$(BUILD)/_basename \
@@ -1987,19 +1932,6 @@ MKFS_INSTALL_DEPS += $(BUILD)/_ls
 MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
 MKFS_INSTALL_DEPS += $(BUILD)/_bash
 
-# rawtest: see $(BUILD)/_rawtest's own comment - a throwaway diagnostic
-# for the raw-mode/ioctl kernel groundwork the later curses/nano stages
-# depend on, kept installed since it's small and doubles as a
-# regression check for that groundwork going forward.
-MKFS_INSTALL += usr/bin/rawtest:$(BUILD)/_rawtest
-MKFS_INSTALL_DEPS += $(BUILD)/_rawtest
-
-# curses_test: see $(BUILD)/_curses_test's own comment - a throwaway
-# diagnostic for the curses layer, kept installed for the same
-# regression-check reasoning as rawtest.
-MKFS_INSTALL += usr/bin/curses_test:$(BUILD)/_curses_test
-MKFS_INSTALL_DEPS += $(BUILD)/_curses_test
-
 # nano: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
 # bash/coreutils above - see $(BUILD)/_nano's own comment.
 MKFS_INSTALL += usr/bin/nano:$(BUILD)/_nano
@@ -2014,31 +1946,16 @@ MKFS_INSTALL += usr/bin/login:$(BUILD)/_login usr/bin/su:$(BUILD)/_su \
 	etc/passwd:etc/passwd etc/group:etc/group
 MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 
-# fbtest: see $(BUILD)/_fbtest's own comment - a throwaway diagnostic
-# for the VBE linear-framebuffer driver, kept installed for the same
-# regression-check reasoning as rawtest/curses_test.
-MKFS_INSTALL += usr/bin/fbtest:$(BUILD)/_fbtest
-MKFS_INSTALL_DEPS += $(BUILD)/_fbtest
-
-# socktest/shmtest/epolltest/mousetest: see their own Makefile build
-# rules above - throwaway diagnostics for the Wayland IPC primitives +
-# PS/2 mouse driver (GUI roadmap phase 3), kept installed for the same
-# regression-check reasoning as fbtest/rawtest/curses_test.
-MKFS_INSTALL += usr/bin/socktest:$(BUILD)/_socktest
-MKFS_INSTALL_DEPS += $(BUILD)/_socktest
-MKFS_INSTALL += usr/bin/shmtest:$(BUILD)/_shmtest
-MKFS_INSTALL_DEPS += $(BUILD)/_shmtest
-MKFS_INSTALL += usr/bin/epolltest:$(BUILD)/_epolltest
-MKFS_INSTALL_DEPS += $(BUILD)/_epolltest
-MKFS_INSTALL += usr/bin/mousetest:$(BUILD)/_mousetest
-MKFS_INSTALL_DEPS += $(BUILD)/_mousetest
-
-# wltest: see $(BUILD)/_wltest's own comment - a throwaway diagnostic
-# for a minimal, wire-correct Wayland handshake (GUI roadmap phase 4),
-# kept installed for the same regression-check reasoning as the other
-# poc/*test binaries.
-MKFS_INSTALL += usr/bin/wltest:$(BUILD)/_wltest
-MKFS_INSTALL_DEPS += $(BUILD)/_wltest
+# compositor/login_gui/terminal: see their own Makefile build rules
+# above - GUI roadmap phases 8-10's real compositor daemon, graphical
+# login screen, and terminal emulator (what dinit.c actually boots
+# into by default - see its own comment).
+MKFS_INSTALL += usr/bin/compositor:$(BUILD)/_compositor
+MKFS_INSTALL_DEPS += $(BUILD)/_compositor
+MKFS_INSTALL += usr/bin/login_gui:$(BUILD)/_login_gui
+MKFS_INSTALL_DEPS += $(BUILD)/_login_gui
+MKFS_INSTALL += usr/bin/terminal:$(BUILD)/_terminal
+MKFS_INSTALL_DEPS += $(BUILD)/_terminal
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
@@ -2054,22 +1971,6 @@ clean:
 	rm -rf $(BUILD)
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg .gdbinit
 
-# make a printout
-FILES = $(shell grep -v '^\#' tools/runoff.list)
-PRINT = tools/runoff.list tools/runoff.spec README docs/toc.hdr docs/toc.ftr $(FILES)
-
-poc.pdf: $(PRINT)
-	./tools/runoff
-	ls -l poc.pdf
-
-print: poc.pdf
-
-# run in emulators
-
-bochs : $(BUILD)/fs.img $(BUILD)/poc.img
-	if [ ! -e .bochsrc ]; then ln -s dot-bochsrc .bochsrc; fi
-	bochs -q
-
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
 # QEMU's gdb stub command line changed in 0.11
@@ -2079,20 +1980,19 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -drive file=$(BUILD)/fs.img,index=1,media=disk,format=raw -drive file=$(BUILD)/poc.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
 # poc_bios.img (boot/bootasm_bios.asm+boot2_bios.asm, BIOS/INT13h) is
 # one combined disk image - fs.img is already embedded in it (see its
-# own build rule's comment) - unlike poc.img+fs.img's two separate
-# drives, so this needs only one -drive, not two. This is the image the
-# VBE linear-framebuffer driver (boot2_bios.asm's setup_vbe,
-# kernel/vbe.c) actually lives in - poc.img's bootasm.asm switches to
-# protected mode in its very first boot sector, with no real-mode
-# window left for VBE's BIOS calls at all - and boots identically under
-# QEMU/VirtualBox's BIOS emulation, not just real hardware, so this is
-# now the default `all`/`run`/`qemu`/`qemu-nox`/`qemu-gdb` target
-# rather than a separate real-hardware-only path. poc.img/QEMUOPTS
-# above still build and work if ever needed directly.
+# own build rule's comment), so this needs only one -drive. This is the
+# image the VBE linear-framebuffer driver (boot2_bios.asm's setup_vbe,
+# kernel/vbe.c) actually lives in - the original ATA-PIO boot path
+# (bootasm.asm) switched to protected mode in its very first boot
+# sector, with no real-mode window left for VBE's BIOS calls at all,
+# and was removed once this BIOS/INT13h path proved it boots
+# identically under QEMU/VirtualBox's BIOS emulation, not just real
+# hardware - see the pocmemfs.img rule above for the one other thing
+# (bootasm.asm/bootmain.c/bootblock) still shared with that removed
+# path.
 QEMUOPTS_BIOS = -drive file=$(BUILD)/poc_bios.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
 # `run` launches QEMU detached from this shell's stdio (</dev/null so
@@ -2121,45 +2021,4 @@ qemu-nox-gdb: $(BUILD)/poc_bios.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -nographic $(QEMUOPTS_BIOS) -S $(QEMUGDB)
 
-# CUT HERE
-# prepare dist for students
-# after running make dist, probably want to
-# rename it to rev0 or rev1 or so on and then
-# check in that version.
-
-EXTRA=\
-	mkfs/mkfs.c user/ulib.c include/user.h\
-	user/printf.c user/umalloc.c\
-	README dot-bochsrc tools/*.pl docs/toc.* tools/runoff tools/runoff1 tools/runoff.list\
-	.gdbinit.tmpl tools/gdbutil\
-
-dist:
-	rm -rf dist
-	mkdir dist
-	for i in $(FILES); \
-	do \
-		grep -v PAGEBREAK $$i >dist/$$i; \
-	done
-	sed '/CUT HERE/,$$d' Makefile >dist/Makefile
-	echo >dist/tools/runoff.spec
-	cp $(EXTRA) dist
-
-dist-test:
-	rm -rf dist
-	make dist
-	rm -rf dist-test
-	mkdir dist-test
-	cp dist/* dist-test
-	cd dist-test; $(MAKE) print
-	cd dist-test; $(MAKE) bochs || true
-	cd dist-test; $(MAKE) qemu
-
-# update this rule (change rev#) when it is time to
-# make a new revision.
-tar:
-	rm -rf /tmp/poc
-	mkdir -p /tmp/poc
-	cp dist/* dist/.gdbinit.tmpl /tmp/poc
-	(cd /tmp; tar cf - poc) | gzip >poc-rev10.tar.gz  # the next one will be 10 (9/17)
-
-.PHONY: all run clean dist-test dist tags print
+.PHONY: all run clean tags

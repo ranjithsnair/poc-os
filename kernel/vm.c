@@ -565,6 +565,31 @@ copyuvm(pde_t *pgdir, uintp sz)
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
+    // Device memory (the framebuffer's real VRAM, mapped by
+    // kernel/sysproc.c's sys_mmap() FRAMEBUFFER branch - always
+    // pa >= PHYSTOP, the same test deallocuvm() below already uses to
+    // recognize "not ordinary kalloc()'d RAM, don't kfree() it") is
+    // shared with the child directly, by mapping the same physical
+    // page again, rather than copied: real mmap()'d device memory
+    // stays shared across fork() on a real OS (the child sees the
+    // same live VRAM, not a frozen snapshot from fork() time), and
+    // copying it here isn't just semantically wrong but was
+    // impossible outright - P2V(pa) (include/memlayout.h) for a VRAM
+    // address this high (e.g. a real BIOS/QEMU VBE framebuffer at
+    // 0xfd000000) silently wraps around 64-bit arithmetic
+    // (KERNBASE=0xFFFFFFFF80000000 + 0xfd000000 overflows to
+    // 0x7d000000, not a valid kernel address), producing a bogus
+    // source pointer for the memmove() below and panicking the
+    // kernel on the very next fork() any process with the framebuffer
+    // mapped ever made - found via a real GDB backtrace (no prior
+    // test program had ever both mmap()'d the framebuffer and called
+    // fork(), so this was never exercised before GUI roadmap phase 7
+    // (libguitest.c) did both).
+    if(pa >= PHYSTOP){
+      if(mappages(d, (void*)i, PGSIZE, pa, PTE_FLAGS(*pte)) < 0)
+        goto bad;
+      continue;
+    }
     // PTE_SHM (include/mmu.h) is stripped here: this loop already
     // gives the child its own freshly kalloc()'d, physically distinct
     // copy of the page (fork() has no real COW in this kernel) - a

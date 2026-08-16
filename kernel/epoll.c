@@ -15,6 +15,7 @@
 #include "types.h"
 #include "defs.h"
 #include "param.h"
+#include "stat.h"
 #include "mmu.h"
 #include "proc.h"
 #include "fs.h"
@@ -47,10 +48,20 @@ struct epollfd {
 // Readiness for one fd, by file type - pipes and sockets have real
 // queued/available-space state to check (kernel/pipe.c's
 // pipereadable()/pipewritable(), kernel/socket.c's sockreadable()/
-// sockwritable()); anything else (regular files, console, framebuffer,
-// ...) is always considered ready, the common minimal-epoll shortcut
-// (matches how this kernel already treats regular-file mmap/read as
-// never truly blocking).
+// sockwritable()), and so, as of GUI roadmap phase 8, do the console
+// and mouse *devices* specifically (kernel/console.c's
+// consolereadable(), kernel/mouse.c's mousereadable()) - both have
+// genuinely blocking read()s (waiting for a real keystroke/PS/2
+// packet), unlike an ordinary disk file, where read() never blocks
+// waiting for more data to arrive. Getting this wrong for a device fd
+// isn't just an inefficiency the way it is for a ready-anyway regular
+// file: gui/compositor.c (the first program to epoll a device fd
+// alongside a real socket) would otherwise have epoll_wait() report
+// the mouse fd ready before any real packet existed, then hang its
+// entire event loop on that read() forever - the listening socket
+// never gets a chance to accept() a single client. Every *other*
+// FD_INODE (regular files, the framebuffer) keeps the old always-
+// ready default, the common minimal-epoll shortcut.
 static int
 fdready(struct file *f, int forwrite)
 {
@@ -61,6 +72,12 @@ fdready(struct file *f, int forwrite)
     return forwrite ? pipewritable(f->pipe) : pipereadable(f->pipe);
   case FD_SOCK:
     return forwrite ? sockwritable(f->sock) : sockreadable(f->sock);
+  case FD_INODE:
+    if(f->ip->type == T_DEV && f->ip->major == CONSOLE)
+      return forwrite ? 1 : consolereadable();
+    if(f->ip->type == T_DEV && f->ip->major == MOUSE)
+      return forwrite ? 0 : mousereadable();
+    return 1;
   default:
     return 1;
   }

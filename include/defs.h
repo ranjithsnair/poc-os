@@ -28,6 +28,7 @@ void            consoleintr(int(*)(void));
 void            consolegettermios(struct termios*);
 void            consolesettermios(struct termios*);
 void            consolegetwinsize(struct winsize*);
+int             consolereadable(void);
 void            panic(char*) __attribute__((noreturn));
 
 // exec.c
@@ -86,6 +87,7 @@ void            kbdintr(void);
 // mouse.c (GUI roadmap phase 3)
 void            mouseinit(void);
 void            mouseintr(void);
+int             mousereadable(void);
 
 // lapic.c
 void            cmostime(struct rtcdate *r);
