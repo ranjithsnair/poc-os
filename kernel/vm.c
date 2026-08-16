@@ -338,7 +338,17 @@ deallocuvm(pde_t *pgdir, uintp oldsz, uintp newsz)
       // that exact panic the moment any process holding such a
       // mapping exits/execs/shrinks. Just drop the mapping; there is
       // nothing to return to the allocator.
-      if(pa < PHYSTOP){
+      //
+      // PTE_SHM (include/mmu.h) is the same idea for a different
+      // reason: kernel/shm.c's shared-memory pages *are* ordinary
+      // kalloc()'d RAM (always < PHYSTOP), but - unlike every other
+      // anonymous page reaching this loop - may still be mapped into a
+      // second process's page table too. Freeing one process's mapping
+      // here would yank memory out from under whoever else has it
+      // mapped; the actual free happens once, in shmclose(), only
+      // after the shm object's own struct file ref count (shared
+      // across every fd/process referencing it) reaches zero.
+      if(pa < PHYSTOP && !(*pte & PTE_SHM)){
         char *v = P2V(pa);
         kfree(v);
       }
@@ -555,7 +565,16 @@ copyuvm(pde_t *pgdir, uintp sz)
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
-    flags = PTE_FLAGS(*pte);
+    // PTE_SHM (include/mmu.h) is stripped here: this loop already
+    // gives the child its own freshly kalloc()'d, physically distinct
+    // copy of the page (fork() has no real COW in this kernel) - a
+    // child that inherited a shm mapping this way is no longer
+    // sharing anything with the shmobj it came from, so its copy must
+    // go back to being an ordinary, normally-freed anonymous page.
+    // Leaving the flag set would make deallocuvm() skip kfree()ing it
+    // forever (mistaking it for a still-shared page), leaking it on
+    // every such child's exit.
+    flags = PTE_FLAGS(*pte) & ~PTE_SHM;
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);

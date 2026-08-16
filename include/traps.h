@@ -33,6 +33,7 @@
 #define IRQ_KBD          1
 #define IRQ_COM1         4
 #define IRQ_IDE         14
+#define IRQ_MOUSE       12      // PS/2 aux (mouse) port - kernel/mouse.c
 #define IRQ_ERROR       19
 #define IRQ_SPURIOUS    31
 

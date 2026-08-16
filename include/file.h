@@ -1,15 +1,18 @@
 // An open file: what a process's file-descriptor table (proc->ofile[])
-// points at. Only one of pipe/ip is meaningful, depending on type; off
-// is this open file's own read/write cursor (each open() of the same
-// path gets an independent one, even though the underlying inode is
-// shared).
+// points at. Only one of pipe/ip/sock/shm is meaningful, depending on
+// type; off is this open file's own read/write cursor (each open() of
+// the same path gets an independent one, even though the underlying
+// inode is shared).
 struct file {
-  enum { FD_NONE, FD_PIPE, FD_INODE } type;
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_SOCK, FD_SHM, FD_EPOLL } type;
   int ref; // reference count
   char readable;
   char writable;
   struct pipe *pipe;
   struct inode *ip;
+  struct socket *sock;
+  struct shmobj *shm;
+  struct epollfd *epoll;
   uint off;
 };
 
@@ -46,3 +49,4 @@ extern struct devsw devsw[];
 
 #define CONSOLE 1
 #define FRAMEBUFFER 2
+#define MOUSE 3

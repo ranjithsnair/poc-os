@@ -34,10 +34,13 @@ main(void)
   uartinit();      // serial port
   vbeinit();       // linear framebuffer, if boot/boot2_bios.asm found one -
                    // after uartinit() so its result line reaches serial too
+  mouseinit();     // PS/2 mouse (GUI roadmap phase 3)
   pinit();         // process table
   tvinit();        // trap vectors
   binit();         // buffer cache
   fileinit();      // file table
+  sockinit();      // AF_UNIX socket table (GUI roadmap phase 3)
+  shminit();       // shared-memory object table (GUI roadmap phase 3)
   ideinit();       // disk
   startothers();   // start other processors
   // Starts right past the ramdisk (RAMDISK_PADDR..RAMDISK_PADDR+

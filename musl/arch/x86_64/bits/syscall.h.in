@@ -55,3 +55,15 @@
 #define __NR_chown    54
 #define __NR_fchown   55
 #define __NR_umask    56
+#define __NR_socket   57
+#define __NR_bind     58
+#define __NR_listen   59
+#define __NR_accept   60
+#define __NR_connect  61
+#define __NR_sendmsg  62
+#define __NR_recvmsg  63
+#define __NR_socketpair 64
+#define __NR_shm_create 65
+#define __NR_epoll_create1 66
+#define __NR_epoll_ctl 67
+#define __NR_epoll_pwait 68

@@ -128,6 +128,17 @@ struct segdesc {
 #define PTE_W           0x002   // Writeable
 #define PTE_U           0x004   // User
 #define PTE_PS           0x080   // Page Size
+// Bit 9: one of the x86 PTE format's "available for OS use" bits
+// (9-11), otherwise unused by hardware or by this kernel. Marks a leaf
+// PTE as pointing at a refcounted, possibly multiply-mapped shm page
+// (kernel/shm.c) rather than a normal single-owner anonymous page -
+// see kernel/vm.c's deallocuvm(), which must skip kfree()ing these
+// (freeing happens instead in shmclose() once the object's own refcnt
+// hits 0 - the same reason phase 2's framebuffer mapping needed a
+// similar deallocuvm() skip, just via a PHYSTOP check there since VRAM
+// is never < PHYSTOP to begin with, unlike shm's ordinary kalloc()'d
+// pages).
+#define PTE_SHM          0x200
 
 // Address in page table or page directory entry
 #define PTE_ADDR(pte)   ((uintp)(pte) & ~0xFFF)

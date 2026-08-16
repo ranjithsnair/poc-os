@@ -8,6 +8,7 @@ OBJS = \
 	$(OBJDIR)/kernel/acpi.o\
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
+	$(OBJDIR)/kernel/epoll.o\
 	$(OBJDIR)/kernel/exec.o\
 	$(OBJDIR)/kernel/file.o\
 	$(OBJDIR)/kernel/fs.o\
@@ -18,15 +19,19 @@ OBJS = \
 	$(OBJDIR)/kernel/lapic.o\
 	$(OBJDIR)/kernel/log.o\
 	$(OBJDIR)/kernel/main.o\
+	$(OBJDIR)/kernel/mouse.o\
 	$(OBJDIR)/kernel/mp.o\
 	$(OBJDIR)/kernel/picirq.o\
 	$(OBJDIR)/kernel/pipe.o\
 	$(OBJDIR)/kernel/proc.o\
+	$(OBJDIR)/kernel/shm.o\
 	$(OBJDIR)/kernel/sleeplock.o\
+	$(OBJDIR)/kernel/socket.o\
 	$(OBJDIR)/kernel/spinlock.o\
 	$(OBJDIR)/kernel/string.o\
 	$(OBJDIR)/kernel/syscall.o\
 	$(OBJDIR)/kernel/sysfile.o\
+	$(OBJDIR)/kernel/sysnet.o\
 	$(OBJDIR)/kernel/sysproc.o\
 	$(OBJDIR)/kernel/trap.o\
 	$(OBJDIR)/kernel/uart.o\
@@ -828,6 +833,14 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/multibyte/btowc.o \
 	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_init.o \
 	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_destroy.o \
+	$(OBJDIR)/musl-pic/src/network/socket.o \
+	$(OBJDIR)/musl-pic/src/network/bind.o \
+	$(OBJDIR)/musl-pic/src/network/listen.o \
+	$(OBJDIR)/musl-pic/src/network/accept.o \
+	$(OBJDIR)/musl-pic/src/network/connect.o \
+	$(OBJDIR)/musl-pic/src/network/sendmsg.o \
+	$(OBJDIR)/musl-pic/src/network/recvmsg.o \
+	$(OBJDIR)/musl-pic/src/linux/epoll.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -1834,6 +1847,49 @@ $(BUILD)/_fbtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o
 	$(OBJDUMP) -S $@ > $(BUILD)/fbtest.dis
 	$(OBJCOPY) --strip-debug $@
 
+# socktest/shmtest/epolltest/mousetest: throwaway diagnostics for the
+# Wayland IPC primitives + PS/2 mouse driver (GUI roadmap phase 3) -
+# see each source file's own comment. Same Scrt1.o+libc.so PIE recipe
+# as fbtest/rawtest above.
+$(BUILD)/_socktest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/socktest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/socktest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/socktest.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_shmtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/shmtest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/shmtest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/shmtest.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_epolltest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/epolltest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/epolltest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/epolltest.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_mousetest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/mousetest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/mousetest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/mousetest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# wltest: see bash/poc/wltest.c's own comment - a throwaway diagnostic
+# for a minimal, wire-correct Wayland handshake (GUI roadmap phase 4).
+# Same Scrt1.o+libc.so PIE recipe as fbtest/socktest above; wire.h is
+# header-only (included by wltest.c), no separate object of its own.
+$(BUILD)/_wltest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/wltest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/wltest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/wltest.dis
+	$(OBJCOPY) --strip-debug $@
+
 # curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
 # port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
 # include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
@@ -1963,6 +2019,26 @@ MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 # regression-check reasoning as rawtest/curses_test.
 MKFS_INSTALL += usr/bin/fbtest:$(BUILD)/_fbtest
 MKFS_INSTALL_DEPS += $(BUILD)/_fbtest
+
+# socktest/shmtest/epolltest/mousetest: see their own Makefile build
+# rules above - throwaway diagnostics for the Wayland IPC primitives +
+# PS/2 mouse driver (GUI roadmap phase 3), kept installed for the same
+# regression-check reasoning as fbtest/rawtest/curses_test.
+MKFS_INSTALL += usr/bin/socktest:$(BUILD)/_socktest
+MKFS_INSTALL_DEPS += $(BUILD)/_socktest
+MKFS_INSTALL += usr/bin/shmtest:$(BUILD)/_shmtest
+MKFS_INSTALL_DEPS += $(BUILD)/_shmtest
+MKFS_INSTALL += usr/bin/epolltest:$(BUILD)/_epolltest
+MKFS_INSTALL_DEPS += $(BUILD)/_epolltest
+MKFS_INSTALL += usr/bin/mousetest:$(BUILD)/_mousetest
+MKFS_INSTALL_DEPS += $(BUILD)/_mousetest
+
+# wltest: see $(BUILD)/_wltest's own comment - a throwaway diagnostic
+# for a minimal, wire-correct Wayland handshake (GUI roadmap phase 4),
+# kept installed for the same regression-check reasoning as the other
+# poc/*test binaries.
+MKFS_INSTALL += usr/bin/wltest:$(BUILD)/_wltest
+MKFS_INSTALL_DEPS += $(BUILD)/_wltest
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
