@@ -24,6 +24,32 @@
 #define RAMDISK_PADDR 0x400000
 #define RAMDISK_SIZE  2048000       // FSSIZE(4000) * BSIZE(512), param.h/fs.h
 
+// VBE_INFO_PADDR: where boot/boot2_bios.asm's real-mode VBE probe (see
+// its own comment) parks the struct vbeinfo (include/vbe.h) it builds -
+// read back by kernel/vbe.c's vbeinit() via P2V(). Physical 0x4000 sits
+// in the gap between stage 2's own code (0x1000-0x3000,
+// boot/bootasm_bios.asm's STAGE2_OFF/STAGE2_SECTORS) and its stack
+// (grows down from 0x9000, boot/boot2_bios.asm) - clear of the IVT
+// (0-0x3FF), the BDA (0x400-0x4FF), and the AP-trampoline range
+// (0x7000+) kernel/main.c's startothers() doesn't write until well
+// after the kernel has already read this out. 0x4100/0x4300 (also in
+// this gap) are transient real-mode scratch buffers for the VBE probe
+// itself - never read by the kernel.
+#define VBE_INFO_PADDR 0x4000
+
+// Written by boot/boot2_bios.asm's setup_vbe *last*, only once "Set VBE
+// Mode" has actually reported success - see include/vbe.h's struct
+// vbeinfo and kernel/vbe.c's vbeinit() for the C side that reads this
+// back and what an unwritten/mismatched magic means (graceful degrade
+// to text-only console, not a boot failure). A #define here rather
+// than in vbe.h itself: this header, unlike vbe.h, is included by both
+// C and boot/boot2_bios.asm's real-mode assembly (via the Makefile's
+// cpp-then-nasm pipeline) - vbe.h's C struct syntax would fail to
+// assemble if NASM ever saw it, so only the plain macros both sides
+// need to agree on live here, same reasoning as RAMDISK_PADDR/
+// RAMDISK_SIZE just above.
+#define VBE_INFO_MAGIC 0x31454256   // "VBE1" (little-endian dword)
+
 // Key addresses for address space layout (see kmap in vm.c for layout)
 //
 // KERNBASE is a canonical higher-half address (top -2GB, the same

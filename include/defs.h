@@ -181,6 +181,9 @@ void            uartinit(void);
 void            uartintr(void);
 void            uartputc(int);
 
+// vbe.c
+void            vbeinit(void);
+
 // vm.c
 void            seginit(void);
 void            kvmalloc(void);
@@ -188,6 +191,7 @@ pde_t*          setupkvm(void);
 char*           uva2ka(pde_t*, char*);
 int             allocuvm(pde_t*, uintp, uintp);
 int             deallocuvm(pde_t*, uintp, uintp);
+int             mapuvm_phys(pde_t*, uintp, uintp, uintp, int);
 void            freevm(pde_t*);
 void            inituvm(pde_t*, char*, uint);
 int             loaduvm(pde_t*, char*, struct inode*, uint, uint);

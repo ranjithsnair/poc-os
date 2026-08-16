@@ -32,6 +32,8 @@ main(void)
   ioapicinit();    // another interrupt controller
   consoleinit();   // console hardware
   uartinit();      // serial port
+  vbeinit();       // linear framebuffer, if boot/boot2_bios.asm found one -
+                   // after uartinit() so its result line reaches serial too
   pinit();         // process table
   tvinit();        // trap vectors
   binit();         // buffer cache

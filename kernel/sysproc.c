@@ -17,6 +17,10 @@
 #include "proc.h"
 #include "syscall.h"
 #include "termios.h"
+#include "vbe.h"
+#include "fb.h"
+
+extern struct vbeinfo vbe;
 
 int
 sys_fork(void)
@@ -136,9 +140,10 @@ sys_brk(void)
 }
 
 // (fd, request, argp): TCGETS/TCSETS(W/F)/TIOCGWINSZ on the console
-// device only - anything else fails, matching this OS's one real tty.
-// fd->struct file lookup duplicates sysfile.c's static argfd() (not
-// reachable from this file) rather than relocating the syscall there.
+// device, or FBIOGET_VSCREENINFO (include/fb.h) on the framebuffer
+// device - anything else, or any other device major, fails. fd->struct
+// file lookup duplicates sysfile.c's static argfd() (not reachable
+// from this file) rather than relocating the syscall there.
 int
 sys_ioctl(void)
 {
@@ -150,7 +155,31 @@ sys_ioctl(void)
     return -1;
   if(fd < 0 || fd >= NOFILE || (f = myproc()->ofile[fd]) == 0)
     return -1;
-  if(f->type != FD_INODE || f->ip->major != CONSOLE)
+  if(f->type != FD_INODE)
+    return -1;
+
+  if(f->ip->major == FRAMEBUFFER){
+    struct fb_info fi;
+
+    if(req != FBIOGET_VSCREENINFO || vbe.magic != VBE_INFO_MAGIC)
+      return -1;
+    if(argptr(2, &p, sizeof(fi)) < 0)
+      return -1;
+    fi.xres = vbe.xres;
+    fi.yres = vbe.yres;
+    fi.pitch = vbe.pitch;
+    fi.bpp = vbe.bpp;
+    fi.red_mask_size = vbe.red_mask_size;
+    fi.red_field_pos = vbe.red_field_pos;
+    fi.green_mask_size = vbe.green_mask_size;
+    fi.green_field_pos = vbe.green_field_pos;
+    fi.blue_mask_size = vbe.blue_mask_size;
+    fi.blue_field_pos = vbe.blue_field_pos;
+    memmove(p, &fi, sizeof(fi));
+    return 0;
+  }
+
+  if(f->ip->major != CONSOLE)
     return -1;
 
   switch(req){
@@ -237,6 +266,34 @@ sys_mmap(void)
   }
 
   n = PGROUNDUP((uint)len);
+
+  // Framebuffer device: map the real physical VRAM directly - not a
+  // kalloc()'d anonymous page (the usual allocuvm() path below) and
+  // not a copy of a file's own *content* (loaduvm()'s usual job) - the
+  // whole point is that writes land on the same physical memory the
+  // display hardware itself scans out. Must bypass allocuvm()/
+  // loaduvm() entirely, not just branch after them: allocuvm() would
+  // kalloc() and mappages() real anonymous pages into this same VA
+  // range first, and mappages() panics on remapping an already-present
+  // PTE.
+  if(f && f->ip->major == FRAMEBUFFER){
+    uint fbsize;
+
+    if(vbe.magic != VBE_INFO_MAGIC || (flags & MAP_FIXED))
+      return -1;
+    fbsize = PGROUNDUP(vbe.pitch * vbe.yres);
+    if(offset < 0 || (uint)offset + n > fbsize || (uint)offset + n < (uint)offset)
+      return -1;
+    base = curproc->sz;
+    if(mapuvm_phys(curproc->pgdir, base, n,
+                    PGROUNDDOWN(vbe.phys_base) + (uint)offset, PTE_W|PTE_U) < 0)
+      return -1;
+    curproc->sz = base + n;
+    switchuvm(curproc);
+    uvmsetperm(curproc->pgdir, base, n, (prot & PROT_WRITE) != 0);
+    return base;
+  }
+
   if((flags & MAP_FIXED) && (uint)addr < curproc->sz){
     base = (uint)addr;
     if(base % PGSIZE != 0 || base + n > curproc->sz || base + n < base)

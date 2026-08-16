@@ -30,6 +30,7 @@ OBJS = \
 	$(OBJDIR)/kernel/sysproc.o\
 	$(OBJDIR)/kernel/trap.o\
 	$(OBJDIR)/kernel/uart.o\
+	$(OBJDIR)/kernel/vbe.o\
 	$(OBJDIR)/kernel/vectors.o\
 	$(OBJDIR)/kernel/vm.o\
 
@@ -1823,6 +1824,16 @@ $(BUILD)/_rawtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest
 	$(OBJDUMP) -S $@ > $(BUILD)/rawtest.dis
 	$(OBJCOPY) --strip-debug $@
 
+# fbtest: see bash/poc/fbtest.c's own comment - a throwaway diagnostic
+# for the VBE linear-framebuffer driver, same Scrt1.o+libc.so PIE
+# recipe as rawtest above.
+$(BUILD)/_fbtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/fbtest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/fbtest.dis
+	$(OBJCOPY) --strip-debug $@
+
 # curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
 # port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
 # include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
@@ -1947,15 +1958,21 @@ MKFS_INSTALL += usr/bin/login:$(BUILD)/_login usr/bin/su:$(BUILD)/_su \
 	etc/passwd:etc/passwd etc/group:etc/group
 MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 
+# fbtest: see $(BUILD)/_fbtest's own comment - a throwaway diagnostic
+# for the VBE linear-framebuffer driver, kept installed for the same
+# regression-check reasoning as rawtest/curses_test.
+MKFS_INSTALL += usr/bin/fbtest:$(BUILD)/_fbtest
+MKFS_INSTALL_DEPS += $(BUILD)/_fbtest
+
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
 -include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d $(OBJDIR)/curses-pic/*.d $(OBJDIR)/nano-pic/*.d $(OBJDIR)/nano-pic/poc/*.d $(OBJDIR)/nano-pic/src/*.d $(OBJDIR)/nano-pic/lib/*.d $(OBJDIR)/nano-pic/lib/malloc/*.d
 
-all: $(BUILD)/poc.img $(BUILD)/fs.img
+all: $(BUILD)/poc_bios.img
 
 run: all
-	$(QEMU) $(QEMUOPTS) </dev/null >/dev/null 2>&1 &
+	$(QEMU) $(QEMUOPTS_BIOS) </dev/null >/dev/null 2>&1 &
 
 clean:
 	rm -rf $(BUILD)
@@ -1988,31 +2005,45 @@ CPUS := 2
 endif
 QEMUOPTS = -drive file=$(BUILD)/fs.img,index=1,media=disk,format=raw -drive file=$(BUILD)/poc.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
+# poc_bios.img (boot/bootasm_bios.asm+boot2_bios.asm, BIOS/INT13h) is
+# one combined disk image - fs.img is already embedded in it (see its
+# own build rule's comment) - unlike poc.img+fs.img's two separate
+# drives, so this needs only one -drive, not two. This is the image the
+# VBE linear-framebuffer driver (boot2_bios.asm's setup_vbe,
+# kernel/vbe.c) actually lives in - poc.img's bootasm.asm switches to
+# protected mode in its very first boot sector, with no real-mode
+# window left for VBE's BIOS calls at all - and boots identically under
+# QEMU/VirtualBox's BIOS emulation, not just real hardware, so this is
+# now the default `all`/`run`/`qemu`/`qemu-nox`/`qemu-gdb` target
+# rather than a separate real-hardware-only path. poc.img/QEMUOPTS
+# above still build and work if ever needed directly.
+QEMUOPTS_BIOS = -drive file=$(BUILD)/poc_bios.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+
 # `run` launches QEMU detached from this shell's stdio (</dev/null so
 # it can't be suspended by SIGTTIN when backgrounded, output silenced)
 # so it opens its own GUI window and the terminal is free again
 # immediately, instead of blocking until QEMU exits the way `qemu`
 # below does. Serial console and monitor fall back to virtual-console
 # tabs inside that window (Ctrl-Alt-2/3).
-qemu: $(BUILD)/fs.img $(BUILD)/poc.img
-	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+qemu: $(BUILD)/poc_bios.img
+	$(QEMU) -serial mon:stdio $(QEMUOPTS_BIOS)
 
 qemu-memfs: $(BUILD)/pocmemfs.img
 	$(QEMU) -drive file=$(BUILD)/pocmemfs.img,index=0,media=disk,format=raw -smp $(CPUS) -m 256
 
-qemu-nox: $(BUILD)/fs.img $(BUILD)/poc.img
-	$(QEMU) -nographic $(QEMUOPTS)
+qemu-nox: $(BUILD)/poc_bios.img
+	$(QEMU) -nographic $(QEMUOPTS_BIOS)
 
 .gdbinit: .gdbinit.tmpl
 	sed "s/localhost:1234/localhost:$(GDBPORT)/" < $^ > $@
 
-qemu-gdb: $(BUILD)/fs.img $(BUILD)/poc.img .gdbinit
+qemu-gdb: $(BUILD)/poc_bios.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
-	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB)
+	$(QEMU) -serial mon:stdio $(QEMUOPTS_BIOS) -S $(QEMUGDB)
 
-qemu-nox-gdb: $(BUILD)/fs.img $(BUILD)/poc.img .gdbinit
+qemu-nox-gdb: $(BUILD)/poc_bios.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
-	$(QEMU) -nographic $(QEMUOPTS) -S $(QEMUGDB)
+	$(QEMU) -nographic $(QEMUOPTS_BIOS) -S $(QEMUGDB)
 
 # CUT HERE
 # prepare dist for students

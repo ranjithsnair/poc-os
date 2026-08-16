@@ -40,6 +40,8 @@ BITS 16
 %define STAGE_BUF_SEG   0x5000   ; 0x5000:0 = phys 0x50000, low staging buffer
 %define CHUNK_SECTORS   32       ; 32*512=16KB per copy (read one CHS sector
                                   ; at a time within the chunk - see read_sector)
+%define VBE_CTRLBUF (VBE_INFO_PADDR+0x100)   ; transient VBE Controller Info buffer
+%define VBE_MODEBUF (VBE_INFO_PADDR+0x300)   ; transient VBE Mode Info buffer
 
 global entry2
 entry2:
@@ -73,6 +75,12 @@ entry2:
   mov dword [cur_lba], FS_IMG_LBA
   mov word [sectors_left], (RAMDISK_SIZE/512)
   call load_chunks
+
+  ; ---- Probe for a usable VBE linear-framebuffer mode and set it, if
+  ; found - see setup_vbe's own comment. Purely optional: any failure
+  ; just leaves VBE_INFO_PADDR unwritten and boot proceeds exactly as
+  ; it always has, straight into the protected-mode switch below.
+  call setup_vbe
 
   ; ---- Full, permanent switch to protected mode - same GDT, same
   ; CR0.PE sequence as boot/bootasm.asm's own (this file's brief
@@ -169,6 +177,195 @@ geomfail:
   cli
   hlt
   jmp $
+
+; setup_vbe: probes for a usable VBE (VESA BIOS Extensions) 32-bit-per-
+; pixel linear-framebuffer mode and, if one is found, sets it - real
+; mode only, same as every other routine in this file, called from
+; entry2 right before the final protected-mode switch. See
+; include/vbe.h and include/memlayout.h's VBE_INFO_PADDR/VBE_INFO_MAGIC
+; for the struct this writes and where.
+;
+; The fixed VESA "standard mode number" table (0x100-0x11B) tops out at
+; 24bpp - a real 32bpp linear-framebuffer mode exists on QEMU stdvga,
+; VirtualBox's VBE BIOS, and real VBE 2.0+ hardware alike, but only
+; under an OEM-specific mode number reachable by walking the BIOS's own
+; supported-mode list (VideoModePtr, from "Get Controller Info" below),
+; not the fixed table - hence the enumeration this routine does rather
+; than trying a short fixed list directly.
+;
+; Preference order 1024x768 -> 800x600 -> 640x480 (all near-universally
+; available on QEMU/VirtualBox/real VBE 2.0+ hardware) is implemented
+; as a single scan assigning each 32bpp-direct-color-LFB candidate a
+; preference rank and keeping the highest-ranked match seen so far -
+; not a separate pass per resolution.
+;
+; Clobbers ax/bx/cx/dx/si/di/es, same "no save/restore, nothing after
+; the call site depends on register state" convention load_chunks/
+; read_sector/etc already use in this file. Every failure path (VBE
+; unsupported at all, no matching mode found, Set Mode itself failing)
+; falls through to .done without ever writing VBE_INFO_MAGIC - boot
+; proceeds normally either way, see this routine's call site in entry2.
+setup_vbe:
+  ; ---- Get Controller Info (AX=4F00). ES:DI -> VBE_CTRLBUF (a
+  ; 512-byte buffer), pre-seeded with the "VBE2" signature to request
+  ; VBE 2.0+ fields (standard practice, not required by every BIOS but
+  ; harmless and costs nothing).
+  xor ax, ax
+  mov es, ax
+  mov di, VBE_CTRLBUF
+  mov dword [VBE_CTRLBUF], 0x32454256 ; 'VBE2' little-endian
+  mov ax, 0x4F00
+  int 0x10
+  cmp ax, 0x004F
+  jne .done                           ; no VBE at all
+
+  ; VideoModePtr (offset word at +14, segment word at +16) - DS=0
+  ; throughout this file (entry2's own prologue), so the data this call
+  ; just wrote is readable via plain DS-relative addressing with no es:
+  ; prefix, the same as every other fixed-address buffer here; only the
+  ; call itself needed an explicit ES:DI input pointer.
+  mov ax, [VBE_CTRLBUF+14]
+  mov [modelist_off], ax
+  mov ax, [VBE_CTRLBUF+16]
+  mov [modelist_seg], ax
+
+  mov word [best_mode], 0
+  mov word [best_rank], 0
+
+.scan_loop:
+  mov ax, [modelist_seg]
+  mov es, ax
+  mov si, [modelist_off]
+  mov ax, [es:si]                     ; next mode number in the list
+  cmp ax, 0xFFFF
+  je .scan_done
+  mov [cur_modenum], ax
+  add word [modelist_off], 2
+
+  ; Get Mode Info (AX=4F01) for this candidate. ES:DI -> VBE_MODEBUF (a
+  ; 256-byte buffer).
+  xor bx, bx
+  mov es, bx
+  mov di, VBE_MODEBUF
+  mov ax, 0x4F01
+  mov cx, [cur_modenum]
+  int 0x10
+  cmp ax, 0x004F
+  jne .scan_loop                      ; this candidate failed the query
+
+  ; ModeAttributes (word @+0): need bit0 (supported) and bit7 (linear
+  ; framebuffer available, VBE 2.0+).
+  mov ax, [VBE_MODEBUF+0]
+  test ax, 0x0001
+  jz .scan_loop
+  test ax, 0x0080
+  jz .scan_loop
+  ; MemoryModel (byte @+27): need 6 (direct color).
+  mov al, [VBE_MODEBUF+27]
+  cmp al, 6
+  jne .scan_loop
+  ; BitsPerPixel (byte @+25): need 32.
+  mov al, [VBE_MODEBUF+25]
+  cmp al, 32
+  jne .scan_loop
+
+  ; Resolution -> preference rank (higher wins; a later same-rank
+  ; candidate never replaces an earlier one - see .have_rank below).
+  mov ax, [VBE_MODEBUF+18]            ; XResolution
+  mov bx, [VBE_MODEBUF+20]            ; YResolution
+  cmp ax, 1024
+  jne .not1024
+  cmp bx, 768
+  jne .not1024
+  mov cx, 3
+  jmp .have_rank
+.not1024:
+  cmp ax, 800
+  jne .not800
+  cmp bx, 600
+  jne .not800
+  mov cx, 2
+  jmp .have_rank
+.not800:
+  cmp ax, 640
+  jne .scan_loop
+  cmp bx, 480
+  jne .scan_loop
+  mov cx, 1
+.have_rank:
+  cmp cx, [best_rank]
+  jle .scan_loop
+  mov [best_rank], cx
+  mov ax, [cur_modenum]
+  mov [best_mode], ax
+  jmp .scan_loop
+
+.scan_done:
+  cmp word [best_mode], 0
+  je .done                            ; enumerated fine, nothing usable found
+
+  ; ---- Set VBE Mode (AX=4F02). BX = mode | 0x4000 (bit14: use the
+  ; linear/flat framebuffer model, not the legacy banked-window one).
+  mov ax, 0x4F02
+  mov bx, [best_mode]
+  or bx, 0x4000
+  int 0x10
+  cmp ax, 0x004F
+  jne .done                           ; Set Mode itself failed
+
+  ; ---- Re-query the chosen mode's ModeInfoBlock - guaranteed to
+  ; already be sitting at VBE_MODEBUF from .scan_loop's last successful
+  ; Get Mode Info call on best_mode, but a fresh, defensive re-query
+  ; costs nothing and removes any assumption that the scan loop's
+  ; control flow reaches here with VBE_MODEBUF still valid.
+  xor bx, bx
+  mov es, bx
+  mov di, VBE_MODEBUF
+  mov ax, 0x4F01
+  mov cx, [best_mode]
+  int 0x10
+  cmp ax, 0x004F
+  jne .done
+
+  ; ---- Copy the fields this driver needs into the persistent struct
+  ; at VBE_INFO_PADDR - see include/vbe.h's struct vbeinfo for the
+  ; exact byte layout this must match. magic is written last, only
+  ; once every step above has actually succeeded.
+  mov eax, [VBE_MODEBUF+40]           ; PhysBasePtr
+  mov [VBE_INFO_PADDR+4], eax
+  movzx eax, word [VBE_MODEBUF+16]    ; BytesPerScanLine
+  mov [VBE_INFO_PADDR+8], eax
+  movzx eax, word [VBE_MODEBUF+18]    ; XResolution
+  mov [VBE_INFO_PADDR+12], eax
+  movzx eax, word [VBE_MODEBUF+20]    ; YResolution
+  mov [VBE_INFO_PADDR+16], eax
+  mov al, [VBE_MODEBUF+25]            ; BitsPerPixel
+  mov [VBE_INFO_PADDR+20], al
+  mov al, [VBE_MODEBUF+31]            ; RedMaskSize
+  mov [VBE_INFO_PADDR+21], al
+  mov al, [VBE_MODEBUF+32]            ; RedFieldPosition
+  mov [VBE_INFO_PADDR+22], al
+  mov al, [VBE_MODEBUF+33]            ; GreenMaskSize
+  mov [VBE_INFO_PADDR+23], al
+  mov al, [VBE_MODEBUF+34]            ; GreenFieldPosition
+  mov [VBE_INFO_PADDR+24], al
+  mov al, [VBE_MODEBUF+35]            ; BlueMaskSize
+  mov [VBE_INFO_PADDR+25], al
+  mov al, [VBE_MODEBUF+36]            ; BlueFieldPosition
+  mov [VBE_INFO_PADDR+26], al
+  mov byte [VBE_INFO_PADDR+27], 0     ; reserved pad
+
+  mov dword [VBE_INFO_PADDR], VBE_INFO_MAGIC   ; written LAST
+
+.done:
+  ret
+
+align 4
+modelist_off: dw 0
+modelist_seg: dw 0
+cur_modenum:  dw 0
+best_mode:    dw 0
+best_rank:    dw 0
 
 ; lba_to_chs: converts DWORD [cur_sec_lba] into cylinder/head/sector
 ; using [spt]/[heads] (get_geometry above). Sector is 1-based, per

@@ -185,6 +185,20 @@ static struct kmap {
  { (void*)DEVSPACE, DEVSPACE,      0x100000000, PTE_W}, // more devices
 };
 
+// Map [va, va+size) in a *user* process's own page table directly to
+// physical range [pa, pa+size) - a thin exported wrapper around the
+// file-static mappages() above, the same idea as kmapphys() below for
+// the kernel's own page table. The one caller today is kernel/
+// sysproc.c's sys_mmap() FRAMEBUFFER path: the one case mmap() needs
+// to hand a process a specific physical address (real VRAM) it doesn't
+// otherwise control, rather than a fresh kalloc()'d page or a file's
+// own content.
+int
+mapuvm_phys(pde_t *pgdir, uintp va, uintp size, uintp pa, int perm)
+{
+  return mappages(pgdir, (void*)va, size, pa, perm);
+}
+
 // Set up kernel part of a page table.
 pde_t*
 setupkvm(void)
@@ -314,8 +328,20 @@ deallocuvm(pde_t *pgdir, uintp oldsz, uintp newsz)
       pa = PTE_ADDR(*pte);
       if(pa == 0)
         panic("kfree");
-      char *v = P2V(pa);
-      kfree(v);
+      // pa >= PHYSTOP means this PTE was never a kalloc()'d page in
+      // the first place - the framebuffer's real physical VRAM,
+      // mapped in by kernel/sysproc.c's sys_mmap() FRAMEBUFFER path
+      // (kernel/vm.c's mapuvm_phys()), is the one thing that lands
+      // here today. kfree() itself panics on any address >= PHYSTOP
+      // (kernel/kalloc.c) - calling it on device memory that was never
+      // part of the free pool would either corrupt that pool or hit
+      // that exact panic the moment any process holding such a
+      // mapping exits/execs/shrinks. Just drop the mapping; there is
+      // nothing to return to the allocator.
+      if(pa < PHYSTOP){
+        char *v = P2V(pa);
+        kfree(v);
+      }
       *pte = 0;
     }
   }
