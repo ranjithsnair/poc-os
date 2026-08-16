@@ -42,3 +42,16 @@
 #define __NR_fchdir 41
 #define __NR_ftruncate 42
 #define __NR_rename 43
+#define __NR_getuid   44
+#define __NR_geteuid  45
+#define __NR_getgid   46
+#define __NR_getegid  47
+#define __NR_setuid   48
+#define __NR_seteuid  49
+#define __NR_setgid   50
+#define __NR_setegid  51
+#define __NR_chmod    52
+#define __NR_fchmod   53
+#define __NR_chown    54
+#define __NR_fchown   55
+#define __NR_umask    56

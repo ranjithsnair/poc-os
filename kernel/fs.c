@@ -229,6 +229,9 @@ iupdate(struct inode *ip)
   dip->major = ip->major;
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
+  dip->mode = ip->mode;
+  dip->uid = ip->uid;
+  dip->gid = ip->gid;
   dip->size = ip->size;
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
   log_write(bp);
@@ -302,6 +305,9 @@ ilock(struct inode *ip)
     ip->major = dip->major;
     ip->minor = dip->minor;
     ip->nlink = dip->nlink;
+    ip->mode = dip->mode;
+    ip->uid = dip->uid;
+    ip->gid = dip->gid;
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
     brelse(bp);
@@ -586,6 +592,31 @@ stati(struct inode *ip, struct stat *st)
   st->type = ip->type;
   st->nlink = ip->nlink;
   st->size = ip->size;
+  st->mode = ip->mode;
+  st->uid = ip->uid;
+  st->gid = ip->gid;
+}
+
+// Permission check: does a process with the given effective uid/gid have
+// every bit in "want" (PERM_R|PERM_W|PERM_X) against ip's owner/group/
+// other mode bits? Caller must hold ip->lock (every field read here is
+// disk-backed and only valid once ilock()'d). Root (euid==0) bypasses
+// every check, standard Unix semantics - checked first, before any mode
+// bit is even read, so there's no bypass to remember at each call site.
+int
+permcheck(struct inode *ip, int euid, int egid, int want)
+{
+  int bits;
+
+  if(euid == 0)
+    return 0;
+  if(ip->uid == euid)
+    bits = (ip->mode >> 6) & 7;
+  else if(ip->gid == egid)
+    bits = (ip->mode >> 3) & 7;
+  else
+    bits = ip->mode & 7;
+  return ((bits & want) == want) ? 0 : -1;
 }
 
 //PAGEBREAK!
@@ -783,6 +814,15 @@ namex(char *path, int nameiparent, char *name)
       // Stop one level early.
       iunlock(ip);
       return ip;
+    }
+    // Need search (x) permission on every directory a path descends
+    // through - including the final one, to resolve the last component -
+    // covering every syscall built on namei()/nameiparent() from this one
+    // insertion point (see kernel/fs.c's permcheck() and include/fs.h's
+    // PERM_X).
+    if(permcheck(ip, myproc()->euid, myproc()->egid, PERM_X) < 0){
+      iunlockput(ip);
+      return 0;
     }
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);

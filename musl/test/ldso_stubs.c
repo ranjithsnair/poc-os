@@ -66,7 +66,11 @@ readlink(const char *path, char *buf, unsigned long bufsize)
 #include "bits/syscall.h.in"
 #include <sys/stat.h>
 
-struct poc_stat { short type; int dev; unsigned ino; short nlink; unsigned size; };
+// Mirrors include/stat.h's kernel struct stat field-for-field, including
+// the mode/uid/gid multi-user support added there - see kernel/fs.c's
+// stati() for what actually populates them from an inode's on-disk
+// mode/uid/gid (include/fs.h's struct dinode).
+struct poc_stat { short type; int dev; unsigned ino; short nlink; unsigned size; unsigned short mode; unsigned short uid; unsigned short gid; };
 
 int
 __fstat(int fd, struct stat *st)
@@ -80,8 +84,17 @@ __fstat(int fd, struct stat *st)
 	st->st_ino = pst.ino;
 	st->st_nlink = pst.nlink;
 	st->st_size = pst.size;
-	st->st_mode = (pst.type == 1 /* T_DIR, include/stat.h */)
-		? (S_IFDIR|0755) : (S_IFREG|0644);
+	// pst.type==3 is T_DEV (include/stat.h) - a device node (e.g.
+	// /dev-style "console", see bash/poc/dinit.c) reported as a real
+	// character device rather than collapsed into the T_FILE case, so
+	// callers like `ls -l`/`id` see the correct file type. pst.mode's
+	// low 12 bits (rwxrwxrwx + setuid/setgid/sticky) come straight from
+	// the on-disk inode - see include/fs.h's struct dinode comment for
+	// why this needs no bit remapping.
+	st->st_mode = (pst.type == 1 /* T_DIR, include/stat.h */ ? S_IFDIR
+		: pst.type == 3 /* T_DEV */ ? S_IFCHR : S_IFREG) | (pst.mode & 07777);
+	st->st_uid = pst.uid;
+	st->st_gid = pst.gid;
 	// st_blocks/st_blksize: left zeroed above until cp/mv needed them -
 	// coreutils/src/copy.c's infer_scantype() takes st_blocks==0 on a
 	// non-empty file as "fewer blocks allocated than st_size implies",

@@ -5,6 +5,14 @@
 #define ROOTINO 1  // root i-number
 #define BSIZE 512  // block size
 
+// Mode bits kernel/fs.c's permcheck() checks want-arguments against -
+// same numeric values as POSIX's S_IROTH/S_IWOTH/S_IXOTH (any of the
+// three owner/group/other triplets), shifted into position by
+// permcheck() itself before comparing.
+#define PERM_R 4
+#define PERM_W 2
+#define PERM_X 1
+
 // Disk layout:
 // [ boot block | super block | log | inode blocks |
 //                                          free bit map | data blocks]
@@ -21,15 +29,18 @@ struct superblock {
   uint bmapstart;    // Block number of first free map block
 };
 
-// NDIRECT is 11, not 12: dinode must divide BSIZE evenly (IPB, mkfs's
-// inode-block layout), so adding a doubly-indirect pointer to addrs[]
-// trades away one direct-block slot rather than growing the struct -
-// addrs[NDIRECT+2] below is still 13 total slots, exactly what
-// addrs[NDIRECT+1] was at the old NDIRECT==12 (dinode stays 64 bytes,
-// IPB stays 8). Growing addrs[] by a slot instead (keeping NDIRECT==12)
-// was tried first and rejected: 12+4*14=68 bytes doesn't divide 512,
-// tripping mkfs.c's own BSIZE%sizeof(struct dinode)==0 assertion.
-#define NDIRECT 11
+// NDIRECT is 9, not 11: dinode must divide BSIZE evenly (IPB, mkfs's
+// inode-block layout), so adding mode/uid/gid (multi-user support - see
+// struct dinode below) trades away two more direct-block slots rather
+// than growing the struct - the same precedent as the 12->11 change
+// this comment used to describe when the doubly-indirect pointer was
+// added: addrs[NDIRECT+2] below is still 11 total slots, exactly what
+// addrs[NDIRECT+2] was at the old NDIRECT==11 minus the 2 slots traded
+// away (dinode stays 64 bytes, IPB stays 8). Growing the struct past 64
+// bytes instead was tried first and rejected: it would double IPB's
+// disk overhead (128-byte dinode -> IPB 4, half as many inodes per
+// block) for the sake of 8 bytes of identity fields.
+#define NDIRECT 9
 #define NINDIRECT (BSIZE / sizeof(uint))
 // NDINDIRECT: a doubly-indirect block - one block of NINDIRECT pointers,
 // each itself pointing to a singly-indirect block of NINDIRECT data-block
@@ -43,11 +54,19 @@ struct superblock {
 
 // On-disk inode structure
 struct dinode {
-  short type;           // File type
-  short major;          // Major device number (T_DEV only)
-  short minor;          // Minor device number (T_DEV only)
-  short nlink;          // Number of links to inode in file system
-  uint size;            // Size of file (bytes)
+  short type;            // File type
+  short major;           // Major device number (T_DEV only)
+  short minor;           // Minor device number (T_DEV only)
+  short nlink;           // Number of links to inode in file system
+  ushort mode;           // Permission bits: low 9 bits rwxrwxrwx, bits
+                          // 9-11 setuid/setgid/sticky (S_ISUID/S_ISGID/
+                          // S_ISVTX) - same bit layout as musl's own
+                          // <sys/stat.h>, so the fstat translation
+                          // (musl/test/ldso_stubs.c) is a straight copy.
+  ushort uid;             // Owner user ID
+  ushort gid;             // Owner group ID
+  ushort rsvd;            // Alignment filler, zeroed, unused for now
+  uint size;             // Size of file (bytes)
   uint addrs[NDIRECT+2];   // Data block addresses (direct, singly-indirect, doubly-indirect)
 };
 

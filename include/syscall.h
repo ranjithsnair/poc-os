@@ -187,6 +187,25 @@
 // this exists - see its own "#if defined(SYS_rename)" branch).
 #define SYS_rename 43
 
+// Multi-user support (uid/gid/mode + permission enforcement - see
+// include/proc.h's identity fields, kernel/fs.c's permcheck(),
+// include/fs.h's struct dinode). poc-os's own syscall ABI, like every
+// number above - not Linux's, so these don't need to match any real
+// SYS_getuid/SYS_setuid/etc numbering.
+#define SYS_getuid   44
+#define SYS_geteuid  45
+#define SYS_getgid   46
+#define SYS_getegid  47
+#define SYS_setuid   48
+#define SYS_seteuid  49
+#define SYS_setgid   50
+#define SYS_setegid  51
+#define SYS_chmod    52
+#define SYS_fchmod   53
+#define SYS_chown    54
+#define SYS_fchown   55
+#define SYS_umask    56
+
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value
 // musl already hardcodes doesn't also need to change - poc-os's

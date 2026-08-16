@@ -14,6 +14,11 @@
 #include "proc.h"
 #include "defs.h"
 #include "x86.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "stat.h"
+#include "fs.h"
+#include "file.h"
 #include "elf.h"
 #include "auxv.h"
 
@@ -29,6 +34,7 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
+  int su_uid = -1, su_gid = -1;
 
   begin_op();
 
@@ -40,11 +46,25 @@ exec(char *path, char **argv)
   ilock(ip);
   pgdir = 0;
 
+  if(permcheck(ip, curproc->euid, curproc->egid, PERM_X) < 0)
+    goto bad;
+
   // Check ELF header
   if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
   if(elf.magic != ELF_MAGIC)
     goto bad;
+
+  // setuid/setgid-on-exec: honor S_ISUID(04000)/S_ISGID(02000) in the
+  // binary's own mode bits, captured now while ip is still locked and
+  // known-good, but only actually applied to curproc's identity at the
+  // "Commit" section below, once every failure-capable step has already
+  // succeeded - same reasoning as every other piece of new-process state
+  // this function builds up before committing.
+  if(ip->mode & 04000)
+    su_uid = ip->uid;
+  if(ip->mode & 02000)
+    su_gid = ip->gid;
 
   if((pgdir = setupkvm()) == 0)
     goto bad;
@@ -119,6 +139,10 @@ exec(char *path, char **argv)
   curproc->tf->esp = sp;
   curproc->tf->rdi = argc;
   curproc->tf->rsi = sp;         // argv
+  if(su_uid >= 0)
+    curproc->euid = curproc->suid = su_uid;
+  if(su_gid >= 0)
+    curproc->egid = curproc->sgid = su_gid;
   // A fresh address space invalidates any old %fs base - it pointed
   // into memory that's about to be freed below.
   curproc->tls_base = 0;
@@ -163,6 +187,7 @@ execve(char *path, char **argv, char **envp)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
+  int su_uid = -1, su_gid = -1;
   // PT_INTERP support: a PT_LOAD-only ELF (every poc-os binary until
   // now) still runs exactly as before, entered directly at elf.entry
   // with AT_BASE 0. A PT_INTERP segment instead names a dynamic
@@ -198,10 +223,23 @@ execve(char *path, char **argv, char **envp)
   ilock(ip);
   pgdir = 0;
 
+  if(permcheck(ip, curproc->euid, curproc->egid, PERM_X) < 0)
+    goto bad;
+
   if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
   if(elf.magic != ELF_MAGIC)
     goto bad;
+
+  // setuid/setgid-on-exec: see exec()'s identical comment above - same
+  // reasoning (captured now while ip is locked, applied only at Commit).
+  // This is what lets su (installed mode 4755, owned by root - see
+  // bash/poc/su.c and mkfs/mkfs.c's install_mode_override()) briefly
+  // regain root's identity when run by a non-root caller.
+  if(ip->mode & 04000)
+    su_uid = ip->uid;
+  if(ip->mode & 02000)
+    su_gid = ip->gid;
 
   if((pgdir = setupkvm()) == 0)
     goto bad;
@@ -349,6 +387,20 @@ execve(char *path, char **argv, char **envp)
   AUXENT(AT_PAGESZ, PGSIZE);
   AUXENT(AT_BASE, has_interp ? interp_bias : 0);
   AUXENT(AT_ENTRY, elf.entry);
+  // Deliberately always 0/0/0/0/false here, even for a setuid/setgid
+  // exec (su_uid/su_gid set above) where real uid/gid now genuinely
+  // differ from effective: musl's __libc_start_main
+  // (musl/src/env/__libc_start_main.c) takes its "secure exec" path -
+  // AT_UID!=AT_EUID || AT_GID!=AT_EGID || AT_SECURE - by calling
+  // SYS_ppoll, which has no dispatch table entry at all (kernel/
+  // syscall.c, include/syscall.h's own SYS_ppoll comment already
+  // documents this as intentionally unreachable) and crashes any
+  // setuid-exec'd program outright. The real privilege drop still
+  // happens correctly (curproc->euid/egid/suid/sgid, set at the Commit
+  // section below, are what kernel/fs.c's permcheck() actually checks) -
+  // this only affects what userland's own auxv introspection sees, and
+  // reporting uid==euid here is what keeps su/login's own musl startup
+  // from taking a path this port doesn't support yet.
   AUXENT(AT_UID, 0);
   AUXENT(AT_EUID, 0);
   AUXENT(AT_GID, 0);
@@ -380,6 +432,10 @@ execve(char *path, char **argv, char **envp)
   // the main executable actually needs (see musl/ldso/dynlink.c).
   curproc->tf->eip = has_interp ? interp_entry : elf.entry;
   curproc->tf->esp = sp;
+  if(su_uid >= 0)
+    curproc->euid = curproc->suid = su_uid;
+  if(su_gid >= 0)
+    curproc->egid = curproc->sgid = su_gid;
   // A fresh address space invalidates any old %fs base - it pointed
   // into memory that's about to be freed below.
   curproc->tls_base = 0;

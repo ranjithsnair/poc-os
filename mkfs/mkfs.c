@@ -60,6 +60,7 @@ void iappend(uint inum, void *p, int n);
 uint mkdirat(uint parentino, const char *name);
 uint ensure_dir(const char *path);
 void installfile(const char *imgpath, const char *hostpath);
+int install_mode_override(const char *imgpath);
 
 // Convert to little-endian (x86's byte order) explicitly, byte by byte,
 // rather than just writing x directly: this host tool might itself be
@@ -175,6 +176,29 @@ main(int argc, char *argv[])
     }
   }
 
+  // Home directories: ialloc()'s default (root-owned, 0755) is wrong for
+  // both of these - a user's home should only be theirs (0700), and
+  // /home/user is owned by the "user" account (uid/gid 1000), not root.
+  // ensure_dir() creates the directory (and any missing parent, e.g.
+  // "home") if it doesn't already exist yet, or just returns its inum if
+  // some earlier installed file already forced it into being.
+  {
+    uint uhome = ensure_dir("home/user");
+    struct dinode d;
+    rinode(uhome, &d);
+    d.mode = xshort(0700);
+    d.uid = xshort(1000);
+    d.gid = xshort(1000);
+    winode(uhome, &d);
+
+    uint rhome = ensure_dir("root");
+    rinode(rhome, &d);
+    d.mode = xshort(0700);
+    d.uid = xshort(0);
+    d.gid = xshort(0);
+    winode(rhome, &d);
+  }
+
   // fix size of root inode dir
   rinode(rootino, &din);
   off = xint(din.size);
@@ -250,8 +274,33 @@ ialloc(ushort type)
   din.type = xshort(type);
   din.nlink = xshort(1);
   din.size = xint(0);
+  // Default ownership/mode: root-owned, executable - every file mkfs
+  // installs today is a real ELF binary that must stay executable once
+  // real PERM_X enforcement (kernel/fs.c's permcheck()) is live, or the
+  // system can't boot its own binaries. install_mode_override() below
+  // (called from installfile()) corrects the handful of exceptions
+  // (etc/* data files, su's setuid bit); the home-directory fixups in
+  // main() correct ownership for /root and /home/user.
+  din.mode = xshort(0755);
+  din.uid = xshort(0);
+  din.gid = xshort(0);
   winode(inum, &din);
   return inum;
+}
+
+// Mode override for installfile()'s default 0755: etc/* is data, not
+// executable; su needs the setuid bit so a non-root caller can briefly
+// regain root to verify a target account's password (see bash/poc/su.c).
+// Returns 0 (no override, keep ialloc()'s 0755 default) for everything
+// else.
+int
+install_mode_override(const char *imgpath)
+{
+  if(strncmp(imgpath, "etc/", 4) == 0)
+    return 0644;
+  if(strcmp(imgpath, "usr/bin/su") == 0)
+    return 04755;
+  return 0;
 }
 
 void
@@ -459,6 +508,16 @@ installfile(const char *imgpath, const char *hostpath)
   }
 
   inum = ialloc(T_FILE);
+
+  {
+    int ov = install_mode_override(imgpath);
+    if(ov){
+      struct dinode d;
+      rinode(inum, &d);
+      d.mode = xshort(ov);
+      winode(inum, &d);
+    }
+  }
 
   bzero(&de, sizeof(de));
   de.inum = xshort(inum);

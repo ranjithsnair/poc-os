@@ -1789,6 +1789,26 @@ $(BUILD)/_dinit: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o $
 	$(OBJDUMP) -S $@ > $(BUILD)/dinit.dis
 	$(OBJCOPY) --strip-debug $@
 
+# login/su: multi-user support's account-switching pair - see bash/poc/
+# login.c's and su.c's own comments. Same Scrt1.o+libc.so PIE recipe as
+# every other dynamically-linked program above, using the existing
+# generic $(OBJDIR)/bash-pic/poc/%.o pattern rule (plain musl-linked C,
+# not bash source, but that rule's BASH_PIC_CFLAGS/BASH_INC work fine
+# unchanged - same reasoning as rawtest.o not needing its own).
+$(BUILD)/_login: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/login.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/login.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/login.dis
+	$(OBJCOPY) --strip-debug $@
+
+$(BUILD)/_su: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/su.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/su.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/su.dis
+	$(OBJCOPY) --strip-debug $@
+
 # rawtest: throwaway diagnostic for the raw-mode/ioctl kernel groundwork
 # (kernel/console.c, kernel/sysproc.c's sys_ioctl()) - see bash/poc/
 # rawtest.c's own comment. Same Scrt1.o+libc.so PIE recipe as _dinit
@@ -1917,6 +1937,15 @@ MKFS_INSTALL_DEPS += $(BUILD)/_curses_test
 # bash/coreutils above - see $(BUILD)/_nano's own comment.
 MKFS_INSTALL += usr/bin/nano:$(BUILD)/_nano
 MKFS_INSTALL_DEPS += $(BUILD)/_nano
+
+# Multi-user support: login/su (see their own Makefile build rules and
+# bash/poc/{login,su}.c) plus the account database they read - see
+# mkfs.c's install_mode_override() for why su specifically gets a
+# setuid-root mode despite installfile()'s usual 0755 default, and for
+# why etc/* gets 0644 instead.
+MKFS_INSTALL += usr/bin/login:$(BUILD)/_login usr/bin/su:$(BUILD)/_su \
+	etc/passwd:etc/passwd etc/group:etc/group
+MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

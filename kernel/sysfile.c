@@ -357,6 +357,10 @@ sys_link(void)
   if((dp = nameiparent(new, name)) == 0)
     goto bad;
   ilock(dp);
+  if(permcheck(dp, myproc()->euid, myproc()->egid, PERM_W) < 0){
+    iunlockput(dp);
+    goto bad;
+  }
   if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0){
     iunlockput(dp);
     goto bad;
@@ -415,6 +419,11 @@ sys_unlink(void)
 
   // Cannot unlink "." or "..".
   if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
+    goto bad;
+
+  // Unlink permission is about the *directory*, not the file being
+  // removed - standard Unix semantics.
+  if(permcheck(dp, myproc()->euid, myproc()->egid, PERM_W) < 0)
     goto bad;
 
   if((ip = dirlookup(dp, name, &off)) == 0)
@@ -502,6 +511,11 @@ sys_rename(void)
   }
 
   ilock(olddp);
+  if(permcheck(olddp, myproc()->euid, myproc()->egid, PERM_W) < 0){
+    iunlockput(olddp);
+    end_op();
+    return -1;
+  }
   ip = dirlookup(olddp, oldname, &oldoff);
   iunlock(olddp);
   if(ip == 0){
@@ -558,6 +572,13 @@ sys_rename(void)
   }
 
   ilock(newdp);
+  if(permcheck(newdp, myproc()->euid, myproc()->egid, PERM_W) < 0){
+    iunlockput(newdp);
+    iput(olddp);
+    iput(ip);
+    end_op();
+    return -1;
+  }
   xip = dirlookup(newdp, newname, &newoff);
   if(xip != 0){
     if(samefile(xip, ip)){
@@ -658,10 +679,11 @@ sys_rename(void)
 // inode if it does - that's what makes O_CREATE idempotent), and links
 // it into the parent directory.
 static struct inode*
-create(char *path, short type, short major, short minor)
+create(char *path, short type, short major, short minor, int mode)
 {
   struct inode *ip, *dp;
   char name[DIRSIZ];
+  struct proc *curproc = myproc();
 
   if((dp = nameiparent(path, name)) == 0)
     return 0;
@@ -676,6 +698,16 @@ create(char *path, short type, short major, short minor)
     return 0;
   }
 
+  // Only reached when actually allocating a new inode (the idempotent
+  // reopen-existing-file path above never gets here) - need write+search
+  // permission on the containing directory, standard Unix semantics
+  // ("create a file here" is a permission on the directory, not on a
+  // not-yet-existing file).
+  if(permcheck(dp, curproc->euid, curproc->egid, PERM_W|PERM_X) < 0){
+    iunlockput(dp);
+    return 0;
+  }
+
   if((ip = ialloc(dp->dev, type)) == 0)
     panic("create: ialloc");
 
@@ -683,6 +715,13 @@ create(char *path, short type, short major, short minor)
   ip->major = major;
   ip->minor = minor;
   ip->nlink = 1;
+  ip->uid = curproc->euid;
+  ip->gid = curproc->egid;
+  // Device nodes get a fixed, conventional mode regardless of caller -
+  // sys_mknod() has no real mode argument to thread through anyway (see
+  // sys_mknod()'s own comment). Everything else honors the caller's
+  // requested mode, minus umask, real umask(2)/open(2)/mkdir(2) semantics.
+  ip->mode = (type == T_DEV) ? 0666 : (mode & ~(int)curproc->umask & 0777);
   iupdate(ip);
 
   if(type == T_DIR){  // Create . and .. entries.
@@ -716,9 +755,11 @@ int
 sys_open(void)
 {
   char *path;
-  int fd, omode;
+  int fd, omode, mode;
+  int readable, writable;
   struct file *f;
   struct inode *ip;
+  struct proc *curproc = myproc();
 
   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
     return -1;
@@ -726,7 +767,15 @@ sys_open(void)
   begin_op();
 
   if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
+    // musl's real open() (musl/src/fcntl/open.c) always issues a 3-arg
+    // syscall(SYS_open, path, flags, mode) - mode==0 whenever O_CREAT
+    // isn't set, a real mode whenever it is. Default to a permissive
+    // 0666 (matches real open(2)'s own documented default when a caller
+    // somehow omits the argument) rather than failing outright if it's
+    // missing for any reason.
+    if(argint(2, &mode) < 0)
+      mode = 0666;
+    ip = create(path, T_FILE, 0, 0, mode);
     if(ip == 0){
       end_op();
       return -1;
@@ -758,6 +807,20 @@ sys_open(void)
     }
   }
 
+  // Applied uniformly to both branches above - a freshly created file is
+  // always owned by the caller (trivially passes), and an existing file
+  // reopened via O_CREATE|O_EXCL-less idempotence still needs its real
+  // permission bits checked, exactly like any other open of an existing
+  // file.
+  readable = !(omode & O_WRONLY);
+  writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  if(permcheck(ip, curproc->euid, curproc->egid,
+               (readable ? PERM_R : 0) | (writable ? PERM_W : 0)) < 0){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -771,8 +834,8 @@ sys_open(void)
   f->type = FD_INODE;
   f->ip = ip;
   f->off = 0;
-  f->readable = !(omode & O_WRONLY);
-  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  f->readable = readable;
+  f->writable = writable;
   return fd;
 }
 
@@ -780,10 +843,14 @@ int
 sys_mkdir(void)
 {
   char *path;
+  int mode;
   struct inode *ip;
 
   begin_op();
-  if(argstr(0, &path) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
+  // musl's real mkdir() (musl/src/stat/mkdir.c) always issues
+  // syscall(SYS_mkdir, path, mode) - 2 args.
+  if(argstr(0, &path) < 0 || argint(1, &mode) < 0 ||
+     (ip = create(path, T_DIR, 0, 0, mode)) == 0){
     end_op();
     return -1;
   }
@@ -800,10 +867,15 @@ sys_mknod(void)
   int major, minor;
 
   begin_op();
+  // No real mode argument here (deliberately - see kernel/sysfile.c's
+  // own comment near create()'s T_DEV case above and include/syscall.h's
+  // SYS_mknod comment: poc-os's only real caller uses its own
+  // (path, major, minor) convention, not musl's POSIX (path, mode, dev)
+  // shape). create() forces a fixed 0666 for T_DEV regardless.
   if((argstr(0, &path)) < 0 ||
      argint(1, &major) < 0 ||
      argint(2, &minor) < 0 ||
-     (ip = create(path, T_DEV, major, minor)) == 0){
+     (ip = create(path, T_DEV, major, minor, 0)) == 0){
     end_op();
     return -1;
   }
@@ -826,6 +898,14 @@ sys_chdir(void)
   }
   ilock(ip);
   if(ip->type != T_DIR){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  // namei()'s own directory-traversal check (kernel/fs.c's namex()) only
+  // covers ancestors on the way to ip, not ip itself as a destination -
+  // chdir needs its own explicit check on the final component.
+  if(permcheck(ip, curproc->euid, curproc->egid, PERM_X) < 0){
     iunlockput(ip);
     end_op();
     return -1;
@@ -859,6 +939,11 @@ sys_fchdir(void)
   begin_op();
   ip = f->ip;
   ilock(ip);
+  if(permcheck(ip, curproc->euid, curproc->egid, PERM_X) < 0){
+    iunlock(ip);
+    end_op();
+    return -1;
+  }
   idup(ip);
   iunlock(ip);
   iput(curproc->cwd);
@@ -969,6 +1054,120 @@ sys_execve(void)
   if(uenvp && fetchargv(uenvp, envp, NELEM(envp)) < 0)
     return -1;
   return execve(path, argv, envp);
+}
+
+// chmod(2)/fchmod(2): owner or root may change permission bits (the low
+// 12 bits - rwxrwxrwx plus setuid/setgid/sticky).
+int
+sys_chmod(void)
+{
+  char *path;
+  int mode;
+  struct inode *ip;
+  struct proc *curproc = myproc();
+
+  if(argstr(0, &path) < 0 || argint(1, &mode) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = namei(path)) == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(curproc->euid != 0 && curproc->euid != ip->uid){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  ip->mode = (ip->mode & ~07777) | (mode & 07777);
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+int
+sys_fchmod(void)
+{
+  int mode;
+  struct file *f;
+  struct proc *curproc = myproc();
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &mode) < 0)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+
+  begin_op();
+  ilock(f->ip);
+  if(curproc->euid != 0 && curproc->euid != f->ip->uid){
+    iunlock(f->ip);
+    end_op();
+    return -1;
+  }
+  f->ip->mode = (f->ip->mode & ~07777) | (mode & 07777);
+  iupdate(f->ip);
+  iunlock(f->ip);
+  end_op();
+  return 0;
+}
+
+// chown(2)/fchown(2): root-only (the standard chown_restricted default -
+// unprivileged users may not give a file away). uid==-1/gid==-1 means
+// "leave that field unchanged", matching real chown()/fchown() semantics
+// coreutils' chown/chgrp already rely on.
+int
+sys_chown(void)
+{
+  char *path;
+  int uid, gid;
+  struct inode *ip;
+
+  if(argstr(0, &path) < 0 || argint(1, &uid) < 0 || argint(2, &gid) < 0)
+    return -1;
+  if(myproc()->euid != 0)
+    return -1;
+
+  begin_op();
+  if((ip = namei(path)) == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(uid != -1)
+    ip->uid = uid;
+  if(gid != -1)
+    ip->gid = gid;
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+int
+sys_fchown(void)
+{
+  int uid, gid;
+  struct file *f;
+
+  if(argfd(0, 0, &f) < 0 || argint(1, &uid) < 0 || argint(2, &gid) < 0)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+  if(myproc()->euid != 0)
+    return -1;
+
+  begin_op();
+  ilock(f->ip);
+  if(uid != -1)
+    f->ip->uid = uid;
+  if(gid != -1)
+    f->ip->gid = gid;
+  iupdate(f->ip);
+  iunlock(f->ip);
+  end_op();
+  return 0;
 }
 
 int

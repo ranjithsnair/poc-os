@@ -286,12 +286,15 @@ getppid(void)
 	return 1;
 }
 
-/* getgroups()/setgid()/setuid(): poc-os has no user/group accounts or
- * permission model of any kind (every process is implicitly uid/gid 0 -
- * see geteuid()/getuid() in coreutils_shims.c) - getgroups() reporting
- * zero supplementary groups and setgid()/setuid() succeeding as a
- * no-op are both the accurate answer, not stand-ins for a real
- * mechanism this kernel doesn't have.
+/* getgroups(): poc-os parses /etc/group's member list (coreutils_shims.c's
+ * getgrnam()/getgrgid()) but doesn't enforce or track supplementary
+ * groups per-process (every process has a single primary gid - see
+ * include/proc.h) - reporting zero supplementary groups is the accurate
+ * answer for that scope, not a stand-in for a real mechanism.
+ *
+ * setgid()/setuid(): real now - see coreutils_shims.c's getuid()/
+ * setuid() block, which defines both (also linked into this same
+ * libc.so, so no separate definition belongs here too).
  */
 #include <sys/types.h>
 
@@ -299,20 +302,6 @@ int
 getgroups(int size, gid_t list[])
 {
 	(void)size; (void)list;
-	return 0;
-}
-
-int
-setgid(gid_t gid)
-{
-	(void)gid;
-	return 0;
-}
-
-int
-setuid(uid_t uid)
-{
-	(void)uid;
 	return 0;
 }
 

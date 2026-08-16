@@ -135,6 +135,19 @@ extern int sys_getdents(void);
 extern int sys_fchdir(void);
 extern int sys_ftruncate(void);
 extern int sys_rename(void);
+extern int sys_getuid(void);
+extern int sys_geteuid(void);
+extern int sys_getgid(void);
+extern int sys_getegid(void);
+extern int sys_setuid(void);
+extern int sys_seteuid(void);
+extern int sys_setgid(void);
+extern int sys_setegid(void);
+extern int sys_chmod(void);
+extern int sys_fchmod(void);
+extern int sys_chown(void);
+extern int sys_fchown(void);
+extern int sys_umask(void);
 extern int sys_exec(void);
 extern int sys_exit(void);
 extern int sys_fork(void);
@@ -197,6 +210,19 @@ static int (*syscalls[])(void) = {
 [SYS_fchdir]            sys_fchdir,
 [SYS_ftruncate]         sys_ftruncate,
 [SYS_rename]            sys_rename,
+[SYS_getuid]            sys_getuid,
+[SYS_geteuid]           sys_geteuid,
+[SYS_getgid]            sys_getgid,
+[SYS_getegid]           sys_getegid,
+[SYS_setuid]            sys_setuid,
+[SYS_seteuid]           sys_seteuid,
+[SYS_setgid]            sys_setgid,
+[SYS_setegid]           sys_setegid,
+[SYS_chmod]             sys_chmod,
+[SYS_fchmod]            sys_fchmod,
+[SYS_chown]             sys_chown,
+[SYS_fchown]            sys_fchown,
+[SYS_umask]             sys_umask,
 };
 
 // Called from trap() for a T_SYSCALL trap. tf->eax holds the syscall

@@ -3,7 +3,11 @@
  * user/init.c used) - poc-os's new default convention for userland
  * software (see the Makefile's own BASH_PIC_CFLAGS comment). Same
  * console-setup-then-fork-reap structure as user/init.c, just built
- * against a real hosted libc and starting bash instead of sh.
+ * against a real hosted libc and starting login (bash/poc/login.c)
+ * instead of sh - login handles the actual account prompt and, once
+ * multi-user support landed, only ever hands control to bash once it
+ * has dropped from dinit's own root identity to whichever account just
+ * authenticated.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -18,7 +22,7 @@
  * pulling in a broader feature-test macro just for this one call. */
 extern long syscall(long, ...);
 
-static char *const argv[] = { "-bash", "-i", 0 };
+static char *const argv[] = { "login", 0 };
 static char *const envp[] = { "PATH=/usr/bin", "HOME=/", "TERM=dumb", 0 };
 
 int
@@ -46,7 +50,7 @@ main(void)
 	dup(0);	/* stderr */
 
 	for (;;) {
-		printf("init: starting bash\n");
+		printf("init: starting login\n");
 		fflush(stdout);
 		pid = fork();
 		if (pid < 0) {
@@ -55,8 +59,8 @@ main(void)
 			_exit(1);
 		}
 		if (pid == 0) {
-			execve("/usr/bin/bash", argv, envp);
-			printf("init: exec bash failed\n");
+			execve("/usr/bin/login", argv, envp);
+			printf("init: exec login failed\n");
 			fflush(stdout);
 			_exit(1);
 		}

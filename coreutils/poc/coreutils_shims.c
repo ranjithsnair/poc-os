@@ -181,47 +181,49 @@ rmdir(const char *path)
 }
 
 /* chmod()/fchmod()/fchmodat(): poc-os's on-disk inode (include/fs.h's
- * struct dinode) has no permission-bits field at all - every file is
- * implicitly readable/writable/executable by whoever can open it, same
- * as real xv6. A permission change therefore has nothing to do and
- * nothing to fail: returning 0 unconditionally is the correct
- * "succeeded, no-op" answer for a filesystem with no permission model,
- * not a fake success covering up a real error path.
+ * struct dinode) now has a real mode field and real SYS_chmod/SYS_fchmod
+ * syscalls enforcing it (kernel/sysfile.c's sys_chmod()/sys_fchmod(),
+ * owner-or-root) - real syscalls, same raw syscall() pattern as
+ * getuid()/setuid() above.
  */
 #include <sys/stat.h>
+#include <sys/syscall.h>
+
+/* Forward declaration - defined further down in this file, alongside
+ * openat()/fstatat()/etc, which is where it conceptually belongs; used
+ * here too since fchmodat() needs the same AT_FDCWD-only handling. */
+static int require_fdcwd(int dirfd);
 
 int
 chmod(const char *path, mode_t mode)
 {
-	(void)path; (void)mode;
-	return 0;
+	return syscall(SYS_chmod, path, mode);
 }
 
 int
 fchmod(int fd, mode_t mode)
 {
-	(void)fd; (void)mode;
-	return 0;
+	return syscall(SYS_fchmod, fd, mode);
 }
 
 /* lchmod(): chmod() that doesn't follow a trailing symlink - identical
  * to plain chmod() here since poc-os has no symlinks at all (same
  * reasoning as stat()/lstat() above), so there's never a link to not
- * follow, and (like chmod() itself) nothing for a permission change to
- * actually do regardless.
+ * follow.
  */
 int
 lchmod(const char *path, mode_t mode)
 {
-	(void)path; (void)mode;
-	return 0;
+	return chmod(path, mode);
 }
 
 int
 fchmodat(int dirfd, const char *path, mode_t mode, int flags)
 {
-	(void)dirfd; (void)path; (void)mode; (void)flags;
-	return 0;
+	(void)flags;
+	if (require_fdcwd(dirfd) < 0)
+		return -1;
+	return chmod(path, mode);
 }
 
 /* utimensat()/futimens(): poc-os's inode has no atime/mtime fields
@@ -245,12 +247,17 @@ futimens(int fd, const struct timespec times[2])
 	return 0;
 }
 
-/* access()/faccessat(): poc-os has no SYS_access/SYS_faccessat and,
- * like chmod() above, no permission bits to check even if it did -
- * open()+close() is the existence probe every access() reduces to once
- * permission bits are moot; F_OK/R_OK/W_OK/X_OK are otherwise
- * indistinguishable here since every openable file is all three at
- * once.
+/* access()/faccessat(): poc-os has no SYS_access/SYS_faccessat, so this
+ * reduces to an open()+close() probe - real permission bits now back
+ * that probe (see chmod()/kernel/fs.c's permcheck()), so W_OK opens for
+ * write (the one real permission open()'s own R/W distinction can
+ * actually test) rather than always probing read-only regardless of
+ * amode, which would silently misreport write access now that it's a
+ * real, enforced thing rather than always true. X_OK has no equivalent
+ * "open for execute" mode to probe with - poc-os's own permission model
+ * (kernel/fs.c's permcheck()) ties execute to the same owner/group/
+ * other bits R/W already use, so an F_OK/R_OK-style existence probe is
+ * the closest approximation available without a real access(2) syscall.
  */
 #include <fcntl.h>
 
@@ -259,8 +266,7 @@ access(const char *path, int amode)
 {
 	int fd;
 
-	(void)amode;
-	if ((fd = open(path, O_RDONLY)) < 0)
+	if ((fd = open(path, (amode & W_OK) ? O_WRONLY : O_RDONLY)) < 0)
 		return -1;
 	close(fd);
 	return 0;
@@ -583,37 +589,74 @@ fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags)
 	return chown(path, owner, group);
 }
 
-/* geteuid()/getuid()/getegid()/getgid(): poc-os has no user accounts
- * or permission model of any kind (see chmod()'s own comment above) -
- * every process is implicitly the same single "user", so 0 (root) is
- * the only answer that makes every caller's "am I root"/"do I own
- * this" check behave sensibly (e.g. rm's is-this-mine-across-a-
- * symlink-race style checks), not an arbitrary default.
+/* geteuid()/getuid()/getegid()/getgid()/setuid()/seteuid()/setgid()/
+ * setegid()/umask(): poc-os now has real per-process identity (include/
+ * proc.h's uid/gid/euid/egid/suid/sgid/umask fields) and real syscalls
+ * backing every one of these (include/syscall.h's SYS_getuid and
+ * friends, kernel/sysproc.c) - direct raw syscall() calls, the same
+ * pattern __fstat() above already uses (via __syscall2 rather than a
+ * public syscall() wrapper, but the same underlying poc-os ABI), rather
+ * than pulling in real musl's own src/unistd/getuid.c/setuid.c/etc:
+ * this port prefers a small hand-written shim over growing the
+ * Makefile's MUSL_LDSO_OBJS whitelist for functions this simple (see
+ * getpwnam()'s own comment further down for the same reasoning applied
+ * to /etc/passwd parsing).
  */
 #include <unistd.h>
+#include <sys/syscall.h>
 
 uid_t
 geteuid(void)
 {
-	return 0;
+	return syscall(SYS_geteuid);
 }
 
 uid_t
 getuid(void)
 {
-	return 0;
+	return syscall(SYS_getuid);
 }
 
 gid_t
 getegid(void)
 {
-	return 0;
+	return syscall(SYS_getegid);
 }
 
 gid_t
 getgid(void)
 {
-	return 0;
+	return syscall(SYS_getgid);
+}
+
+int
+setuid(uid_t uid)
+{
+	return syscall(SYS_setuid, uid);
+}
+
+int
+seteuid(uid_t uid)
+{
+	return syscall(SYS_seteuid, uid);
+}
+
+int
+setgid(gid_t gid)
+{
+	return syscall(SYS_setgid, gid);
+}
+
+int
+setegid(gid_t gid)
+{
+	return syscall(SYS_setegid, gid);
+}
+
+mode_t
+umask(mode_t mask)
+{
+	return syscall(SYS_umask, mask);
 }
 
 /* getrandom(): poc-os has no hardware RNG or entropy source of any
@@ -780,25 +823,13 @@ selabel_lookup_raw(struct selabel_handle *handle, char **con, const char *key, i
 	return -1;
 }
 
-/* umask(): poc-os's on-disk inode has no permission-bits field at all
- * (same reasoning as chmod()'s own comment far above) - open()/
- * mkdir() already ignore whatever mode is passed in, so a real kernel-
- * side umask (musl's own umask.c issues a raw SYS_umask poc-os has no
- * number for) has nothing to actually mask. Tracking the value in a
- * single process-wide static and handing back whatever was last set
- * is enough to satisfy every real caller here (mkdir -m, install,
- * etc. only ever read back their own previous umask() call within the
- * same process, never another process's).
- */
-mode_t
-umask(mode_t mode)
-{
-	static mode_t current = 0022;
-	mode_t prev = current;
-
-	current = mode;
-	return prev;
-}
+/* umask(): now a real syscall - see this file's getuid()/setuid() block
+ * further up, which defines the real implementation (kernel/sysproc.c's
+ * sys_umask(), a genuine per-process mask now applied in kernel/
+ * sysfile.c's create()). This used to be a process-wide static stub
+ * here since poc-os's on-disk inode had no permission-bits field at
+ * all to mask in the first place - no longer true, see include/fs.h's
+ * struct dinode. */
 
 /* raise(): musl's own raise.c issues a raw SYS_tkill poc-os has no
  * number for (real POSIX signal delivery, which this kernel has none
@@ -1000,34 +1031,29 @@ hash_free(Hash_table *table)
 	free(table);
 }
 
-/* chown()/fchown()/lchown(): poc-os has no user accounts or ownership
- * of any kind (every process is implicitly uid/gid 0 - see geteuid()/
- * getuid() above), the same reasoning as chmod()'s own comment: a
- * "change owner" request has nothing to actually change and nothing
- * to fail, so returning 0 unconditionally is correct here, not a
- * fake success covering up a missing real implementation. lchown()
- * doesn't need to differ from chown() for the usual reason (no
- * symlinks at all on this filesystem).
+/* chown()/fchown()/lchown(): poc-os now has real per-inode ownership
+ * (include/fs.h's struct dinode) and real SYS_chown/SYS_fchown syscalls
+ * enforcing it (kernel/sysfile.c, root-only) - real syscalls, same raw
+ * syscall() pattern as getuid()/chmod() above. lchown() doesn't need to
+ * differ from chown() for the usual reason (no symlinks at all on this
+ * filesystem, so there's never a link to not follow).
  */
 int
 chown(const char *path, uid_t owner, gid_t group)
 {
-	(void)path; (void)owner; (void)group;
-	return 0;
+	return syscall(SYS_chown, path, (int)owner, (int)group);
 }
 
 int
 fchown(int fd, uid_t owner, gid_t group)
 {
-	(void)fd; (void)owner; (void)group;
-	return 0;
+	return syscall(SYS_fchown, fd, (int)owner, (int)group);
 }
 
 int
 lchown(const char *path, uid_t owner, gid_t group)
 {
-	(void)path; (void)owner; (void)group;
-	return 0;
+	return chown(path, owner, group);
 }
 
 /* sigaction()/sigprocmask()/signal(): poc-os has no signal delivery
@@ -1075,61 +1101,222 @@ void (*signal(int sig, void (*handler)(int)))(int)
 	return SIG_DFL;
 }
 
-/* getpwnam()/getpwuid()/getgrnam()/getgrgid(): poc-os has no user or
- * group database of any kind (every process is uid/gid 0 - see
- * geteuid()/getuid() above) - reporting "no such user/group" (a NULL
- * return, errno untouched, exactly what real glibc does for a
- * genuinely unknown id/name) is the accurate answer, not a stand-in
- * for a real lookup. ls -l's owner/group columns already handle a
- * NULL getpwuid()/getgrgid() gracefully, printing the bare numeric
- * id instead of a resolved name - which is all poc-os has anyway.
+/* getpwnam()/getpwuid()/getgrnam()/getgrgid()/getpwent(): poc-os now has
+ * a real /etc/passwd and /etc/group (colon-separated, classic format -
+ * see mkfs/mkfs.c's MKFS_INSTALL and the repo-tracked etc/passwd,
+ * etc/group source files themselves). Parsed by hand here (open()+
+ * read() into a static buffer, manual ':'-split) rather than via
+ * fopen()/fgets() or musl's own real src/passwd/getpwent.c: neither
+ * musl/src/stdio/fopen.o nor fgets.o are in the Makefile's
+ * MUSL_LDSO_OBJS whitelist today, and musl's real getpwent.c needs its
+ * own __getpw_a/__getpwent_a internals (and defines its own competing
+ * getpwnam()/getpwuid()) - more machinery than "look up a line in a
+ * small file" needs, the same reasoning __fstat()'s own comment already
+ * gives for a minimal hand-written shim over growing the whitelist.
+ * Not reentrant (static return buffers, shared across all four lookup
+ * functions) - matches real getpwnam()/getpwuid()/getgrnam()/getgrgid()'s
+ * own non-reentrant contract, and poc-os is single-threaded regardless.
  */
 #include <pwd.h>
 #include <grp.h>
+#include <stdlib.h>
+
+#define PWBUF_SIZE 4096
+
+// Reads path fully into buf (NUL-terminated, truncated if it doesn't
+// fit - /etc/passwd and /etc/group are always small). Returns the
+// number of bytes read, or -1 if the file couldn't even be opened.
+static int
+load_file(const char *path, char *buf, int cap)
+{
+	int fd, n, total = 0;
+
+	if ((fd = open(path, O_RDONLY)) < 0)
+		return -1;
+	while (total < cap - 1 && (n = read(fd, buf + total, cap - 1 - total)) > 0)
+		total += n;
+	close(fd);
+	buf[total] = 0;
+	return total;
+}
+
+// Splits one NUL-terminated "a:b:c:..." line in place (writing NULs
+// over the ':' separators) into up to maxfields pointers. Returns the
+// number of fields found - a well-formed line yields exactly
+// maxfields; anything fewer means a malformed/short line.
+static int
+split_fields(char *line, char **fields, int maxfields)
+{
+	int n = 0;
+	char *p = line;
+
+	while (n < maxfields) {
+		fields[n++] = p;
+		p = strchr(p, ':');
+		if (!p)
+			break;
+		*p++ = 0;
+	}
+	return n;
+}
+
+static struct passwd pw_ret;
+
+static struct passwd *
+parse_passwd_line(char *line)
+{
+	char *f[7];
+
+	if (split_fields(line, f, 7) < 7)
+		return NULL;
+	pw_ret.pw_name = f[0];
+	pw_ret.pw_passwd = f[1];
+	pw_ret.pw_uid = (uid_t)atoi(f[2]);
+	pw_ret.pw_gid = (gid_t)atoi(f[3]);
+	pw_ret.pw_gecos = f[4];
+	pw_ret.pw_dir = f[5];
+	pw_ret.pw_shell = f[6];
+	return &pw_ret;
+}
 
 struct passwd *
 getpwnam(const char *name)
 {
-	(void)name;
+	static char buf[PWBUF_SIZE];
+	char *line, *nl = NULL;
+	struct passwd *pw;
+
+	if (load_file("/etc/passwd", buf, sizeof(buf)) < 0)
+		return NULL;
+	for (line = buf; line && *line; line = nl ? nl + 1 : NULL) {
+		nl = strchr(line, '\n');
+		if (nl)
+			*nl = 0;
+		if ((pw = parse_passwd_line(line)) != NULL && strcmp(pw->pw_name, name) == 0)
+			return pw;
+	}
 	return NULL;
 }
 
 struct passwd *
 getpwuid(uid_t uid)
 {
-	(void)uid;
+	static char buf[PWBUF_SIZE];
+	char *line, *nl = NULL;
+	struct passwd *pw;
+
+	if (load_file("/etc/passwd", buf, sizeof(buf)) < 0)
+		return NULL;
+	for (line = buf; line && *line; line = nl ? nl + 1 : NULL) {
+		nl = strchr(line, '\n');
+		if (nl)
+			*nl = 0;
+		if ((pw = parse_passwd_line(line)) != NULL && pw->pw_uid == uid)
+			return pw;
+	}
 	return NULL;
+}
+
+static struct group gr_ret;
+static char *gr_members[9];
+
+static struct group *
+parse_group_line(char *line)
+{
+	char *f[4];
+	char *p;
+	int n = 0;
+
+	if (split_fields(line, f, 4) < 4)
+		return NULL;
+	gr_ret.gr_name = f[0];
+	gr_ret.gr_passwd = f[1];
+	gr_ret.gr_gid = (gid_t)atoi(f[2]);
+	p = f[3];
+	while (n < 8 && *p) {
+		gr_members[n++] = p;
+		p = strchr(p, ',');
+		if (!p)
+			break;
+		*p++ = 0;
+	}
+	gr_members[n] = NULL;
+	gr_ret.gr_mem = gr_members;
+	return &gr_ret;
 }
 
 struct group *
 getgrnam(const char *name)
 {
-	(void)name;
+	static char buf[PWBUF_SIZE];
+	char *line, *nl = NULL;
+	struct group *gr;
+
+	if (load_file("/etc/group", buf, sizeof(buf)) < 0)
+		return NULL;
+	for (line = buf; line && *line; line = nl ? nl + 1 : NULL) {
+		nl = strchr(line, '\n');
+		if (nl)
+			*nl = 0;
+		if ((gr = parse_group_line(line)) != NULL && strcmp(gr->gr_name, name) == 0)
+			return gr;
+	}
 	return NULL;
 }
 
 struct group *
 getgrgid(gid_t gid)
 {
-	(void)gid;
+	static char buf[PWBUF_SIZE];
+	char *line, *nl = NULL;
+	struct group *gr;
+
+	if (load_file("/etc/group", buf, sizeof(buf)) < 0)
+		return NULL;
+	for (line = buf; line && *line; line = nl ? nl + 1 : NULL) {
+		nl = strchr(line, '\n');
+		if (nl)
+			*nl = 0;
+		if ((gr = parse_group_line(line)) != NULL && gr->gr_gid == gid)
+			return gr;
+	}
 	return NULL;
 }
 
-/* getpwent(): same "no user database" reasoning as getpwnam()/
- * getpwuid() above - used by nano/src/files.c's real_dir_from_tilde()
- * for ~user expansion. musl's own real getpwent.c (musl/src/passwd/
- * getpwent.c) exists but isn't used here: it defines its own
- * getpwnam()/getpwuid() too (a real /etc/passwd-backed implementation,
- * conflicting with the stubs above) and needs internal helpers
- * (__getpw_a/__getpwent_a) that assume a working /etc/passwd - more
- * machinery than "there is no user database" needs. NULL/ENOENT (no
- * more entries) is what a real getpwent() reports once the (here,
- * always-empty) database is exhausted (errno left untouched, exactly
- * like real getpwent() at true end-of-database), so this is a real,
- * minimal caller-visible answer, not a stand-in. */
+/* getpwent(): sequential iteration over /etc/passwd, real semantics -
+ * used by nano/src/files.c's real_dir_from_tilde() for ~user expansion.
+ * pwent_len==-2 is "not yet loaded this process"; loaded once (poc-os
+ * has no setpwent() wired up to force a reload, and nothing in this
+ * port needs one - see this file's original comment on the same
+ * function for why that's an acceptable scope). */
+static char pwent_buf[PWBUF_SIZE];
+static int pwent_len = -2;
+static int pwent_pos;
+
 struct passwd *
 getpwent(void)
 {
+	char *line, *nl;
+	struct passwd *pw;
+
+	if (pwent_len == -2) {
+		pwent_len = load_file("/etc/passwd", pwent_buf, sizeof(pwent_buf));
+		pwent_pos = 0;
+	}
+	if (pwent_len < 0)
+		return NULL;
+	while (pwent_pos < pwent_len && pwent_buf[pwent_pos]) {
+		line = pwent_buf + pwent_pos;
+		nl = strchr(line, '\n');
+		if (nl) {
+			*nl = 0;
+			pwent_pos = (int)(nl - pwent_buf) + 1;
+		} else {
+			pwent_pos = pwent_len;
+		}
+		if ((pw = parse_passwd_line(line)) != NULL)
+			return pw;
+	}
 	return NULL;
 }
 

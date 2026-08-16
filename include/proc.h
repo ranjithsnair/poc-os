@@ -60,6 +60,13 @@ struct proc {
   uintp tls_base;               // %fs base (SYS_arch_prctl/ARCH_SET_FS);
                                  // reasserted via WRMSR on every return
                                  // to user mode - see kernel/trap.c
+  ushort uid,  gid;             // real uid/gid
+  ushort euid, egid;            // effective uid/gid - what kernel/fs.c's
+                                 // permcheck() actually checks against
+  ushort suid, sgid;            // saved-set uid/gid - see kernel/sysproc.c's
+                                 // sys_setuid()/sys_setgid() for why these
+                                 // are needed for correct POSIX semantics
+  ushort umask;                 // file-creation mask (low 9 bits used)
 };
 
 // Process memory is laid out contiguously, low addresses first:

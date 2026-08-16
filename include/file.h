@@ -28,6 +28,9 @@ struct inode {
   short major;
   short minor;
   short nlink;
+  ushort mode;
+  ushort uid;
+  ushort gid;
   uint size;
   uint addrs[NDIRECT+2];
 };

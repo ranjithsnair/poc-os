@@ -166,6 +166,13 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  // The first process is root, same as real init - login (bash/poc/
+  // login.c), forked and exec'd well below this one, is what actually
+  // drops privilege to a non-root account once someone logs in.
+  p->uid = p->euid = p->suid = 0;
+  p->gid = p->egid = p->sgid = 0;
+  p->umask = 022;
+
   // this assignment to p->state lets other cores
   // run this process. the acquire forces the above
   // writes to be visible, and the lock is also needed
@@ -231,6 +238,15 @@ fork(void)
   // internals make (thread-local errno, stdio locking, ...) in literally
   // every forked child, regardless of what it went on to do next.
   np->tls_base = curproc->tls_base;
+
+  // A forked child inherits the parent's full identity (real uid/gid,
+  // effective, saved, and umask) - ordinary fork() semantics; only
+  // setuid/setgid (kernel/sysproc.c) or setuid-on-exec (kernel/exec.c)
+  // ever change these afterwards.
+  np->uid = curproc->uid;   np->gid = curproc->gid;
+  np->euid = curproc->euid; np->egid = curproc->egid;
+  np->suid = curproc->suid; np->sgid = curproc->sgid;
+  np->umask = curproc->umask;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;

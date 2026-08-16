@@ -328,6 +328,119 @@ sys_arch_prctl(void)
   return 0;
 }
 
+// Multi-user identity syscalls (include/syscall.h, include/proc.h's
+// uid/gid/euid/egid/suid/sgid/umask fields). getters are trivial reads;
+// setters follow real POSIX setuid()/setgid() semantics: a privileged
+// caller (euid==0) may set real+effective+saved together to any value,
+// an unprivileged caller may only move its effective id to its current
+// real or saved id (the standard "temporarily drop, later regain"
+// pattern) - never to an arbitrary uid. seteuid()/setegid() are the
+// effective-only variant of the same rule.
+
+int
+sys_getuid(void)
+{
+  return myproc()->uid;
+}
+
+int
+sys_geteuid(void)
+{
+  return myproc()->euid;
+}
+
+int
+sys_getgid(void)
+{
+  return myproc()->gid;
+}
+
+int
+sys_getegid(void)
+{
+  return myproc()->egid;
+}
+
+int
+sys_setuid(void)
+{
+  int uid;
+  struct proc *p = myproc();
+
+  if(argint(0, &uid) < 0)
+    return -1;
+  if(p->euid == 0){
+    p->uid = p->euid = p->suid = uid;
+    return 0;
+  }
+  if(uid == p->uid || uid == p->suid){
+    p->euid = uid;
+    return 0;
+  }
+  return -1;
+}
+
+int
+sys_seteuid(void)
+{
+  int uid;
+  struct proc *p = myproc();
+
+  if(argint(0, &uid) < 0)
+    return -1;
+  if(p->euid != 0 && uid != (int)p->uid && uid != (int)p->suid)
+    return -1;
+  p->euid = uid;
+  return 0;
+}
+
+int
+sys_setgid(void)
+{
+  int gid;
+  struct proc *p = myproc();
+
+  if(argint(0, &gid) < 0)
+    return -1;
+  if(p->euid == 0){
+    p->gid = p->egid = p->sgid = gid;
+    return 0;
+  }
+  if(gid == p->gid || gid == p->sgid){
+    p->egid = gid;
+    return 0;
+  }
+  return -1;
+}
+
+int
+sys_setegid(void)
+{
+  int gid;
+  struct proc *p = myproc();
+
+  if(argint(0, &gid) < 0)
+    return -1;
+  if(p->euid != 0 && gid != (int)p->gid && gid != (int)p->sgid)
+    return -1;
+  p->egid = gid;
+  return 0;
+}
+
+// Returns the previous mask, matching real umask(2).
+int
+sys_umask(void)
+{
+  int mask;
+  struct proc *p = myproc();
+  int old = p->umask;
+
+  if(argint(0, &mask) < 0)
+    return -1;
+  p->umask = mask & 0777;
+  return old;
+}
+
 // return how many clock tick interrupts have occurred
 // since start.
 int

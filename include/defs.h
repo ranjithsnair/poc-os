@@ -59,6 +59,7 @@ int             readi(struct inode*, char*, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, char*, uint, uint);
 int             itruncto(struct inode*, uint);
+int             permcheck(struct inode*, int, int, int);
 
 // ide.c
 void            ideinit(void);
