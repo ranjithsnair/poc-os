@@ -87,6 +87,23 @@ mouseintr(void)
   }
 }
 
+// Readiness check for kernel/epoll.c's fdready() - see
+// kernel/console.c's consolereadable() for the full reasoning (same
+// underlying gap: fdready()'s old default assumed every non-pipe/
+// non-socket fd behaves like an ordinary disk file, never blocking a
+// read() - false for this device too, whose mouseread() genuinely
+// blocks until a real PS/2 packet arrives).
+int
+mousereadable(void)
+{
+  int r;
+
+  acquire(&mouse.lock);
+  r = (mouse.nread != mouse.nwrite);
+  release(&mouse.lock);
+  return r;
+}
+
 int
 mouseread(struct inode *ip, char *dst, int n)
 {

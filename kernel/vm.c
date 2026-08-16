@@ -338,7 +338,17 @@ deallocuvm(pde_t *pgdir, uintp oldsz, uintp newsz)
       // that exact panic the moment any process holding such a
       // mapping exits/execs/shrinks. Just drop the mapping; there is
       // nothing to return to the allocator.
-      if(pa < PHYSTOP){
+      //
+      // PTE_SHM (include/mmu.h) is the same idea for a different
+      // reason: kernel/shm.c's shared-memory pages *are* ordinary
+      // kalloc()'d RAM (always < PHYSTOP), but - unlike every other
+      // anonymous page reaching this loop - may still be mapped into a
+      // second process's page table too. Freeing one process's mapping
+      // here would yank memory out from under whoever else has it
+      // mapped; the actual free happens once, in shmclose(), only
+      // after the shm object's own struct file ref count (shared
+      // across every fd/process referencing it) reaches zero.
+      if(pa < PHYSTOP && !(*pte & PTE_SHM)){
         char *v = P2V(pa);
         kfree(v);
       }
@@ -555,7 +565,41 @@ copyuvm(pde_t *pgdir, uintp sz)
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
-    flags = PTE_FLAGS(*pte);
+    // Device memory (the framebuffer's real VRAM, mapped by
+    // kernel/sysproc.c's sys_mmap() FRAMEBUFFER branch - always
+    // pa >= PHYSTOP, the same test deallocuvm() below already uses to
+    // recognize "not ordinary kalloc()'d RAM, don't kfree() it") is
+    // shared with the child directly, by mapping the same physical
+    // page again, rather than copied: real mmap()'d device memory
+    // stays shared across fork() on a real OS (the child sees the
+    // same live VRAM, not a frozen snapshot from fork() time), and
+    // copying it here isn't just semantically wrong but was
+    // impossible outright - P2V(pa) (include/memlayout.h) for a VRAM
+    // address this high (e.g. a real BIOS/QEMU VBE framebuffer at
+    // 0xfd000000) silently wraps around 64-bit arithmetic
+    // (KERNBASE=0xFFFFFFFF80000000 + 0xfd000000 overflows to
+    // 0x7d000000, not a valid kernel address), producing a bogus
+    // source pointer for the memmove() below and panicking the
+    // kernel on the very next fork() any process with the framebuffer
+    // mapped ever made - found via a real GDB backtrace (no prior
+    // test program had ever both mmap()'d the framebuffer and called
+    // fork(), so this was never exercised before GUI roadmap phase 7
+    // (libguitest.c) did both).
+    if(pa >= PHYSTOP){
+      if(mappages(d, (void*)i, PGSIZE, pa, PTE_FLAGS(*pte)) < 0)
+        goto bad;
+      continue;
+    }
+    // PTE_SHM (include/mmu.h) is stripped here: this loop already
+    // gives the child its own freshly kalloc()'d, physically distinct
+    // copy of the page (fork() has no real COW in this kernel) - a
+    // child that inherited a shm mapping this way is no longer
+    // sharing anything with the shmobj it came from, so its copy must
+    // go back to being an ordinary, normally-freed anonymous page.
+    // Leaving the flag set would make deallocuvm() skip kfree()ing it
+    // forever (mistaking it for a still-shared page), leaking it on
+    // every such child's exit.
+    flags = PTE_FLAGS(*pte) & ~PTE_SHM;
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);

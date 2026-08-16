@@ -8,6 +8,7 @@ OBJS = \
 	$(OBJDIR)/kernel/acpi.o\
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
+	$(OBJDIR)/kernel/epoll.o\
 	$(OBJDIR)/kernel/exec.o\
 	$(OBJDIR)/kernel/file.o\
 	$(OBJDIR)/kernel/fs.o\
@@ -23,11 +24,14 @@ OBJS = \
 	$(OBJDIR)/kernel/picirq.o\
 	$(OBJDIR)/kernel/pipe.o\
 	$(OBJDIR)/kernel/proc.o\
+	$(OBJDIR)/kernel/shm.o\
 	$(OBJDIR)/kernel/sleeplock.o\
+	$(OBJDIR)/kernel/socket.o\
 	$(OBJDIR)/kernel/spinlock.o\
 	$(OBJDIR)/kernel/string.o\
 	$(OBJDIR)/kernel/syscall.o\
 	$(OBJDIR)/kernel/sysfile.o\
+	$(OBJDIR)/kernel/sysnet.o\
 	$(OBJDIR)/kernel/sysproc.o\
 	$(OBJDIR)/kernel/trap.o\
 	$(OBJDIR)/kernel/uart.o\
@@ -789,6 +793,14 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/multibyte/btowc.o \
 	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_init.o \
 	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_destroy.o \
+	$(OBJDIR)/musl-pic/src/network/socket.o \
+	$(OBJDIR)/musl-pic/src/network/bind.o \
+	$(OBJDIR)/musl-pic/src/network/listen.o \
+	$(OBJDIR)/musl-pic/src/network/accept.o \
+	$(OBJDIR)/musl-pic/src/network/connect.o \
+	$(OBJDIR)/musl-pic/src/network/sendmsg.o \
+	$(OBJDIR)/musl-pic/src/network/recvmsg.o \
+	$(OBJDIR)/musl-pic/src/linux/epoll.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -812,6 +824,30 @@ $(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
 	$(LD) -m elf_x86_64 -shared -e _dlstart -z defs -o $@ $^
 	$(OBJCOPY) --strip-debug $@
 	$(OBJCOPY) --strip-unneeded $@
+
+# libgui.so (GUI roadmap phase 7): a real second shared object,
+# DT_NEEDED-linked by every gui/ client instead of statically
+# duplicating this code into each one (rasterizer + font rendering +
+# the bespoke client wire protocol - see gui/libgui/'s own files).
+# Unlike libc.so above, this is a normal shared library loaded via
+# ld.so's own DT_NEEDED walk (musl/ldso/dynlink.c's load_library(),
+# real unmodified upstream code, confirmed to already work for
+# anything libc.so itself needs) - not an ELF interpreter, so no -e
+# entry point, and no explicit -soname: consuming binaries link with
+# -lgui -L $(BUILD), which records a plain "libgui.so" DT_NEEDED
+# entry, found at runtime via ld.so's default /lib:/usr/local/lib:
+# /usr/lib search path once installed at /usr/lib/libgui.so (see
+# MKFS_INSTALL below) - exactly how /usr/lib/libc.so itself is
+# already found today, just for a second .so for the first time.
+$(BUILD)/libgui.so: $(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
+                     $(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+                     $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -shared -z defs -o $@ \
+		$(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
+		$(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/libgui.dis
+	$(OBJCOPY) --strip-debug $@
 
 # Scrt1: musl/crt/Scrt1.c is just "#include crt1.c" (see musl/crt/
 # crt1.c) - the *-fPIC compiled* variant of the same _start real musl
@@ -1561,6 +1597,17 @@ $(OBJDIR)/bash-pic/poc/%.o: bash/poc/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
 
+# gui/ (GUI roadmap phases 6-10: libgui.so + compositor/login/terminal
+# clients) isn't under bash/, so it needs its own explicit pattern rule
+# - same BASH_PIC_CFLAGS/BASH_INC environment as bash-pic/poc/%.o
+# above (proven by fbtest.c/guitest.c/bashpipetest.c's own needs:
+# fork/pipe/mmap/ioctl and bash_prelude.h's uname/getrlimit/times
+# shims), plus -Igui/libgui so any gui/*.c can #include "libgui.h"
+# without a relative path.
+$(OBJDIR)/gui-pic/%.o: gui/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libgui -c -o $@ $<
+
 $(OBJDIR)/bash-pic/poc/builtins/%.o: bash/poc/builtins/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
@@ -1815,6 +1862,74 @@ $(BUILD)/_bashpipetest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/ba
 	$(OBJDUMP) -S $@ > $(BUILD)/bashpipetest.dis
 	$(OBJCOPY) --strip-debug $@
 
+# ipctest: see bash/poc/ipctest.c's own comment - verifies GUI roadmap
+# phase 6's restored socket/shm/epoll kernel code (kernel/socket.c,
+# shm.c, epoll.c, sysnet.c) still works end-to-end before Phase 7
+# builds libgui.so on top of it.
+$(BUILD)/_ipctest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/ipctest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/ipctest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/ipctest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# libguitest: see bash/poc/libguitest.c's own comment - verifies GUI
+# roadmap phase 7's libgui.so (rasterizer + font rendering + bespoke
+# client wire protocol) against a minimal stub compositor. Needs
+# -Igui/libgui on top of the generic bash-pic/poc/%.o pattern rule's
+# shape, same precedent as curses_test.o's -Icurses/include below -
+# and links against libgui.so in addition to libc.so, the first
+# executable in this codebase to do so.
+$(OBJDIR)/bash-pic/poc/libguitest.o: bash/poc/libguitest.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) -Igui/libgui $(BASH_INC) -c -o $@ $<
+
+$(BUILD)/_libguitest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/libguitest.o \
+                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/libguitest.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/libguitest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# compositor: gui/compositor.c's own comment - GUI roadmap phase 8's
+# real yutani-equivalent daemon. Compiled via the gui-pic/%.o generic
+# pattern rule above (already has -Igui/libgui built in), linked
+# against libgui.so (rasterizer/font) same as libguitest above.
+$(BUILD)/_compositor: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/compositor.o \
+                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/compositor.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/compositor.dis
+	$(OBJCOPY) --strip-debug $@
+
+# guiclient: bash/poc/guiclient.c's own comment - an ordinary libgui.so
+# client for exercising the real compositor above (unlike libguitest's
+# own built-in stub compositor). Same -Igui/libgui + libgui.so linking
+# as libguitest.
+$(OBJDIR)/bash-pic/poc/guiclient.o: bash/poc/guiclient.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) -Igui/libgui $(BASH_INC) -c -o $@ $<
+
+$(BUILD)/_guiclient: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guiclient.o \
+                      $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/guiclient.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/guiclient.dis
+	$(OBJCOPY) --strip-debug $@
+
+# phase8test: see bash/poc/phase8test.c's own comment - launches
+# compositor + two guiclient windows via fork()+exec() directly,
+# bypassing bash's own broken "&" background-job stdin redirection.
+$(BUILD)/_phase8test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/phase8test.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/phase8test.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/phase8test.dis
+	$(OBJCOPY) --strip-debug $@
+
 # curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
 # port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
 # include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
@@ -1875,6 +1990,9 @@ MKFS_INSTALL_DEPS = $(BUILD)/_dinit
 # segment (--dynamic-linker /usr/lib/libc.so above) as the dynamic
 # linker to load. Kept deliberately small - see $(BUILD)/_ghead's own
 # comment above for why head/tr/cut aren't here too (MAXFILE).
+MKFS_INSTALL += usr/lib/libgui.so:$(BUILD)/libgui.so
+MKFS_INSTALL_DEPS += $(BUILD)/libgui.so
+
 MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \
 	usr/bin/echo:$(BUILD)/_gecho usr/bin/basename:$(BUILD)/_basename \
@@ -1955,6 +2073,24 @@ MKFS_INSTALL_DEPS += $(BUILD)/_guitest
 # bashpipetest: see $(BUILD)/_bashpipetest's own comment above.
 MKFS_INSTALL += usr/bin/bashpipetest:$(BUILD)/_bashpipetest
 MKFS_INSTALL_DEPS += $(BUILD)/_bashpipetest
+
+# ipctest: see $(BUILD)/_ipctest's own comment above.
+MKFS_INSTALL += usr/bin/ipctest:$(BUILD)/_ipctest
+MKFS_INSTALL_DEPS += $(BUILD)/_ipctest
+
+# libguitest: see $(BUILD)/_libguitest's own comment above.
+MKFS_INSTALL += usr/bin/libguitest:$(BUILD)/_libguitest
+MKFS_INSTALL_DEPS += $(BUILD)/_libguitest
+
+# compositor/guiclient: see their own Makefile build rules above -
+# GUI roadmap phase 8's real compositor daemon and an ordinary client
+# to exercise it.
+MKFS_INSTALL += usr/bin/compositor:$(BUILD)/_compositor
+MKFS_INSTALL_DEPS += $(BUILD)/_compositor
+MKFS_INSTALL += usr/bin/guiclient:$(BUILD)/_guiclient
+MKFS_INSTALL_DEPS += $(BUILD)/_guiclient
+MKFS_INSTALL += usr/bin/phase8test:$(BUILD)/_phase8test
+MKFS_INSTALL_DEPS += $(BUILD)/_phase8test
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

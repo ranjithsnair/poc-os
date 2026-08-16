@@ -11,6 +11,9 @@ struct stat;
 struct superblock;
 struct termios;
 struct winsize;
+struct socket;
+struct shmobj;
+struct epollfd;
 
 // bio.c
 void            binit(void);
@@ -25,6 +28,7 @@ void            consoleintr(int(*)(void));
 void            consolegettermios(struct termios*);
 void            consolesettermios(struct termios*);
 void            consolegetwinsize(struct winsize*);
+int             consolereadable(void);
 void            panic(char*) __attribute__((noreturn));
 
 // exec.c
@@ -83,6 +87,7 @@ void            kbdintr(void);
 // mouse.c (GUI roadmap phase 3)
 void            mouseinit(void);
 void            mouseintr(void);
+int             mousereadable(void);
 
 // lapic.c
 void            cmostime(struct rtcdate *r);
@@ -115,6 +120,27 @@ int             pipealloc(struct file**, struct file**);
 void            pipeclose(struct pipe*, int);
 int             piperead(struct pipe*, char*, int);
 int             pipewrite(struct pipe*, char*, int);
+int             pipereadable(struct pipe*);
+int             pipewritable(struct pipe*);
+
+// socket.c - AF_UNIX stream sockets (GUI roadmap phase 3)
+void            sockinit(void);
+struct file*    sockcreate(void);
+int             sockbind(struct socket*, char*);
+int             socklisten(struct socket*);
+int             sockconnect(struct socket*, char*);
+struct socket*  sockaccept(struct socket*);
+int             sockpair(struct socket**, struct socket**);
+int             socksend(struct socket*, char*, int, struct file**, int);
+int             sockrecv(struct socket*, char*, int, struct file**, int*, int);
+void            sockclose(struct socket*);
+int             sockreadable(struct socket*);
+int             sockwritable(struct socket*);
+
+// shm.c - POSIX-ish shared memory (GUI roadmap phase 3)
+void            shminit(void);
+struct file*    shmcreate(uint);
+void            shmclose(struct shmobj*);
 
 //PAGEBREAK: 16
 // proc.c
@@ -168,7 +194,7 @@ int             argint(int, int*);
 int             argptr(int, char**, int);
 int             argstr(int, char**);
 
-// kernel/sysfile.c
+// kernel/sysfile.c - shared with sysnet.c/shm.c/epoll.c (phase 3)
 int             argfd(int, int*, struct file**);
 int             fdalloc(struct file*);
 int             fetchint(uintp, int*);

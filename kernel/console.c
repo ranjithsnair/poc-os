@@ -474,6 +474,28 @@ consoleintr(int (*getc)(void))
   }
 }
 
+// Readiness check for kernel/epoll.c's fdready() - GUI roadmap phase
+// 8's compositor is the first program to epoll a device fd (this one
+// and kernel/mouse.c's) alongside a real socket, exposing fdready()'s
+// old "default: return 1" for anything that isn't FD_PIPE/FD_SOCK:
+// that default is correct for an ordinary disk file (a read() there
+// never blocks waiting for more data to arrive) but wrong for the
+// console, whose consoleread() genuinely blocks until a real keystroke
+// lands - epoll_wait() would otherwise always report it ready, and a
+// caller's subsequent read() would then hang the whole event loop the
+// first time nothing was actually typed yet. input.r != input.w is
+// exactly what consoleread()'s own wait loop below already checks.
+int
+consolereadable(void)
+{
+  int r;
+
+  acquire(&cons.lock);
+  r = (input.r != input.w);
+  release(&cons.lock);
+  return r;
+}
+
 int
 consoleread(struct inode *ip, char *dst, int n)
 {
