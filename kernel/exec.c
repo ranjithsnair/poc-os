@@ -23,7 +23,7 @@ exec(char *path, char **argv)
   char *s, *last;
   int i, off;
   uint argc;
-  uintp sz, sp, ustack[3+MAXARG+1];
+  uintp sz, sp, ustack[MAXARG+1];
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
@@ -80,15 +80,13 @@ exec(char *path, char **argv)
   clearpteu(pgdir, (char*)(sz - (USTACKPAGES+1)*PGSIZE));
   sp = sz;
 
-#ifdef X64
   // Push argument strings, then the argv[] pointer array itself -
   // ustack[3..] becomes that array, once the strings' final addresses
-  // are all known. Unlike the 32-bit build, there's no fake-return-PC/
-  // argc/argv-pointer header to also push here: main() is entered
-  // directly (via iretq, not a call, so nothing reads a return
-  // address off the stack) with argc/argv passed the same way any
-  // SysV AMD64 call would - in %rdi/%rsi, set directly in the
-  // trapframe below - rather than read off the stack.
+  // are all known. There's no fake-return-PC/argc/argv-pointer header
+  // to also push here: main() is entered directly (via iretq, not a
+  // call, so nothing reads a return address off the stack) with argc/
+  // argv passed the same way any SysV AMD64 call would - in %rdi/%rsi,
+  // set directly in the trapframe below - rather than read off the stack.
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
       goto bad;
@@ -127,51 +125,6 @@ exec(char *path, char **argv)
   switchuvm(curproc);
   freevm(oldpgdir);
   return 0;
-#else
-  // Push argument strings, prepare rest of stack in ustack.
-  // Copies each argv[] string itself onto the new stack (rounding sp
-  // down to a 4-byte boundary each time) and records where it landed;
-  // ustack[3..] then becomes the argv[] pointer array that follows,
-  // once the strings' final addresses are all known.
-  for(argc = 0; argv[argc]; argc++) {
-    if(argc >= MAXARG)
-      goto bad;
-    sp = (sp - (strlen(argv[argc]) + 1)) & ~3;
-    if(copyout(pgdir, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
-      goto bad;
-    ustack[3+argc] = sp;
-  }
-  ustack[3+argc] = 0;
-
-  // Lay out the rest of the initial stack frame exactly as main()'s
-  // caller (crt-style startup code in initcode.asm/usys.asm) expects to
-  // find it: a fake return PC (main is never supposed to return, so this
-  // is never actually used), then argc, then a pointer to the argv[]
-  // array that ustack[3..] holds.
-  ustack[0] = 0xffffffff;  // fake return PC
-  ustack[1] = argc;
-  ustack[2] = sp - (argc+1)*4;  // argv pointer
-
-  sp -= (3+argc+1) * 4;
-  if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0)
-    goto bad;
-
-  // Save program name for debugging.
-  for(last=s=path; *s; s++)
-    if(*s == '/')
-      last = s+1;
-  safestrcpy(curproc->name, last, sizeof(curproc->name));
-
-  // Commit to the user image.
-  oldpgdir = curproc->pgdir;
-  curproc->pgdir = pgdir;
-  curproc->sz = sz;
-  curproc->tf->eip = elf.entry;  // main
-  curproc->tf->esp = sp;
-  switchuvm(curproc);
-  freevm(oldpgdir);
-  return 0;
-#endif
 
  bad:
   if(pgdir)
@@ -183,7 +136,6 @@ exec(char *path, char **argv)
   return -1;
 }
 
-#ifdef X64
 // Like exec(), but for musl-linked binaries rather than poc-os's own
 // native ones: takes a third (envp) argument, and instead of handing
 // argc/argv to the new program in %rdi/%rsi, builds the Linux-shaped
@@ -194,11 +146,8 @@ exec(char *path, char **argv)
 // %rsp in memory (the pointer block is what's closest to the top of
 // the stack, i.e. lowest address, since the stack grows down from sz).
 //
-// A separate function from exec() - sharing its ELF-loading loop would
-// have meant threading a stack-layout choice through the single 64-bit
-// exec() body, and this file already carries a from-scratch 32-bit
-// exec() variant behind #ifdef X64/#else, so one more full variant here
-// follows existing precedent rather than fighting it.
+// A separate function from exec() rather than threading a stack-layout
+// choice through the single exec() body.
 int
 execve(char *path, char **argv, char **envp)
 {
@@ -451,4 +400,3 @@ execve(char *path, char **argv, char **envp)
   }
   return -1;
 }
-#endif

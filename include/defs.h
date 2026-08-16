@@ -9,6 +9,8 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct termios;
+struct winsize;
 
 // bio.c
 void            binit(void);
@@ -20,13 +22,14 @@ void            bwrite(struct buf*);
 void            consoleinit(void);
 void            cprintf(char*, ...);
 void            consoleintr(int(*)(void));
+void            consolegettermios(struct termios*);
+void            consolesettermios(struct termios*);
+void            consolegetwinsize(struct winsize*);
 void            panic(char*) __attribute__((noreturn));
 
 // exec.c
 int             exec(char*, char**);
-#ifdef X64
 int             execve(char*, char**, char**);
-#endif
 
 // file.c
 struct file*    filealloc(void);

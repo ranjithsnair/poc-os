@@ -9,20 +9,20 @@ typedef unsigned char  uchar;
 // (ILP32) one, whereas `unsigned long long` is 8 bytes under GCC on
 // both. This matters because boot/bootmain.c - always compiled 32-bit,
 // see the Makefile's BOOTCC, since it runs before long mode exists -
-// still has to parse a 64-bit kernel's genuinely-64-bit-field ELF
-// header (include/elf.h's X64 struct elfhdr/proghdr) when ARCH=64.
+// still has to parse the 64-bit kernel's genuinely-64-bit-field ELF
+// header (include/elf.h's struct elfhdr/proghdr).
 typedef unsigned long long uint64;
 
-// uintp: an unsigned integer the same width as a pointer on this build -
-// unsigned int (4 bytes) under the 32-bit build, an exact alias for uint
-// so 32-bit codegen is unaffected; unsigned long (8 bytes) under the
-// 64-bit build. Used anywhere a virtual or physical address is stored in
-// an integer (not a typed pointer) - e.g. memlayout.h's V2P/P2V - since a
-// plain uint would truncate a 64-bit address.
-#ifdef X64
+// uintp: an unsigned integer the same width as a pointer on this build.
+// Used anywhere a virtual or physical address is stored in an integer
+// (not a typed pointer) - e.g. memlayout.h's V2P/P2V - since a plain
+// uint would truncate a 64-bit address. Deliberately `unsigned long`,
+// not a fixed-width type: its size already follows the target ABI
+// (8 bytes under the kernel/user -m64 build's LP64 model, 4 under
+// boot/*.c's own always-32-bit -m32 build's ILP32 model - see the
+// Makefile's BOOTCFLAGS - which is exactly the width each of those
+// needs its own native pointers to be), with no preprocessor
+// conditional required to pick between them.
 typedef unsigned long  uintp;
-#else
-typedef unsigned int   uintp;
-#endif
 
 typedef uintp pde_t;

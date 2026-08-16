@@ -16,9 +16,7 @@ int read(int, void*, int);
 int close(int);
 int kill(int);
 int exec(char*, char**);
-#ifdef X64
 int execve(char*, char**, char**);
-#endif
 int open(const char*, int);
 int mknod(const char*, short, short);
 int unlink(const char*);

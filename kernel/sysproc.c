@@ -16,6 +16,7 @@
 #include "file.h"
 #include "proc.h"
 #include "syscall.h"
+#include "termios.h"
 
 int
 sys_fork(void)
@@ -87,7 +88,6 @@ sys_sleep(void)
   return 0;
 }
 
-#ifdef X64
 // See include/syscall.h: poc-os has no per-thread ID distinct from
 // pid, so this just reports the caller's pid and otherwise ignores its
 // argument (a real Linux set_tid_address stores it for use by
@@ -135,11 +135,50 @@ sys_brk(void)
   return curproc->sz;
 }
 
-// Stub: always fails - see include/syscall.h.
+// (fd, request, argp): TCGETS/TCSETS(W/F)/TIOCGWINSZ on the console
+// device only - anything else fails, matching this OS's one real tty.
+// fd->struct file lookup duplicates sysfile.c's static argfd() (not
+// reachable from this file) rather than relocating the syscall there.
 int
 sys_ioctl(void)
 {
-  return -1;
+  int fd, req;
+  char *p;
+  struct file *f;
+
+  if(argint(0, &fd) < 0 || argint(1, &req) < 0)
+    return -1;
+  if(fd < 0 || fd >= NOFILE || (f = myproc()->ofile[fd]) == 0)
+    return -1;
+  if(f->type != FD_INODE || f->ip->major != CONSOLE)
+    return -1;
+
+  switch(req){
+  case TCGETS:
+    if(argptr(2, &p, sizeof(struct termios)) < 0)
+      return -1;
+    consolegettermios((struct termios*)p);
+    return 0;
+  case TCSETS:
+  case TCSETSW:
+  case TCSETSF:
+    if(argptr(2, &p, sizeof(struct termios)) < 0)
+      return -1;
+    consolesettermios((struct termios*)p);
+    return 0;
+  case TIOCGWINSZ:
+    if(argptr(2, &p, sizeof(struct winsize)) < 0)
+      return -1;
+    consolegetwinsize((struct winsize*)p);
+    return 0;
+  case TIOCSWINSZ:
+    // No real resize support (see consolegetwinsize()'s own comment) -
+    // accept and ignore, the same way a real tty would accept it even
+    // if nothing were listening for the corresponding SIGWINCH.
+    return 0;
+  default:
+    return -1;
+  }
 }
 
 // Stub: always succeeds without doing anything - see include/syscall.h.
@@ -288,7 +327,6 @@ sys_arch_prctl(void)
   myproc()->tls_base = (uintp)(uint)addr;
   return 0;
 }
-#endif
 
 // return how many clock tick interrupts have occurred
 // since start.

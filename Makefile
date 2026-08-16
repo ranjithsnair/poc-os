@@ -4,15 +4,6 @@
 # default explicitly so a bare `make` builds the OS image like `make all`.
 .DEFAULT_GOAL := all
 
-# ARCH selects the target: 64 (default) builds a native x86-64 long-mode
-# kernel; 32 builds the original x86 protected-mode kernel. Most C sources
-# are shared and branch on the X64 preprocessor macro (see CPPFLAGS below);
-# a handful of files that differ in kind rather than in a few constants -
-# entry, context switch, trap entry/return, the raw instruction-wrapper
-# asm, and the linker script - have distinct 32-bit and 64-bit versions,
-# selected below via ENTRYOBJ/SWTCHOBJ/TRAPASMOBJ/X86ASMOBJ/KERNELLD.
-ARCH ?= 64
-
 OBJS = \
 	$(OBJDIR)/kernel/bio.o\
 	$(OBJDIR)/kernel/console.o\
@@ -41,27 +32,18 @@ OBJS = \
 	$(OBJDIR)/kernel/vectors.o\
 	$(OBJDIR)/kernel/vm.o\
 
-ifeq ($(ARCH),64)
-ENTRYOBJ = $(OBJDIR)/kernel/entry64.o
-SWTCHOBJ = $(OBJDIR)/kernel/swtch64.o
-TRAPASMOBJ = $(OBJDIR)/kernel/trapasm64.o
-X86ASMOBJ = $(OBJDIR)/kernel/x86_64.o
-KERNELLD = kernel/kernel64.ld
-INITCODEOBJ = $(OBJDIR)/user/initcode64.o
-else
 ENTRYOBJ = $(OBJDIR)/kernel/entry.o
 SWTCHOBJ = $(OBJDIR)/kernel/swtch.o
 TRAPASMOBJ = $(OBJDIR)/kernel/trapasm.o
 X86ASMOBJ = $(OBJDIR)/kernel/x86.o
 KERNELLD = kernel/kernel.ld
 INITCODEOBJ = $(OBJDIR)/user/initcode.o
-endif
 OBJS += $(SWTCHOBJ) $(TRAPASMOBJ) $(X86ASMOBJ)
 
 # Toolchain: x86_64-elf-gcc/ld (Homebrew, /usr/local/bin) is multilib - it
 # takes -m32 as well as -m64 (see BOOTCFLAGS/CFLAGS below) and its ld
 # supports both the elf_i386 and elf_x86_64 emulations - so this one
-# toolchain builds ARCH=32, ARCH=64, and the always-32-bit boot
+# toolchain builds the 64-bit kernel and the always-32-bit boot
 # sector/AP trampoline alike. No separate i686-elf- toolchain needed.
 TOOLPREFIX = x86_64-elf-
 CC = $(TOOLPREFIX)gcc
@@ -69,83 +51,55 @@ LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
-# qemu-system-x86_64's CPU is backwards compatible with 32-bit protected
-# mode, so the same binary boots an ARCH=32 kernel as well as ARCH=64.
 QEMU = qemu-system-x86_64
 
 # NASM assembles all the .asm (Intel-syntax) sources. The shared C headers
 # in include/ (constants, struct layouts) are still expanded into them with
 # the C preprocessor before NASM ever sees the file - see the %.o: %.asm
 # rules below. BOOTNASMFLAGS is for the always-32-bit boot sector/AP
-# trampoline; NASMFLAGS follows ARCH and is used for every other
-# hand-written .asm source.
+# trampoline; NASMFLAGS is used for every other hand-written .asm source.
 NASM = nasm
 BOOTNASMFLAGS = -f elf32 -g
-ifeq ($(ARCH),64)
 NASMFLAGS = -f elf64 -g
-else
-NASMFLAGS = -f elf32 -g
-endif
 
 # All headers live in include/, shared by boot/, kernel/, user/ and mkfs/.
-# -DX64 lets shared headers (types.h, mmu.h, memlayout.h, x86.h, proc.h,
-# elf.h) branch to their 64-bit struct/constant definitions.
 CPPFLAGS = -Iinclude
-ifeq ($(ARCH),64)
-CPPFLAGS += -DX64
-endif
 
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable
-ifeq ($(ARCH),64)
-CFLAGS += -m64
-else
-CFLAGS += -m32
-endif
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -m64
 # Nothing here ever sets CR0/CR4 to enable SSE (no build does FPU/SSE
 # state management for kernel *or* user code) - but x86_64-elf-gcc's
-# codegen baseline includes SSE2 in both -m64 and -m32 mode (its -m32
-# multilib isn't the plain no-SSE i386 baseline a dedicated 32-bit-only
-# cross-gcc would default to), so GCC will happily autovectorize an
-# ordinary scalar loop into SSE instructions at -O2 with no other
-# prompting. Executing one with SSE disabled raises #UD/#NM; this early
-# in boot, with no IDT installed yet, that's an instant triple fault -
-# so -mgeneral-regs-only rules out vector codegen entirely, for both
-# ARCH values and for kernel and user code alike.
+# codegen baseline includes SSE2 even in -m64 mode, so GCC will happily
+# autovectorize an ordinary scalar loop into SSE instructions at -O2
+# with no other prompting. Executing one with SSE disabled raises
+# #UD/#NM; this early in boot, with no IDT installed yet, that's an
+# instant triple fault - so -mgeneral-regs-only rules out vector
+# codegen entirely, for kernel and user code alike.
 CFLAGS += -mgeneral-regs-only
-# x86_64-elf-gcc supports -fno-stack-protector and -fno-pie/-no-pie in
-# both -m32 and -m64 mode, so these are added unconditionally.
 CFLAGS += -fno-stack-protector -fno-pie -no-pie
 
 # boot/*.c and kernel/entryother.asm compile with the fixed-32-bit
 # BOOTNASMFLAGS above, but still want the same warning/codegen posture as
 # CFLAGS, so BOOTCFLAGS mirrors it rather than reusing CFLAGS directly
-# (whose -m64/-m32 tracks ARCH, not "always 32-bit") - including
-# -mgeneral-regs-only, for the same reason: boot code runs in
-# real/protected mode with no SSE state management either.
+# (whose -m64 doesn't apply here) - including -mgeneral-regs-only, for
+# the same reason: boot code runs in real/protected mode with no SSE
+# state management either.
 BOOTCFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-error=array-bounds -Wno-error=infinite-recursion -Wno-error=unused-but-set-variable -mgeneral-regs-only -fno-stack-protector -fno-pie -no-pie
 
 # KCFLAGS adds flags needed only for kernel C code proper (not the boot
-# sector, not user programs) on the 64-bit build: -mcmodel=kernel because
-# KERNBASE (0xFFFFFFFF80000000, see memlayout.h) is in the top -2GB, which
-# is exactly the address range GCC's "kernel" code model - as opposed to
-# the default "small" model, which assumes symbols live in the *low* 2GB -
-# is for; -mno-red-zone because an interrupt can land on the kernel stack
-# at any instruction boundary and push a trap frame below the current
-# %rsp, which would silently corrupt a leaf function's red zone.
-ifeq ($(ARCH),64)
+# sector, not user programs): -mcmodel=kernel because KERNBASE
+# (0xFFFFFFFF80000000, see memlayout.h) is in the top -2GB, which is
+# exactly the address range GCC's "kernel" code model - as opposed to
+# the default "small" model, which assumes symbols live in the *low*
+# 2GB - is for; -mno-red-zone because an interrupt can land on the
+# kernel stack at any instruction boundary and push a trap frame below
+# the current %rsp, which would silently corrupt a leaf function's red
+# zone.
 KCFLAGS = -mcmodel=kernel -mno-red-zone
-else
-KCFLAGS =
-endif
 
 # ld's emulation name for each target, hardcoded (confirmed via
 # `x86_64-elf-ld -V` on this machine: elf_x86_64 / elf_i386, not the
 # FreeBSD elf_i386_fbsd variant).
-ifeq ($(ARCH),64)
 LDFLAGS += -m elf_x86_64
-else
-LDFLAGS += -m elf_i386
-endif
 BOOTLDFLAGS += -m elf_i386
 
 # Every generated file lives under build/: final binaries, disk images,
@@ -163,15 +117,14 @@ BOOTLDFLAGS += -m elf_i386
 # that's-the-point) source, never build output; `make clean` is just
 # `rm -rf build`.
 BUILD = build
-OBJDIR = $(BUILD)/obj$(ARCH)
+OBJDIR = $(BUILD)/obj
 
 $(BUILD) $(OBJDIR)/boot $(OBJDIR)/kernel $(OBJDIR)/user $(OBJDIR)/musl-test:
 	mkdir -p $@
 
-# Compile a C source into build/obj<ARCH>/<dir>/<name>.o, keeping the same
+# Compile a C source into build/obj/<dir>/<name>.o, keeping the same
 # boot/kernel/user split the sources themselves use. boot/ always uses the
-# fixed-32-bit BOOTCFLAGS; kernel/ adds KCFLAGS on top of the
-# ARCH-selected CFLAGS.
+# fixed-32-bit BOOTCFLAGS; kernel/ adds KCFLAGS on top of CFLAGS.
 $(OBJDIR)/boot/%.o: boot/%.c | $(OBJDIR)/boot
 	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -c -o $@ $<
 
@@ -192,10 +145,11 @@ $(OBJDIR)/kernel/%.o: kernel/%.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-# kernel/entryother.asm is the one kernel/*.asm source that (until it grows
-# a 64-bit sibling in a later phase) always stays 16/32-bit real/protected
-# mode, like boot/*.asm - this explicit rule overrides the generic
-# ARCH-following pattern above for this file only.
+# kernel/entryother.asm is the one kernel/*.asm source that always stays
+# 16/32-bit real/protected mode, like boot/*.asm (the APs it bootstraps
+# start in real mode regardless of the main kernel's own bitness) -
+# this explicit rule overrides the generic NASMFLAGS pattern above for
+# this file only.
 $(OBJDIR)/kernel/entryother.o: kernel/entryother.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(BOOTNASMFLAGS) -o $@ $(@:.o=.i)
@@ -204,10 +158,17 @@ $(OBJDIR)/user/%.o: user/%.asm | $(OBJDIR)/user
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(@:.o=.i) $<
 	$(NASM) $(NASMFLAGS) -o $@ $(@:.o=.i)
 
-$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/kernel | $(BUILD)
+# poc.img layout: sector 0 = bootblock (stage 1, signed - see below),
+# sectors 1..256 = boot2 (stage 2, zero-padded to exactly that many
+# sectors - see boot/bootmain.c's own STAGE2_SECTORS and boot/
+# boot2main.c's matching KERNEL_LBA), sector 257 onward = the kernel
+# ELF image itself, exactly where it always was relative to stage 1
+# before stage 2 existed, just shifted by stage 2's own footprint.
+$(BUILD)/poc.img: $(BUILD)/bootblock $(BUILD)/boot2 $(BUILD)/kernel | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/poc.img count=10000
 	dd if=$(BUILD)/bootblock of=$(BUILD)/poc.img conv=notrunc
-	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=1 conv=notrunc
+	dd if=$(BUILD)/boot2 of=$(BUILD)/poc.img seek=1 conv=notrunc
+	dd if=$(BUILD)/kernel of=$(BUILD)/poc.img seek=257 conv=notrunc
 
 $(BUILD)/pocmemfs.img: $(BUILD)/bootblock $(BUILD)/kernelmemfs | $(BUILD)
 	dd if=/dev/zero of=$(BUILD)/pocmemfs.img count=10000
@@ -229,17 +190,178 @@ $(BUILD)/bootblock: $(OBJDIR)/boot/bootasm.o $(OBJDIR)/boot/bootmain.o | $(BUILD
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock.o $(BUILD)/bootblock
 	./boot/sign.pl $(BUILD)/bootblock
 
+# boot2main.c (stage 2): unlike bootmain.c (stage 1), no 510-byte
+# budget - the generic $(OBJDIR)/boot/%.o pattern's normal -O2 is fine
+# - but still freestanding (-nostdinc, -fno-pic) like every boot/ file.
+$(OBJDIR)/boot/boot2main.o: boot/boot2main.c | $(OBJDIR)/boot
+	$(CC) $(BOOTCFLAGS) $(CPPFLAGS) -fno-pic -nostdinc -c -o $@ $<
+
+# BOOT2_MAX_SECTORS must match boot/bootmain.c's own STAGE2_SECTORS -
+# how many sectors stage 1 reads stage 2 into before jumping to it.
+# Linked to run at 0x10000 (boot/bootmain.c's STAGE2_ADDR) with -N (no
+# separate page-aligned segments - same reason bootblock itself uses
+# it: this raw-binary-extracted image can only have one contiguous
+# blob, not a gap-separated set of segments) and -e entry2 - boot/
+# boot2asm.o's own tiny stub, linked *first* (see that file's own
+# comment for why -e alone, or source-order alone, isn't enough once
+# this gets flattened to a raw binary and jumped to by hardcoded
+# address).
+BOOT2_MAX_SECTORS = 256
+$(BUILD)/boot2: $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x10000 -o $(OBJDIR)/boot/boot2.o $(OBJDIR)/boot/boot2asm.o $(OBJDIR)/boot/boot2main.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/boot2.o > $(BUILD)/boot2.dis
+	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2.o $(BUILD)/boot2
+	size=$$(stat -f%z $(BUILD)/boot2 2>/dev/null || stat -c%s $(BUILD)/boot2); \
+	max=$$(( $(BOOT2_MAX_SECTORS) * 512 )); \
+	if [ "$$size" -gt "$$max" ]; then \
+		echo "boot2 too large: $$size bytes (max $$max, $(BOOT2_MAX_SECTORS) sectors)" >&2; \
+		exit 1; \
+	fi
+
+# ============================================================
+# BIOS/INT13h boot path: real hardware (legacy IDE, or SATA in
+# AHCI mode via a real BIOS/CSM AHCI driver, or booted from USB),
+# VirtualBox, and QEMU all boot through BIOS/CSM firmware's own
+# INT13h disk services - unlike the ATA-PIO path above (poc.img,
+# fs.img as a *separate* drive), which only works when the disk is
+# attached as an emulated/real legacy IDE hard disk. See boot/
+# bootasm_bios.asm's and boot/boot2_bios.asm's own comments for the
+# full reasoning. Everything here - bootloader, kernel, and the
+# whole root filesystem image - lives on one combined disk image
+# (poc_bios.img), since a real USB stick or a real internal disk is
+# one physical device, not two.
+# ============================================================
+
+# kernel.bin: a raw, already-relocated flattening of the kernel ELF
+# (same idea as bootblock/boot2/entryother/initcode - objcopy -O
+# binary elsewhere in this Makefile - just applied to the kernel
+# itself here) so boot/boot2_bios.asm never needs to parse an ELF
+# header/program headers in real-mode assembly: the segments are
+# already contiguous (kernel64.ld places .text at EXTMEM with
+# .rodata/.data/.bss immediately following), so "load N bytes
+# starting at physical EXTMEM" is the entire job.
+# -O binary only ever contains *file-backed* content (PT_LOAD's
+# p_filesz, not p_memsz) - it silently drops .bss (p_memsz > p_filesz:
+# kernel/entry64.asm's own boot-time page tables, among other kernel
+# globals, live there, reserved but zero-initialized rather than
+# taking up file space) entirely. boot/boot2_bios.asm has no ELF
+# parser to notice this and zero the gap itself the way boot/
+# boot2main.c's real per-segment stosb() loop does (see its own
+# comment for why this port isn't writing one in real-mode assembly) -
+# so it has to already be zeroed *in the file*, by padding kernel.bin
+# out to the highest PT_LOAD segment's real (PhysAddr+MemSiz) extent,
+# here, once, at build time.
+$(BUILD)/kernel.bin: $(BUILD)/kernel | $(BUILD)
+	$(OBJCOPY) -S -O binary $(BUILD)/kernel $(BUILD)/kernel.bin
+	total=$$($(TOOLPREFIX)readelf -W -l $(BUILD)/kernel | python3 -c '\
+import sys; lines=[l.split() for l in sys.stdin if l.strip().startswith("LOAD")]; \
+paddrs=[int(f[3],16) for f in lines]; ends=[int(f[3],16)+int(f[5],16) for f in lines]; \
+print(max(ends)-min(paddrs))'); \
+	truncate -s $$total $(BUILD)/kernel.bin 2>/dev/null || dd if=/dev/zero bs=1 count=0 seek=$$total of=$(BUILD)/kernel.bin conv=notrunc 2>/dev/null
+
+# bootconfig_bios.h: KERNEL_SECTORS/FS_IMG_LBA/KERNEL_ENTRY are real
+# properties of a specific build (the kernel's actual size and entry
+# point), not constants boot2_bios.asm should hardcode by hand -
+# generated here the same way MUSL_GENH's headers are, and %included
+# by boot2_bios.asm via the usual cpp-then-nasm pipeline (see its own
+# build rule below for the extra -I this needs).
+# BOOT2_BIOS_MAX_SECTORS/BOOT2_BIOS_LBA must match boot/bootasm_bios.asm's
+# own STAGE2_SECTORS - how many sectors stage 1 reads stage 2 into
+# (starting at LBA 1) before jumping to it. Far smaller than the ATA-
+# PIO path's BOOT2_MAX_SECTORS: this stage 2 is hand-written assembly
+# with no ELF-parsing logic at all (see boot/boot2_bios.asm's own
+# comment for why), so it doesn't need nearly as much room.
+BOOT2_BIOS_MAX_SECTORS = 16
+BOOT2_BIOS_LBA = $(shell echo $$((1 + $(BOOT2_BIOS_MAX_SECTORS))))
+
+$(OBJDIR)/boot/bootconfig_bios.h: $(BUILD)/kernel.bin $(BUILD)/kernel | $(OBJDIR)/boot
+	kbytes=$$(stat -f%z $(BUILD)/kernel.bin 2>/dev/null || stat -c%s $(BUILD)/kernel.bin); \
+	ksectors=$$(( (kbytes + 511) / 512 )); \
+	kentry=$$($(OBJDUMP) -f $(BUILD)/kernel | sed -n 's/^start address //p'); \
+	{ \
+		echo "#define KERNEL_LBA $(BOOT2_BIOS_LBA)"; \
+		echo "#define KERNEL_SECTORS $$ksectors"; \
+		echo "#define FS_IMG_LBA (KERNEL_LBA + KERNEL_SECTORS)"; \
+		echo "#define KERNEL_ENTRY $$kentry"; \
+	} > $(OBJDIR)/boot/bootconfig_bios.h
+
+$(BUILD)/bootblock_bios: $(OBJDIR)/boot/bootasm_bios.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7C00 -o $(OBJDIR)/boot/bootblock_bios.o $(OBJDIR)/boot/bootasm_bios.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/bootblock_bios.o > $(BUILD)/bootblock_bios.dis
+	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/boot/bootblock_bios.o $(BUILD)/bootblock_bios
+	./boot/sign.pl $(BUILD)/bootblock_bios
+
+# boot2_bios.asm needs bootconfig_bios.h visible on its own include
+# path - the one file in boot/ that does, hence its own rule rather
+# than the generic $(OBJDIR)/boot/%.o: boot/%.asm pattern.
+$(OBJDIR)/boot/boot2_bios.o: boot/boot2_bios.asm $(OBJDIR)/boot/bootconfig_bios.h | $(OBJDIR)/boot
+	$(CC) $(CPPFLAGS) -I$(OBJDIR)/boot -E -x assembler-with-cpp -o $(OBJDIR)/boot/boot2_bios.i boot/boot2_bios.asm
+	$(NASM) $(BOOTNASMFLAGS) -o $@ $(OBJDIR)/boot/boot2_bios.i
+
+# -Ttext 0x1000, not 0x10000 like the ATA-PIO path's boot2 - see boot/
+# bootasm_bios.asm's own comment on STAGE2_ADDR for why (16-bit ELF
+# relocations can't represent an address >= 0x10000).
+$(BUILD)/boot2_bios: $(OBJDIR)/boot/boot2_bios.o | $(BUILD)
+	$(LD) $(BOOTLDFLAGS) -N -e entry2 -Ttext 0x1000 -o $(OBJDIR)/boot/boot2_bios_full.o $(OBJDIR)/boot/boot2_bios.o
+	$(OBJDUMP) -S $(OBJDIR)/boot/boot2_bios_full.o > $(BUILD)/boot2_bios.dis
+	$(OBJCOPY) -S -O binary -j .text -j .rodata -j .data $(OBJDIR)/boot/boot2_bios_full.o $(BUILD)/boot2_bios
+	size=$$(stat -f%z $(BUILD)/boot2_bios 2>/dev/null || stat -c%s $(BUILD)/boot2_bios); \
+	max=$$(( $(BOOT2_BIOS_MAX_SECTORS) * 512 )); \
+	if [ "$$size" -gt "$$max" ]; then \
+		echo "boot2_bios too large: $$size bytes (max $$max, $(BOOT2_BIOS_MAX_SECTORS) sectors)" >&2; \
+		exit 1; \
+	fi
+
+# poc_bios.img layout: sector 0 = bootblock_bios (stage 1), sectors
+# 1..BOOT2_BIOS_MAX_SECTORS = boot2_bios (stage 2), sector KERNEL_LBA
+# (BOOT2_BIOS_LBA, bootconfig_bios.h) onward = kernel.bin, then
+# immediately following (FS_IMG_LBA = KERNEL_LBA + KERNEL_SECTORS) =
+# fs.img - one combined disk image, unlike poc.img+fs.img's two
+# separate drives, since real boot media (a USB stick, an internal
+# disk) is one physical device.
+$(BUILD)/poc_bios.img: $(BUILD)/bootblock_bios $(BUILD)/boot2_bios $(BUILD)/kernel.bin $(BUILD)/fs.img $(OBJDIR)/boot/bootconfig_bios.h | $(BUILD)
+	dd if=/dev/zero of=$(BUILD)/poc_bios.img count=15000
+	dd if=$(BUILD)/bootblock_bios of=$(BUILD)/poc_bios.img conv=notrunc
+	dd if=$(BUILD)/boot2_bios of=$(BUILD)/poc_bios.img seek=1 conv=notrunc
+	dd if=$(BUILD)/kernel.bin of=$(BUILD)/poc_bios.img seek=$(BOOT2_BIOS_LBA) conv=notrunc
+	fsimglba=$$(sed -n 's/^#define KERNEL_SECTORS //p' $(OBJDIR)/boot/bootconfig_bios.h | awk '{print $$1+$(BOOT2_BIOS_LBA)}'); \
+	dd if=$(BUILD)/fs.img of=$(BUILD)/poc_bios.img seek=$$fsimglba conv=notrunc
+
+# One ISO, bootable identically on real hardware (Legacy/CSM BIOS off
+# a USB stick), VirtualBox, and QEMU, whether attached as an optical
+# drive or dd'd straight to a USB stick (isohybrid-style: it's both a
+# valid ISO9660 filesystem *and* the same raw, MBR-bootable disk image
+# poc_bios.img already is - see boot/bootasm_bios.asm's own comment
+# for why that image reads via CHS, not LBA extensions: found the hard
+# way that El-Torito "hard disk emulation" CD-boot - the mechanism
+# that lets a plain BIOS bootloader address an El-Torito-mounted ISO
+# at all - fails INT13h-extensions-present outright on real BIOS/
+# QEMU/SeaBIOS alike, while CHS is the one interface universal across
+# real disks, USB, and El-Torito emulation). -hard-disk-boot tells
+# xorriso to register the whole image as a "hard disk emulation" El
+# Torito boot entry (not "no emulation", which handed back the CD's
+# native drive - passed the extensions check but then hung on the
+# actual extended read; a QEMU/SeaBIOS ATAPI-sector-size quirk, near
+# as can be told) - boot-load-size is irrelevant in that mode (BIOS
+# always loads exactly the one MBR sector, like any real hard disk
+# boot) but xorriso still wants a value.
+$(BUILD)/poc-os.iso: $(BUILD)/poc_bios.img | $(BUILD)
+	rm -rf $(BUILD)/isoroot
+	mkdir -p $(BUILD)/isoroot
+	cp $(BUILD)/poc_bios.img $(BUILD)/isoroot/boot.img
+	xorriso -as mkisofs -o $(BUILD)/poc-os.iso -V POCOS \
+		-b boot.img -hard-disk-boot -boot-load-size 1 $(BUILD)/isoroot
+
 # entryother and initcode are raw binary blobs the kernel embeds with
 # -b binary (see kernel/main.c's and kernel/proc.c's matching
 # _binary_build_..._start symbols) rather than programs run standalone,
 # so unlike everything else in $(OBJS)/ULIB they need their own two-step
 # ld+objcopy recipe instead of just landing in a link line. They're
 # final build products, not intermediates, so - like bootblock, kernel,
-# and mkfs - they live directly in build/, not build/obj<ARCH>/. entryother
+# and mkfs - they live directly in build/, not build/obj/. entryother
 # is always the fixed-32-bit trampoline, linked with BOOTLDFLAGS
 # (see entryother.o's rule above); initcode is $(INITCODEOBJ), which
-# already matches ARCH, so it links with the ARCH-selected LDFLAGS like
-# everything else in $(OBJS).
+# links with LDFLAGS like everything else in $(OBJS).
 $(BUILD)/entryother: $(OBJDIR)/kernel/entryother.o | $(BUILD)
 	$(LD) $(BOOTLDFLAGS) -N -e start -Ttext 0x7000 -o $(OBJDIR)/kernel/bootblockother.o $(OBJDIR)/kernel/entryother.o
 	$(OBJCOPY) -S -O binary -j .text $(OBJDIR)/kernel/bootblockother.o $(BUILD)/entryother
@@ -276,14 +398,13 @@ tags:
 # pattern above, since vectors.asm's "source" is itself a build product,
 # not a file that exists under kernel/.
 $(OBJDIR)/kernel/vectors.asm: kernel/vectors.pl | $(OBJDIR)/kernel
-	./kernel/vectors.pl $(ARCH) > $(OBJDIR)/kernel/vectors.asm
+	./kernel/vectors.pl > $(OBJDIR)/kernel/vectors.asm
 
 $(OBJDIR)/kernel/vectors.o: $(OBJDIR)/kernel/vectors.asm | $(OBJDIR)/kernel
 	$(CC) $(CPPFLAGS) -E -x assembler-with-cpp -o $(OBJDIR)/kernel/vectors.i $(OBJDIR)/kernel/vectors.asm
 	$(NASM) $(NASMFLAGS) -o $@ $(OBJDIR)/kernel/vectors.i
 
-USYSOBJ = $(if $(filter 64,$(ARCH)),$(OBJDIR)/user/usys64.o,$(OBJDIR)/user/usys.o)
-ULIB = $(OBJDIR)/user/ulib.o $(USYSOBJ) $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(X86ASMOBJ)
+ULIB = $(OBJDIR)/user/ulib.o $(OBJDIR)/user/usys.o $(OBJDIR)/user/printf.o $(OBJDIR)/user/umalloc.o $(X86ASMOBJ)
 
 # Debug info (-ggdb, in CFLAGS) is generated for every user binary, same
 # as the kernel, but it's dead weight once mkfs packages the binary into
@@ -302,10 +423,10 @@ $(BUILD)/_%: $(OBJDIR)/user/%.o $(ULIB) | $(BUILD)
 	$(OBJCOPY) --strip-debug $@
 
 # musl-test/: home to runmusl.c (a manual launcher for a musl-crt1-style
-# binary via raw SYS_execve - "runmusl <path> [args...]"; user/sh.c's
-# own isdyn() check in runcmd() makes this unnecessary for the ordinary
-# case of just running true/false/cat by name, but it's still useful
-# standalone, e.g. to pass a path sh.c can't parse as a bare command)
+# binary via raw SYS_execve - "runmusl <path> [args...]" - a real
+# shell, bash, execve()s dynamic binaries directly and needs no such
+# helper for the ordinary case, but this is still useful standalone,
+# e.g. to pass a path bash itself can't reach yet during bring-up)
 # and ldso_stubs.c (linked into libc.so itself - see MUSL_LDSO_OBJS).
 # Unlike ordinary user/ programs these need neither ULIB nor an -e main convention shared
 # with xv6's own ulib.c (they don't link ulib.c at all). -Iinclude is
@@ -418,6 +539,15 @@ $(OBJDIR)/musl-pic/%.o: musl/%.s
 # source path outside musl/ - hence its own rule rather than the
 # generic $(OBJDIR)/musl-pic/%.o: musl/%.c pattern above.
 $(OBJDIR)/musl-pic/coreutils-shims/coreutils_shims.o: coreutils/poc/coreutils_shims.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
+
+# bash_shims.c (see its own comment): the same idea as coreutils_shims.c
+# just above (real libc-shaped gaps - dup2(), uname(), getrlimit()/
+# setrlimit(), times() - poc-os has no syscall for at all), also part of
+# libc.so rather than linked per-executable, so any future dynamically-
+# linked program needing dup2()/uname()/etc gets it for free too.
+$(OBJDIR)/musl-pic/bash-shims/bash_shims.o: bash/poc/bash_shims.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(MUSL_PIC_CFLAGS) $(MUSL_PIC_INC) -c -o $@ $<
 
@@ -641,6 +771,68 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/time/strftime.o \
 	$(OBJDIR)/musl-pic/src/time/timegm.o \
 	$(OBJDIR)/musl-pic/src/unistd/tcgetpgrp.o \
+	$(OBJDIR)/musl-pic/src/process/execve.o \
+	$(OBJDIR)/musl-pic/src/unistd/pipe.o \
+	$(OBJDIR)/musl-pic/src/unistd/dup.o \
+	$(OBJDIR)/musl-pic/src/termios/tcgetattr.o \
+	$(OBJDIR)/musl-pic/src/termios/tcsetattr.o \
+	$(OBJDIR)/musl-pic/src/stdlib/atoi.o \
+	$(OBJDIR)/musl-pic/src/stdlib/imaxdiv.o \
+	$(OBJDIR)/musl-pic/src/ctype/isxdigit.o \
+	$(OBJDIR)/musl-pic/src/ctype/ispunct.o \
+	$(OBJDIR)/musl-pic/src/ctype/isalnum.o \
+	$(OBJDIR)/musl-pic/src/ctype/wcswidth.o \
+	$(OBJDIR)/musl-pic/src/ctype/wcwidth.o \
+	$(OBJDIR)/musl-pic/src/locale/localeconv.o \
+	$(OBJDIR)/musl-pic/src/locale/wcscoll.o \
+	$(OBJDIR)/musl-pic/src/regex/regexec.o \
+	$(OBJDIR)/musl-pic/src/regex/regcomp.o \
+	$(OBJDIR)/musl-pic/src/regex/tre-mem.o \
+	$(OBJDIR)/musl-pic/src/stdio/vasprintf.o \
+	$(OBJDIR)/musl-pic/src/string/stpncpy.o \
+	$(OBJDIR)/musl-pic/src/time/gettimeofday.o \
+	$(OBJDIR)/musl-pic/src/time/localtime.o \
+	$(OBJDIR)/musl-pic/src/stdio/setvbuf.o \
+	$(OBJDIR)/musl-pic/src/stdio/asprintf.o \
+	$(OBJDIR)/musl-pic/src/stdio/__fdopen.o \
+	$(OBJDIR)/musl-pic/src/string/wcscmp.o \
+	$(OBJDIR)/musl-pic/src/string/wcscpy.o \
+	$(OBJDIR)/musl-pic/src/string/strcasecmp.o \
+	$(OBJDIR)/musl-pic/src/string/strncasecmp.o \
+	$(OBJDIR)/musl-pic/src/string/strcat.o \
+	$(OBJDIR)/musl-pic/src/string/strpbrk.o \
+	$(OBJDIR)/musl-pic/src/string/wmemchr.o \
+	$(OBJDIR)/musl-pic/src/string/wcsncmp.o \
+	$(OBJDIR)/musl-pic/src/string/strncpy.o \
+	$(OBJDIR)/musl-pic/src/string/bcopy.o \
+	$(OBJDIR)/musl-pic/src/string/strsignal.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wcsrtombs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/wctob.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mblen.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbsrtowcs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbstowcs.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbrlen.o \
+	$(OBJDIR)/musl-pic/src/multibyte/mbsnrtowcs.o \
+	$(OBJDIR)/musl-pic/src/conf/confstr.o \
+	$(OBJDIR)/musl-pic/src/signal/siginterrupt.o \
+	$(OBJDIR)/musl-pic/src/signal/sigdelset.o \
+	$(OBJDIR)/musl-pic/src/temp/mktemp.o \
+	$(OBJDIR)/musl-pic/src/temp/mkstemp.o \
+	$(OBJDIR)/musl-pic/src/temp/mkostemps.o \
+	$(OBJDIR)/musl-pic/src/temp/mkdtemp.o \
+	$(OBJDIR)/musl-pic/src/signal/x86_64/sigsetjmp.o \
+	$(OBJDIR)/musl-pic/src/misc/syscall.o \
+	$(OBJDIR)/musl-pic/bash-shims/bash_shims.o \
+	$(OBJDIR)/musl-pic/src/signal/sigfillset.o \
+	$(OBJDIR)/musl-pic/src/misc/getopt_long.o \
+	$(OBJDIR)/musl-pic/src/string/strcasestr.o \
+	$(OBJDIR)/musl-pic/src/misc/dirname.o \
+	$(OBJDIR)/musl-pic/src/misc/realpath.o \
+	$(OBJDIR)/musl-pic/src/stdio/getc_unlocked.o \
+	$(OBJDIR)/musl-pic/src/temp/mkstemps.o \
+	$(OBJDIR)/musl-pic/src/multibyte/btowc.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_init.o \
+	$(OBJDIR)/musl-pic/src/thread/pthread_mutex_destroy.o \
 
 # The interpreter/libc.so itself: -shared -e _dlstart is exactly
 # musl's own real link line for it (see musl/Makefile's $(LDSO)
@@ -1238,6 +1430,407 @@ $(BUILD)/_ls: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/coreutils-pic/src/ls.o \
 	$(OBJDUMP) -S $@ > $(BUILD)/ls.dis
 	$(OBJCOPY) --strip-debug $@
 
+# bash/: real GNU bash 5.2 source, vendored the same way musl/ and
+# coreutils/ are (unmodified upstream) - bash/poc/ is poc-os's own
+# addition on top, same idea as coreutils/poc/: config.h (normally
+# produced by bash's own ./configure, here adapted from a real native,
+# non-cross ./configure + make run - see bash/poc/config.h's presence
+# for how HAVE_DLOPEN/HAVE_ICONV/HAVE_SYSLOG/HAVE_LIBDL/
+# HAVE_LOCALE_CHARSET got turned back off for poc-os, and JOB_CONTROL/
+# HISTORY/readline are off because --disable-job-control/--disable-
+# history/--disable-readline were passed to that native configure -
+# job control needs process groups/sessions/tcsetpgrp poc-os's kernel
+# doesn't have, and readline needs a termcap/terminfo library this
+# build has none of), pathnames.h/version.h/pipesize.h (pipesize.h
+# hand-corrected to poc-os's own real kernel/pipe.c PIPESIZE, 512 -
+# the native run's own probe measured *macOS's* pipe buffer, 64KB,
+# which would just be a wrong answer for `ulimit -p` here), syntax.c
+# and builtins.c/builtext.h (host-independent generated code, reused
+# as-is), bash/poc/builtins/*.c (also generated - by builtins/
+# mkbuiltins from builtins/*.def, which bash's own build deletes right
+# after compiling in the ordinary case; regenerated here via a direct
+# ./mkbuiltins invocation instead so they persist), and signames.h/
+# lsignames.h (NOT reused from the native run - mksignames normally
+# enumerates the *host's* <signal.h>, so a native run bakes in macOS's
+# BSD-flavored signal set (SIGEMT, SIGINFO, ...); hand-derived instead
+# from musl/arch/x86_64/bits/signal.h's real SIGHUP..SIGSYS numbering
+# plus the standard glibc/musl SIGRTMIN=34/SIGRTMAX=64 real-time-signal
+# convention - see bash/poc/signames.h's own comment). bash/poc/
+# bash_prelude.h/bash_shims.c fill the remaining real libc-shaped gaps
+# (dup2(), uname(), getrlimit()/setrlimit(), times() - poc-os has no
+# syscall for any of these), the same role coreutils/poc/
+# coreutils_shims.c plays for coreutils - part of libc.so itself (see
+# MUSL_LDSO_OBJS above), not linked per-executable.
+#
+# job control disabled (see config.h above) means bash/nojobs.c (the
+# stub job-control engine), not bash/jobs.c, is what actually gets
+# built into BASH_OBJS below - matching bash's own JOBS_O=nojobs.o
+# selection for this exact configuration.
+#
+# Every bash/gnulib-style object here is -fPIC (BASH_PIC_CFLAGS) and
+# linked into build/_bash as a real PIE executable importing libc from
+# libc.so via the ELF dynamic linker, exactly like coreutils'
+# COREUTILS_PIC_CFLAGS/true/false/cat/etc above - not statically
+# linked. This -fPIC+libc.so recipe (Scrt1.o + object set + -pie
+# --dynamic-linker /usr/lib/libc.so -lc) is now poc-os's *default*
+# convention for any future userland software, not just bash/
+# coreutils - the static ULIB/xv6-native path (user/*.c, include/
+# user.h) is retired (see git history for the old user/sh.c+user/
+# init.c pair this replaced).
+#
+# -DCONF_HOSTTYPE/-DCONF_OSTYPE/-DCONF_MACHTYPE: bash/conftypes.h
+# expects these predefined (normally by configure, from config.h's own
+# uname-derived guess) to build $HOSTTYPE/$OSTYPE/$MACHTYPE - poc-os's
+# own identity, not a borrowed host one.
+# -Wno-error=implicit-function-declaration: bash/parse.y's own 'j' (job
+# count) prompt-expansion case calls count_all_jobs() (bash/nojobs.c -
+# JOB_CONTROL is off, see config.h - really does define it) without
+# #include "jobs.h" in scope - a real, harmless upstream gap (GCC 16
+# defaults this to a hard error; older GCC/the native macOS build above
+# only ever warned, which is why nobody upstream noticed).
+# curses/: poc-os's own minimal curses (curses/curses.h's own comment -
+# not a vendored real ncurses, there's no upstream being tracked here),
+# built for the nano port. -fPIC like every other *-pic tree above, but
+# unlike musl-pic/coreutils-pic/bash-pic there's no libc.so involvement
+# at all - curses is nano-only, so its objects just link straight into
+# build/_nano's own PIE (once nano exists) the same way BASH_OBJS links
+# straight into _bash, rather than through -lc.
+CURSES_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall -MD
+CURSES_INC = -Icurses/include \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/curses-pic/%.o: curses/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CURSES_PIC_CFLAGS) $(CURSES_INC) -c -o $@ $<
+
+# nano/: real GNU nano 6.4 source (src/, lib/ - the latter is nano's own
+# vendored gnulib, pulled in the same unmodified-upstream way musl/
+# coreutils/bash are - see the "Stage 3" plan for why 6.4, not the
+# latest release: it avoids a whole bundled Unicode "c32" character-type
+# library newer nano versions carry, at the cost of a few years of
+# upstream history). nano/poc/ is poc-os's own small addition on top -
+# not part of nano's own gnulib, and not gnulib itself - handling real
+# poc-os/musl gaps, the same role coreutils/poc/ and bash/poc/ play for
+# their own ports (see coreutils/poc/config.h's own comment for how
+# nano/poc/config.h was produced from scratch: a real native ./configure
+# run's output, hand-corrected, not written from scratch).
+#
+# Every nano/gnulib object here is -fPIC (NANO_PIC_CFLAGS) and linked
+# into build/_nano as a real PIE executable importing libc from libc.so
+# via the ELF dynamic linker, exactly like bash/coreutils above - not
+# statically linked. curses/include is on the include path so nano's own
+# <config.h>-driven "#include <curses.h>" (definitions.h) picks up the
+# poc-os curses/ library (Stage 2) rather than a real ncurses, since
+# HAVE_NCURSES_H is never defined in nano/poc/config.h.
+NANO_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -Os \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall \
+	-Wno-error=implicit-function-declaration -Wno-error=implicit-int -MD
+NANO_INC = -include nano/poc/nano_prelude.h -Inano/poc -Inano/lib -Inano/src -Icurses/include \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/nano-pic/%.o: nano/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(NANO_PIC_CFLAGS) $(NANO_INC) -c -o $@ $<
+
+$(OBJDIR)/nano-pic/poc/%.o: nano/poc/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(NANO_PIC_CFLAGS) $(NANO_INC) -c -o $@ $<
+
+# The real gnulib objects nano needs beyond libc.so/curses/, found the
+# same empirical way as COREUTILS_*_GNULIB_OBJS/BASH_LIB_OBJS above:
+# starting from "does nano/src/*.c compile and link" and adding
+# whichever gnulib source the linker complained was undefined - see the
+# "Stage 3" plan for how much smaller this ended up than the ~78-object
+# native-macOS-configure baseline once nano/poc/config.h's HAVE_* was
+# corrected for what musl actually provides directly (getopt_long,
+# strcasestr, dirname, realpath, getc_unlocked, mkstemps, sigfillset,
+# btowc, pthread_mutex_init/destroy - all added to MUSL_LDSO_OBJS above
+# instead, real musl code, not gnulib replacements). Just two real gaps
+# remained: nano/src/search.c's regex calls are compile-time redirected
+# to rpl_regcomp/rpl_regexec/etc (config.h's "#define regcomp
+# rpl_regcomp" family - the replacement really is required here, unlike
+# the functions above, since nano's own call sites are macro-rewritten
+# to the rpl_ names regardless of what musl provides), and regex.c's
+# own dynamic-array resizing (regmatch_list_resize) needs gnulib's
+# malloc/dynarray_resize.o.
+NANO_GNULIB_OBJS = \
+	$(OBJDIR)/nano-pic/lib/regex.o \
+	$(OBJDIR)/nano-pic/lib/malloc/dynarray_resize.o \
+
+NANO_SRC_OBJS = \
+	$(OBJDIR)/nano-pic/src/browser.o \
+	$(OBJDIR)/nano-pic/src/chars.o \
+	$(OBJDIR)/nano-pic/src/color.o \
+	$(OBJDIR)/nano-pic/src/cut.o \
+	$(OBJDIR)/nano-pic/src/files.o \
+	$(OBJDIR)/nano-pic/src/global.o \
+	$(OBJDIR)/nano-pic/src/help.o \
+	$(OBJDIR)/nano-pic/src/history.o \
+	$(OBJDIR)/nano-pic/src/move.o \
+	$(OBJDIR)/nano-pic/src/nano.o \
+	$(OBJDIR)/nano-pic/src/prompt.o \
+	$(OBJDIR)/nano-pic/src/rcfile.o \
+	$(OBJDIR)/nano-pic/src/search.o \
+	$(OBJDIR)/nano-pic/src/text.o \
+	$(OBJDIR)/nano-pic/src/utils.o \
+	$(OBJDIR)/nano-pic/src/winio.o \
+
+NANO_OBJS = $(NANO_SRC_OBJS) $(NANO_GNULIB_OBJS)
+
+$(BUILD)/_nano: $(OBJDIR)/musl-pic/crt/Scrt1.o $(NANO_OBJS) $(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(NANO_OBJS) $(OBJDIR)/curses-pic/curses.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/nano.dis
+	$(OBJCOPY) --strip-debug $@
+
+BASH_PIC_CFLAGS = -std=gnu11 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -DHAVE_CONFIG_H -DSHELL -Os \
+	-DCONF_HOSTTYPE='"x86_64"' -DCONF_OSTYPE='"poc-os"' -DCONF_MACHTYPE='"x86_64-poc-os"' \
+	-DPACKAGE='"bash"' -DLOCALEDIR='"/usr/share/locale"' \
+	-m64 -mgeneral-regs-only -fno-stack-protector -fPIC \
+	-fno-omit-frame-pointer -g -Wall -Wno-parentheses -Wno-format-security \
+	-Wno-error=implicit-function-declaration -Wno-error=implicit-int -MD
+BASH_INC = -include bash/poc/bash_prelude.h \
+	-Ibash/poc -Ibash/poc/builtins -Ibash -Ibash/include -Ibash/builtins -Ibash/lib -Ibash/lib/sh -Ibash/lib/glob -Ibash/lib/tilde \
+	-Imusl/arch/x86_64 -Imusl/arch/generic -I$(OBJDIR)/musl/include -Imusl/include
+
+$(OBJDIR)/bash-pic/%.o: bash/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+$(OBJDIR)/bash-pic/poc/%.o: bash/poc/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+$(OBJDIR)/bash-pic/poc/builtins/%.o: bash/poc/builtins/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+# Core shell engine (the top-level bash/*.c files the native build's
+# own final link line pulled in for this exact config - see this
+# section's own comment).
+BASH_CORE_OBJS = \
+	$(OBJDIR)/bash-pic/shell.o \
+	$(OBJDIR)/bash-pic/eval.o \
+	$(OBJDIR)/bash-pic/y.tab.o \
+	$(OBJDIR)/bash-pic/general.o \
+	$(OBJDIR)/bash-pic/make_cmd.o \
+	$(OBJDIR)/bash-pic/print_cmd.o \
+	$(OBJDIR)/bash-pic/dispose_cmd.o \
+	$(OBJDIR)/bash-pic/execute_cmd.o \
+	$(OBJDIR)/bash-pic/variables.o \
+	$(OBJDIR)/bash-pic/copy_cmd.o \
+	$(OBJDIR)/bash-pic/error.o \
+	$(OBJDIR)/bash-pic/expr.o \
+	$(OBJDIR)/bash-pic/flags.o \
+	$(OBJDIR)/bash-pic/nojobs.o \
+	$(OBJDIR)/bash-pic/subst.o \
+	$(OBJDIR)/bash-pic/hashcmd.o \
+	$(OBJDIR)/bash-pic/hashlib.o \
+	$(OBJDIR)/bash-pic/mailcheck.o \
+	$(OBJDIR)/bash-pic/trap.o \
+	$(OBJDIR)/bash-pic/input.o \
+	$(OBJDIR)/bash-pic/unwind_prot.o \
+	$(OBJDIR)/bash-pic/pathexp.o \
+	$(OBJDIR)/bash-pic/sig.o \
+	$(OBJDIR)/bash-pic/test.o \
+	$(OBJDIR)/bash-pic/version.o \
+	$(OBJDIR)/bash-pic/alias.o \
+	$(OBJDIR)/bash-pic/array.o \
+	$(OBJDIR)/bash-pic/arrayfunc.o \
+	$(OBJDIR)/bash-pic/assoc.o \
+	$(OBJDIR)/bash-pic/braces.o \
+	$(OBJDIR)/bash-pic/bracecomp.o \
+	$(OBJDIR)/bash-pic/bashhist.o \
+	$(OBJDIR)/bash-pic/bashline.o \
+	$(OBJDIR)/bash-pic/list.o \
+	$(OBJDIR)/bash-pic/stringlib.o \
+	$(OBJDIR)/bash-pic/locale.o \
+	$(OBJDIR)/bash-pic/findcmd.o \
+	$(OBJDIR)/bash-pic/redir.o \
+	$(OBJDIR)/bash-pic/xmalloc.o \
+	$(OBJDIR)/bash-pic/poc/syntax.o \
+	$(OBJDIR)/bash-pic/poc/builtins.o \
+
+# builtins/: the four hand-written (not .def-generated) support files
+# bash's own tarball ships pristine, plus every real builtin command
+# (bash/poc/builtins/*.c - .def-generated, see this section's own
+# comment for why they're regenerated into bash/poc/ instead of
+# bash/builtins/ directly).
+BASH_BUILTINS_OBJS = \
+	$(OBJDIR)/bash-pic/builtins/common.o \
+	$(OBJDIR)/bash-pic/builtins/evalfile.o \
+	$(OBJDIR)/bash-pic/builtins/evalstring.o \
+	$(OBJDIR)/bash-pic/builtins/bashgetopt.o \
+	$(OBJDIR)/bash-pic/builtins/getopt.o \
+	$(OBJDIR)/bash-pic/poc/builtins/alias.o \
+	$(OBJDIR)/bash-pic/poc/builtins/bind.o \
+	$(OBJDIR)/bash-pic/poc/builtins/break.o \
+	$(OBJDIR)/bash-pic/poc/builtins/builtin.o \
+	$(OBJDIR)/bash-pic/poc/builtins/caller.o \
+	$(OBJDIR)/bash-pic/poc/builtins/cd.o \
+	$(OBJDIR)/bash-pic/poc/builtins/colon.o \
+	$(OBJDIR)/bash-pic/poc/builtins/command.o \
+	$(OBJDIR)/bash-pic/poc/builtins/declare.o \
+	$(OBJDIR)/bash-pic/poc/builtins/echo.o \
+	$(OBJDIR)/bash-pic/poc/builtins/enable.o \
+	$(OBJDIR)/bash-pic/poc/builtins/eval.o \
+	$(OBJDIR)/bash-pic/poc/builtins/exec.o \
+	$(OBJDIR)/bash-pic/poc/builtins/exit.o \
+	$(OBJDIR)/bash-pic/poc/builtins/fc.o \
+	$(OBJDIR)/bash-pic/poc/builtins/fg_bg.o \
+	$(OBJDIR)/bash-pic/poc/builtins/getopts.o \
+	$(OBJDIR)/bash-pic/poc/builtins/hash.o \
+	$(OBJDIR)/bash-pic/poc/builtins/help.o \
+	$(OBJDIR)/bash-pic/poc/builtins/kill.o \
+	$(OBJDIR)/bash-pic/poc/builtins/let.o \
+	$(OBJDIR)/bash-pic/poc/builtins/mapfile.o \
+	$(OBJDIR)/bash-pic/poc/builtins/printf.o \
+	$(OBJDIR)/bash-pic/poc/builtins/pushd.o \
+	$(OBJDIR)/bash-pic/poc/builtins/read.o \
+	$(OBJDIR)/bash-pic/poc/builtins/return.o \
+	$(OBJDIR)/bash-pic/poc/builtins/set.o \
+	$(OBJDIR)/bash-pic/poc/builtins/setattr.o \
+	$(OBJDIR)/bash-pic/poc/builtins/shift.o \
+	$(OBJDIR)/bash-pic/poc/builtins/shopt.o \
+	$(OBJDIR)/bash-pic/poc/builtins/source.o \
+	$(OBJDIR)/bash-pic/poc/builtins/suspend.o \
+	$(OBJDIR)/bash-pic/poc/builtins/test.o \
+	$(OBJDIR)/bash-pic/poc/builtins/times.o \
+	$(OBJDIR)/bash-pic/poc/builtins/trap.o \
+	$(OBJDIR)/bash-pic/poc/builtins/type.o \
+	$(OBJDIR)/bash-pic/poc/builtins/ulimit.o \
+	$(OBJDIR)/bash-pic/poc/builtins/umask.o \
+	$(OBJDIR)/bash-pic/poc/builtins/wait.o \
+
+# lib/sh, lib/glob, lib/tilde: bash's own portability/pattern-matching/
+# ~-expansion support libraries (the real gnulib-equivalent bash ships
+# itself) - member lists taken directly from the native run's own
+# libsh.a/libglob.a/libtilde.a (no lib/readline/libhistory.a: HISTORY
+# is off - see config.h - so bash's own code never calls into it).
+BASH_LIB_OBJS = \
+	$(OBJDIR)/bash-pic/lib/sh/clktck.o \
+	$(OBJDIR)/bash-pic/lib/sh/clock.o \
+	$(OBJDIR)/bash-pic/lib/sh/getenv.o \
+	$(OBJDIR)/bash-pic/lib/sh/oslib.o \
+	$(OBJDIR)/bash-pic/lib/sh/setlinebuf.o \
+	$(OBJDIR)/bash-pic/lib/sh/strnlen.o \
+	$(OBJDIR)/bash-pic/lib/sh/itos.o \
+	$(OBJDIR)/bash-pic/lib/sh/zread.o \
+	$(OBJDIR)/bash-pic/lib/sh/zwrite.o \
+	$(OBJDIR)/bash-pic/lib/sh/shtty.o \
+	$(OBJDIR)/bash-pic/lib/sh/shmatch.o \
+	$(OBJDIR)/bash-pic/lib/sh/eaccess.o \
+	$(OBJDIR)/bash-pic/lib/sh/timeval.o \
+	$(OBJDIR)/bash-pic/lib/sh/makepath.o \
+	$(OBJDIR)/bash-pic/lib/sh/pathcanon.o \
+	$(OBJDIR)/bash-pic/lib/sh/pathphys.o \
+	$(OBJDIR)/bash-pic/lib/sh/tmpfile.o \
+	$(OBJDIR)/bash-pic/lib/sh/stringlist.o \
+	$(OBJDIR)/bash-pic/lib/sh/stringvec.o \
+	$(OBJDIR)/bash-pic/lib/sh/spell.o \
+	$(OBJDIR)/bash-pic/lib/sh/shquote.o \
+	$(OBJDIR)/bash-pic/lib/sh/strtrans.o \
+	$(OBJDIR)/bash-pic/lib/sh/snprintf.o \
+	$(OBJDIR)/bash-pic/lib/sh/mailstat.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtulong.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtullong.o \
+	$(OBJDIR)/bash-pic/lib/sh/fmtumax.o \
+	$(OBJDIR)/bash-pic/lib/sh/zcatfd.o \
+	$(OBJDIR)/bash-pic/lib/sh/zmapfd.o \
+	$(OBJDIR)/bash-pic/lib/sh/winsize.o \
+	$(OBJDIR)/bash-pic/lib/sh/wcsdup.o \
+	$(OBJDIR)/bash-pic/lib/sh/fpurge.o \
+	$(OBJDIR)/bash-pic/lib/sh/zgetline.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbscmp.o \
+	$(OBJDIR)/bash-pic/lib/sh/uconvert.o \
+	$(OBJDIR)/bash-pic/lib/sh/ufuncs.o \
+	$(OBJDIR)/bash-pic/lib/sh/casemod.o \
+	$(OBJDIR)/bash-pic/lib/sh/input_avail.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbscasecmp.o \
+	$(OBJDIR)/bash-pic/lib/sh/fnxform.o \
+	$(OBJDIR)/bash-pic/lib/sh/unicode.o \
+	$(OBJDIR)/bash-pic/lib/sh/shmbchar.o \
+	$(OBJDIR)/bash-pic/lib/sh/strvis.o \
+	$(OBJDIR)/bash-pic/lib/sh/utf8.o \
+	$(OBJDIR)/bash-pic/lib/sh/random.o \
+	$(OBJDIR)/bash-pic/lib/sh/gettimeofday.o \
+	$(OBJDIR)/bash-pic/lib/sh/timers.o \
+	$(OBJDIR)/bash-pic/lib/sh/wcsnwidth.o \
+	$(OBJDIR)/bash-pic/lib/sh/mktime.o \
+	$(OBJDIR)/bash-pic/lib/sh/mbschr.o \
+	$(OBJDIR)/bash-pic/lib/sh/strtoimax.o \
+	$(OBJDIR)/bash-pic/lib/glob/glob.o \
+	$(OBJDIR)/bash-pic/lib/glob/strmatch.o \
+	$(OBJDIR)/bash-pic/lib/glob/smatch.o \
+	$(OBJDIR)/bash-pic/lib/glob/xmbsrtowcs.o \
+	$(OBJDIR)/bash-pic/lib/glob/gmisc.o \
+	$(OBJDIR)/bash-pic/lib/tilde/tilde.o \
+
+BASH_OBJS = $(BASH_CORE_OBJS) $(BASH_BUILTINS_OBJS) $(BASH_LIB_OBJS)
+
+$(BUILD)/_bash: $(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(BASH_OBJS) \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/bash.dis
+	$(OBJCOPY) --strip-debug $@
+
+# dinit: PID 1, replacing the static ULIB user/init.c - same
+# Scrt1.o+libc.so PIE recipe as bash/coreutils above, not the static
+# xv6-native path. Logic mirrors user/init.c exactly (console setup,
+# fork+exec+reap loop), just built as a real dynamic binary and
+# starting bash -i instead of sh - see bash/poc/dinit.c's own comments.
+$(OBJDIR)/bash-pic/poc/dinit.o: bash/poc/dinit.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
+
+$(BUILD)/_dinit: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/dinit.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/dinit.dis
+	$(OBJCOPY) --strip-debug $@
+
+# rawtest: throwaway diagnostic for the raw-mode/ioctl kernel groundwork
+# (kernel/console.c, kernel/sysproc.c's sys_ioctl()) - see bash/poc/
+# rawtest.c's own comment. Same Scrt1.o+libc.so PIE recipe as _dinit
+# above, using the existing generic $(OBJDIR)/bash-pic/poc/%.o pattern
+# rule (no dedicated compile rule needed - rawtest.c is plain musl-
+# linked C, not bash source, but that rule's BASH_PIC_CFLAGS/BASH_INC
+# work fine for it unchanged).
+$(BUILD)/_rawtest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/rawtest.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/rawtest.dis
+	$(OBJCOPY) --strip-debug $@
+
+# curses_test: throwaway diagnostic for curses/ (Stage 2 of the nano
+# port) - see bash/poc/curses_test.c's own comment. Needs -Icurses/
+# include on top of the generic $(OBJDIR)/bash-pic/poc/%.o pattern
+# rule's BASH_INC, hence its own compile rule rather than reusing that
+# pattern outright (same reasoning as rawtest.o not needing one).
+# curses/curses.o itself is a $(CURSES_PIC_CFLAGS) object (see that
+# variable's own comment), linked straight into this PIE like
+# BASH_OBJS/COREUTILS_*_GNULIB_OBJS are into _bash/_true, not through
+# libc.so.
+$(OBJDIR)/bash-pic/poc/curses_test.o: bash/poc/curses_test.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) -Icurses/include $(BASH_INC) -c -o $@ $<
+
+$(BUILD)/_curses_test: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
+		$(OBJDIR)/curses-pic/curses.o $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/bash-pic/poc/curses_test.o \
+		$(OBJDIR)/curses-pic/curses.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/curses_test.dis
+	$(OBJCOPY) --strip-debug $@
+
 $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 	# -iquote (not -I) so quoted poc headers resolve to include/ while
 	# <fcntl.h> etc still resolve to the host's system headers.
@@ -1247,7 +1840,7 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
-.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o
+.PRECIOUS: $(OBJDIR)/user/%.o $(OBJDIR)/kernel/%.o $(OBJDIR)/boot/%.o $(OBJDIR)/musl/%.o $(OBJDIR)/musl-test/%.o $(OBJDIR)/musl-pic/%.o $(OBJDIR)/coreutils-pic/%.o $(OBJDIR)/bash-pic/%.o $(OBJDIR)/curses-pic/%.o $(OBJDIR)/nano-pic/%.o
 
 # UPROGS is mkfs/mkfs.c's usual root-placed/underscore-stripped
 # convention (a bare host path, e.g. build/_foo -> installed as /foo -
@@ -1259,27 +1852,23 @@ $(BUILD)/mkfs: mkfs/mkfs.c include/fs.h | $(BUILD)
 # would still use.
 UPROGS=\
 
-# init/sh: not "commands" in the usual sense - init is PID 1 (the
-# kernel loads initcode.asm/initcode64.asm, which SYS_execs this exact
-# path - see those files' own "init:" string) and sh is what init execs
-# in turn (see user/init.c) - but installed under /usr/bin like
-# everything else rather than carved out as a root-level exception.
-# Unlike the coreutils additions below, these apply to every ARCH: the
-# 32-bit build still needs an init/sh, even with no musl/coreutils in
-# it at all.
-MKFS_INSTALL = usr/bin/init:$(BUILD)/_init usr/bin/sh:$(BUILD)/_sh
-MKFS_INSTALL_DEPS = $(BUILD)/_init $(BUILD)/_sh
+# init: PID 1 (the kernel loads user/initcode.asm, which SYS_execs
+# this exact path - see that file's own "init:" string) - installed
+# under /usr/bin like everything else rather than carved out as a
+# root-level exception. bash/poc/dinit.c (dynamic, Scrt1.o+libc.so,
+# like bash/coreutils - see its own comment) is the only init poc-os
+# has now, starting bash directly; the static xv6-native user/init.c+
+# user/sh.c pair is gone - see git history if reviving it.
+MKFS_INSTALL = usr/bin/init:$(BUILD)/_dinit
+MKFS_INSTALL_DEPS = $(BUILD)/_dinit
 
 # GNU coreutils ports (true/false/cat/echo/basename/dirname/yes,
 # runmusl - a manual musl-crt1-style launcher, see musl-test/%.o's own
-# comment): x86_64-only, like the rest of the musl port, so conditional
-# on ARCH rather than always built. libc.so has to live at exactly
-# /usr/lib/libc.so - that path is baked into every one of these
-# binaries' own PT_INTERP segment (--dynamic-linker /usr/lib/libc.so
-# above) as the dynamic linker to load. Kept deliberately small - see
-# $(BUILD)/_ghead's own comment above for why head/tr/cut aren't here
-# too (MAXFILE).
-ifeq ($(ARCH),64)
+# comment). libc.so has to live at exactly /usr/lib/libc.so - that
+# path is baked into every one of these binaries' own PT_INTERP
+# segment (--dynamic-linker /usr/lib/libc.so above) as the dynamic
+# linker to load. Kept deliberately small - see $(BUILD)/_ghead's own
+# comment above for why head/tr/cut aren't here too (MAXFILE).
 MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \
 	usr/bin/echo:$(BUILD)/_gecho usr/bin/basename:$(BUILD)/_basename \
@@ -1310,12 +1899,35 @@ MKFS_INSTALL_DEPS += $(BUILD)/_mv $(BUILD)/_cp
 MKFS_INSTALL += usr/bin/ls:$(BUILD)/_ls
 MKFS_INSTALL_DEPS += $(BUILD)/_ls
 
-endif
+# bash: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
+# every coreutils entry above - see $(BUILD)/_bash's own comment for
+# what this needed beyond the musl/coreutils infrastructure already
+# built out.
+MKFS_INSTALL += usr/bin/bash:$(BUILD)/_bash
+MKFS_INSTALL_DEPS += $(BUILD)/_bash
+
+# rawtest: see $(BUILD)/_rawtest's own comment - a throwaway diagnostic
+# for the raw-mode/ioctl kernel groundwork the later curses/nano stages
+# depend on, kept installed since it's small and doubles as a
+# regression check for that groundwork going forward.
+MKFS_INSTALL += usr/bin/rawtest:$(BUILD)/_rawtest
+MKFS_INSTALL_DEPS += $(BUILD)/_rawtest
+
+# curses_test: see $(BUILD)/_curses_test's own comment - a throwaway
+# diagnostic for the curses layer, kept installed for the same
+# regression-check reasoning as rawtest.
+MKFS_INSTALL += usr/bin/curses_test:$(BUILD)/_curses_test
+MKFS_INSTALL_DEPS += $(BUILD)/_curses_test
+
+# nano: dynamically linked (Scrt1.o + libc.so, PIE) the same way as
+# bash/coreutils above - see $(BUILD)/_nano's own comment.
+MKFS_INSTALL += usr/bin/nano:$(BUILD)/_nano
+MKFS_INSTALL_DEPS += $(BUILD)/_nano
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
 
--include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d
+-include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d $(OBJDIR)/curses-pic/*.d $(OBJDIR)/nano-pic/*.d $(OBJDIR)/nano-pic/poc/*.d $(OBJDIR)/nano-pic/src/*.d $(OBJDIR)/nano-pic/lib/*.d $(OBJDIR)/nano-pic/lib/malloc/*.d
 
 all: $(BUILD)/poc.img $(BUILD)/fs.img
 

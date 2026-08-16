@@ -1,4 +1,33 @@
-// Simple PIO-based (non-DMA) IDE driver code.
+// Ramdisk-backed block "device" - stands in for a real disk driver.
+//
+// poc-os has no real disk driver of any kind: not the raw ATA PIO this
+// file used to be (only ever worked against a real/emulated legacy IDE
+// controller - not AHCI-mode SATA, not a USB Mass Storage device, and
+// not the ATAPI protocol a virtual/real CD or DVD drive actually
+// speaks), and not a real AHCI or USB stack either (both genuinely
+// large undertakings - PCI enumeration and command-queue management
+// for AHCI, a whole USB stack for Mass Storage - that would still only
+// cover *some* of real hardware/VirtualBox/QEMU, not all of them
+// uniformly).
+//
+// Instead, the boot loader (boot/bootmain.c on the QEMU/VirtualBox-as-
+// IDE-disk path; boot/boot2.asm on the real-hardware/AHCI/USB-boot
+// path - see that file's own comment) loads the *entire* root
+// filesystem image (fs.img, RAMDISK_SIZE bytes - see memlayout.h) into
+// RAM at a fixed physical address, RAMDISK_PADDR, before the kernel
+// ever starts running - using whichever disk-reading mechanism that
+// specific boot path has (real ATA PIO, or BIOS INT13h extended reads,
+// which is itself really just calling out to *firmware's own* disk
+// driver, already written and already correct for whatever controller
+// a given machine actually has). Once the kernel is running, it never
+// touches disk hardware again: every iderw() call below is just a
+// memmove() to/from that already-loaded RAM image. Writes (mkdir, rm,
+// mv, ...) modify the RAM copy only - like any live-boot/initrd-style
+// system, changes don't persist across a reboot unless something
+// explicitly writes the RAM image back out, which nothing here does.
+//
+// ideinit()/ideintr() are kept as no-op stubs, not removed outright,
+// so kernel/main.c and kernel/trap.c don't need call-site changes.
 
 #include "types.h"
 #include "defs.h"
@@ -13,164 +42,49 @@
 #include "fs.h"
 #include "buf.h"
 
-#define SECTOR_SIZE   512
-#define IDE_BSY       0x80
-#define IDE_DRDY      0x40
-#define IDE_DF        0x20
-#define IDE_ERR       0x01
-
-#define IDE_CMD_READ  0x20
-#define IDE_CMD_WRITE 0x30
-#define IDE_CMD_RDMUL 0xc4
-#define IDE_CMD_WRMUL 0xc5
-
-// idequeue points to the buf now being read/written to the disk.
-// idequeue->qnext points to the next buf to be processed.
-// You must hold idelock while manipulating queue.
-
-static struct spinlock idelock;
-static struct buf *idequeue;
-
-static int havedisk1;
-static void idestart(struct buf*);
-
-// Wait for IDE disk to become ready.
-static int
-idewait(int checkerr)
-{
-  int r;
-
-  while(((r = inb(0x1f7)) & (IDE_BSY|IDE_DRDY)) != IDE_DRDY)
-    ;
-  if(checkerr && (r & (IDE_DF|IDE_ERR)) != 0)
-    return -1;
-  return 0;
-}
+_Static_assert(RAMDISK_SIZE == FSSIZE * BSIZE,
+               "RAMDISK_SIZE (memlayout.h) must match FSSIZE*BSIZE (param.h/fs.h) - "
+               "the boot loader and mkfs both size fs.img by the latter.");
 
 void
 ideinit(void)
 {
-  int i;
-
-  initlock(&idelock, "ide");
-  ioapicenable(IRQ_IDE, ncpu - 1);
-  idewait(0);
-
-  // Check if disk 1 is present
-  outb(0x1f6, 0xe0 | (1<<4));
-  for(i=0; i<1000; i++){
-    if(inb(0x1f7) != 0){
-      havedisk1 = 1;
-      break;
-    }
-  }
-
-  // Switch back to disk 0.
-  outb(0x1f6, 0xe0 | (0<<4));
+  // Nothing to initialize - no real disk controller involved.
 }
 
-// Start the request for b.  Caller must hold idelock.
-//
-// Ports 0x1f0-0x1f7 are the legacy primary-IDE-channel I/O ports fixed
-// by the original PC/AT hardware: 0x1f0 is the 16-bit data port used to
-// stream sector contents in or out, 0x1f2-0x1f6 set up the sector count
-// and its 28-bit LBA address (split across three data-byte ports plus
-// the low 4 bits of the drive/head port, 0x1f6, along with the drive
-// select bit), and 0x1f7 is both the command port (writes) and status
-// port (reads, see idewait).
-static void
-idestart(struct buf *b)
-{
-  if(b == 0)
-    panic("idestart");
-  if(b->blockno >= FSSIZE)
-    panic("incorrect blockno");
-  int sector_per_block =  BSIZE/SECTOR_SIZE;
-  int sector = b->blockno * sector_per_block;
-  int read_cmd = (sector_per_block == 1) ? IDE_CMD_READ :  IDE_CMD_RDMUL;
-  int write_cmd = (sector_per_block == 1) ? IDE_CMD_WRITE : IDE_CMD_WRMUL;
-
-  if (sector_per_block > 7) panic("idestart");
-
-  idewait(0);
-  outb(0x3f6, 0);  // generate interrupt
-  outb(0x1f2, sector_per_block);  // number of sectors
-  outb(0x1f3, sector & 0xff);
-  outb(0x1f4, (sector >> 8) & 0xff);
-  outb(0x1f5, (sector >> 16) & 0xff);
-  outb(0x1f6, 0xe0 | ((b->dev&1)<<4) | ((sector>>24)&0x0f));
-  if(b->flags & B_DIRTY){
-    outb(0x1f7, write_cmd);
-    outsl(0x1f0, b->data, BSIZE/4);
-  } else {
-    outb(0x1f7, read_cmd);
-  }
-}
-
-// Interrupt handler.
 void
 ideintr(void)
 {
-  struct buf *b;
-
-  // First queued buffer is the active request.
-  acquire(&idelock);
-
-  if((b = idequeue) == 0){
-    release(&idelock);
-    return;
-  }
-  idequeue = b->qnext;
-
-  // Read data if needed.
-  if(!(b->flags & B_DIRTY) && idewait(1) >= 0)
-    insl(0x1f0, b->data, BSIZE/4);
-
-  // Wake process waiting for this buf.
-  b->flags |= B_VALID;
-  b->flags &= ~B_DIRTY;
-  wakeup(b);
-
-  // Start disk on next buf in queue.
-  if(idequeue != 0)
-    idestart(idequeue);
-
-  release(&idelock);
+  // The ramdisk never raises an interrupt; iderw() below is already
+  // synchronous. Kept only because kernel/trap.c's IRQ_IDE case still
+  // calls it - a no-op body is the correct response to an interrupt
+  // that (on real hardware particularly) should never actually fire
+  // for a device this kernel never programs.
 }
 
-//PAGEBREAK!
-// Sync buf with disk.
-// If B_DIRTY is set, write buf to disk, clear B_DIRTY, set B_VALID.
-// Else if B_VALID is not set, read buf from disk, set B_VALID.
+// Sync buf with the ramdisk. If B_DIRTY is set, copy buf->data into
+// the ramdisk and clear B_DIRTY; else if B_VALID is not set, copy from
+// the ramdisk into buf->data and set B_VALID - the exact same
+// contract the real iderw() this replaces had, so kernel/bio.c's
+// bread()/bwrite() (the only callers) needed no changes at all.
 void
 iderw(struct buf *b)
 {
-  struct buf **pp;
+  char *disk;
 
   if(!holdingsleep(&b->lock))
     panic("iderw: buf not locked");
   if((b->flags & (B_VALID|B_DIRTY)) == B_VALID)
     panic("iderw: nothing to do");
-  if(b->dev != 0 && !havedisk1)
-    panic("iderw: ide disk 1 not present");
+  if(b->blockno >= FSSIZE)
+    panic("iderw: blockno out of range");
 
-  acquire(&idelock);  //DOC:acquire-lock
-
-  // Append b to idequeue.
-  b->qnext = 0;
-  for(pp=&idequeue; *pp; pp=&(*pp)->qnext)  //DOC:insert-queue
-    ;
-  *pp = b;
-
-  // Start disk if necessary.
-  if(idequeue == b)
-    idestart(b);
-
-  // Wait for request to finish.
-  while((b->flags & (B_VALID|B_DIRTY)) != B_VALID){
-    sleep(b, &idelock);
+  disk = (char*)P2V(RAMDISK_PADDR) + (uintp)b->blockno * BSIZE;
+  if(b->flags & B_DIRTY){
+    memmove(disk, b->data, BSIZE);
+    b->flags &= ~B_DIRTY;
+  } else {
+    memmove(b->data, disk, BSIZE);
   }
-
-
-  release(&idelock);
+  b->flags |= B_VALID;
 }

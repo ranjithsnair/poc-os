@@ -1,27 +1,21 @@
-; Routines to let C code use special x86 instructions.
+; Routines to let C code use special x86 instructions, using the SysV
+; AMD64 calling convention (arguments in rdi, rsi, rdx, rcx, r8, r9,
+; not the stack). A couple of instructions - lgdt/lidt, rcr2/lcr3 -
+; genuinely behave differently in 64-bit mode (a 10-byte pseudo-
+; descriptor instead of 6; a 64-bit CR2/CR3 instead of 32-bit), not
+; just differently-sized.
 ;
-; These used to be GCC "static inline" functions containing inline
-; assembly (one per instruction) directly in include/x86.h - the compiler
-; inlined them at every call site with no call overhead. Written out here
-; as real NASM functions instead, they are now ordinary out-of-line calls
-; using the standard 32-bit cdecl convention: arguments are on the stack
-; above the return address ([esp+4], [esp+8], ...), the return value (if
-; any) comes back in eax, and eax/ecx/edx are free to clobber while
-; ebx/esi/edi/ebp must be restored before returning.
-;
-; A handful of these names (stosb, lgdt, lidt, ltr, cli, sti, xchg) are
-; themselves x86 instruction mnemonics. NASM's parser treats the bare word
-; as that instruction even when it's meant as a label, so those labels are
-; written with a leading "$" to force plain-identifier parsing; it does not
-; change the symbol name that ends up in the object file.
+; A "$" - prefixed - label is used for a handful of these names since
+; they're themselves x86 instruction mnemonics that NASM's parser
+; would otherwise swallow.
 
-BITS 32
+BITS 64
 section .text
 
 ; uchar inb(ushort port)
 global inb
 inb:
-  mov dx, [esp+4]
+  mov dx, di
   in al, dx
   movzx eax, al
   ret
@@ -29,120 +23,111 @@ inb:
 ; void insl(int port, void *addr, int cnt)
 global insl
 insl:
-  push edi
-  mov dx, [esp+8]     ; port
-  mov edi, [esp+12]   ; addr
-  mov ecx, [esp+16]   ; cnt
+  mov r10, rdi    ; stash port (rdi is about to become the destination)
+  mov rdi, rsi    ; addr
+  mov rcx, rdx    ; cnt
+  mov dx, r10w    ; port
   cld
   rep insd
-  pop edi
   ret
 
 ; void outb(ushort port, uchar data)
 global outb
 outb:
-  mov dx, [esp+4]     ; port
-  mov al, [esp+8]     ; data
+  mov dx, di
+  mov al, sil
   out dx, al
   ret
 
 ; void outw(ushort port, ushort data)
 global outw
 outw:
-  mov dx, [esp+4]     ; port
-  mov ax, [esp+8]     ; data
+  mov dx, di
+  mov ax, si
   out dx, ax
   ret
 
 ; void outsl(int port, const void *addr, int cnt)
 global outsl
 outsl:
-  push esi
-  mov dx, [esp+8]     ; port
-  mov esi, [esp+12]   ; addr
-  mov ecx, [esp+16]   ; cnt
+  mov r10, rdi    ; stash port
+  mov rcx, rdx    ; cnt
+  mov dx, r10w    ; port
   cld
-  rep outsd
-  pop esi
+  rep outsd       ; source is [rsi], which already holds addr (arg 2)
   ret
 
 ; void stosb(void *addr, int data, int cnt)
 global $stosb
 $stosb:
-  push edi
-  mov edi, [esp+8]    ; addr
-  mov eax, [esp+12]   ; data
-  mov ecx, [esp+16]   ; cnt
+  mov rcx, rdx    ; cnt
+  mov eax, esi    ; data
   cld
-  rep stosb
-  pop edi
+  rep stosb       ; dest is [rdi], which already holds addr (arg 1)
   ret
 
 ; void stosl(void *addr, int data, int cnt)
 global stosl
 stosl:
-  push edi
-  mov edi, [esp+8]    ; addr
-  mov eax, [esp+12]   ; data
-  mov ecx, [esp+16]   ; cnt
+  mov rcx, rdx    ; cnt
+  mov eax, esi    ; data
   cld
-  rep stosd
-  pop edi
+  rep stosd       ; dest is [rdi], which already holds addr (arg 1)
   ret
 
 ; void lgdt(struct segdesc *p, int size)
-; Builds the 6-byte {limit:16, base:32} pseudo-descriptor LGDT expects
-; in a small scratch area on the stack, then loads it.
+; Builds the 10-byte {limit:16, base:64} pseudo-descriptor LGDT expects
+; in 64-bit mode (wider than the 32-bit build's 6-byte {limit:16,
+; base:32} - see x86.asm) in a small scratch area on the stack, then
+; loads it.
 global $lgdt
 $lgdt:
-  push ebp
-  mov ebp, esp
-  sub esp, 6
-  mov eax, [ebp+12]   ; size
+  push rbp
+  mov rbp, rsp
+  sub rsp, 16
+  mov eax, esi      ; size
   dec eax
-  mov [ebp-6], ax      ; pd.limit = size-1
-  mov eax, [ebp+8]    ; p
-  mov [ebp-4], eax     ; pd.base = p
-  lgdt [ebp-6]
-  mov esp, ebp
-  pop ebp
+  mov [rbp-16], ax   ; pd.limit = size-1
+  mov [rbp-14], rdi  ; pd.base = p
+  lgdt [rbp-16]
+  mov rsp, rbp
+  pop rbp
   ret
 
 ; void lidt(struct gatedesc *p, int size)
 ; Same layout trick as lgdt, above, but for the IDT register.
 global $lidt
 $lidt:
-  push ebp
-  mov ebp, esp
-  sub esp, 6
-  mov eax, [ebp+12]   ; size
+  push rbp
+  mov rbp, rsp
+  sub rsp, 16
+  mov eax, esi
   dec eax
-  mov [ebp-6], ax      ; pd.limit = size-1
-  mov eax, [ebp+8]    ; p
-  mov [ebp-4], eax     ; pd.base = p
-  lidt [ebp-6]
-  mov esp, ebp
-  pop ebp
+  mov [rbp-16], ax
+  mov [rbp-14], rdi
+  lidt [rbp-16]
+  mov rsp, rbp
+  pop rbp
   ret
 
 ; void ltr(ushort sel)
 global $ltr
 $ltr:
-  mov ax, [esp+4]
+  mov ax, di
   ltr ax
   ret
 
 ; uint readeflags(void)
 global readeflags
 readeflags:
-  pushfd
-  pop eax
+  pushfq
+  pop rax
   ret
 
 ; void loadgs(ushort v)
 global loadgs
 loadgs:
-  mov ax, [esp+4]
+  mov ax, di
   mov gs, ax
   ret
 
@@ -163,9 +148,8 @@ $sti:
 ; the spinlock implementation.
 global $xchg
 $xchg:
-  mov ecx, [esp+4]    ; addr
-  mov eax, [esp+8]    ; newval
-  lock xchg [ecx], eax
+  mov eax, esi
+  lock xchg [rdi], eax
   ret
 
 ; void clearlock(volatile uint *p)
@@ -176,19 +160,33 @@ $xchg:
 ; before it.
 global clearlock
 clearlock:
-  mov eax, [esp+4]
-  mov dword [eax], 0
+  mov dword [rdi], 0
   ret
 
-; uint rcr2(void)
+; uintp rcr2(void)
+; CR2 (the faulting address on a page fault) is a full 64-bit register
+; in long mode - unlike the 32-bit build's rcr2, this returns the whole
+; thing in rax, not just eax.
 global rcr2
 rcr2:
-  mov eax, cr2
+  mov rax, cr2
   ret
 
-; void lcr3(uint val)
+; void lcr3(uintp val)
 global lcr3
 lcr3:
-  mov eax, [esp+4]
-  mov cr3, eax
+  mov cr3, rdi
+  ret
+
+; void wrmsr(uint msr, uint64 val)
+; wrmsr itself takes the MSR index in ecx and the 64-bit value split as
+; edx:eax (high:low), not as one 64-bit register - the "$" prefix is the
+; same reserved-mnemonic dodge as $lgdt/$ltr/etc above.
+global $wrmsr
+$wrmsr:
+  mov ecx, edi   ; msr
+  mov rax, rsi   ; val (also sets eax = val's low 32 bits)
+  mov rdx, rax
+  shr rdx, 32    ; edx = val's high 32 bits
+  wrmsr
   ret

@@ -1,7 +1,7 @@
 #include "syscall.h"
 #include "traps.h"
 
-BITS 32
+BITS 64
 section .text
 
 ; The SYS_xxx constant is passed in as its own macro argument (rather than
@@ -13,6 +13,12 @@ section .text
 ; instead of a reserved instruction mnemonic (this matters for "wait",
 ; which NASM would otherwise parse as the x87 WAIT instruction). It has
 ; no effect on the symbol name actually emitted.
+;
+; There's no argument marshalling to do here: the caller (a normal C
+; function call from ulib.c) already left every argument in the right
+; register per the SysV AMD64 convention - the same registers
+; kernel/syscall.c's argint/argptr/argstr read them back out of - so
+; the stub really is just "set the syscall number and trap".
 %macro SYSCALL 2
   global $%1
   $%1:
@@ -30,6 +36,7 @@ SYSCALL write, SYS_write
 SYSCALL close, SYS_close
 SYSCALL kill, SYS_kill
 SYSCALL exec, SYS_exec
+SYSCALL execve, SYS_execve
 SYSCALL open, SYS_open
 SYSCALL mknod, SYS_mknod
 SYSCALL unlink, SYS_unlink
