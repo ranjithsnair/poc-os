@@ -31,6 +31,16 @@ void clearlock(volatile uint *p);
 // canonical high address.
 uintp rcr2(void);
 void lcr3(uintp val);
+uint64 rcr0(void);
+void lcr0(uint64 val);
+uint64 rcr4(void);
+void lcr4(uint64 val);
+// FXSAVE/FXRSTOR: area must be a 16-byte-aligned 512-byte buffer (see
+// kernel/proc.c's fpu_state, allocated a whole kalloc()'d page for
+// exactly this reason).
+void fpu_save(void *area);
+void fpu_restore(void *area);
+void fpu_clean_template(void *area);
 
 // WRMSR is only ever used here for MSR_FS_BASE (see include/mmu.h),
 // which takes a full 64-bit value.

@@ -24,8 +24,8 @@
 #include "file.h"
 #include "socket.h"
 
-#define EPOLL_MAXFDS 16   // matches NOFILE - can't watch more fds than
-                           // a process can even have open
+#define EPOLL_MAXFDS 32   // matches NOFILE (param.h) - can't watch more fds
+                           // than a process can even have open
 
 #define EPOLLIN  0x001
 #define EPOLLOUT 0x004

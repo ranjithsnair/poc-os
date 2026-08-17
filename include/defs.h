@@ -220,6 +220,8 @@ void            vbeinit(void);
 
 // vm.c
 void            seginit(void);
+void            fpuinit(void);
+extern uchar    fpu_template[512];
 void            kvmalloc(void);
 pde_t*          setupkvm(void);
 char*           uva2ka(pde_t*, char*);

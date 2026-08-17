@@ -178,6 +178,66 @@ lcr3:
   mov cr3, rdi
   ret
 
+; uint64 rcr0(void) / void lcr0(uint64 val) - CR0.EM/CR0.MP (bits 2/1),
+; cleared/set at boot (kernel/main.c's fpuinit(), one per CPU) so FPU/
+; SSE instructions execute instead of faulting - see kernel/proc.c's
+; fpu_save()/fpu_restore() for why user-space floating point (GUI
+; roadmap ToaruOS-style rewrite's TrueType text) needed this at all.
+global rcr0
+rcr0:
+  mov rax, cr0
+  ret
+
+global lcr0
+lcr0:
+  mov cr0, rdi
+  ret
+
+; uint64 rcr4(void) / void lcr4(uint64 val) - CR4.OSFXSR/OSXMMEXCPT
+; (bits 9/10), set alongside CR0 above.
+global rcr4
+rcr4:
+  mov rax, cr4
+  ret
+
+global lcr4
+lcr4:
+  mov cr4, rdi
+  ret
+
+; void fpu_save(void *area) / void fpu_restore(void *area) - legacy
+; FXSAVE/FXRSTOR, a 512-byte area the caller must 16-byte-align (see
+; kernel/proc.c's allocproc(), which kalloc()s a whole page for it).
+global fpu_save
+fpu_save:
+  fxsave [rdi]
+  ret
+
+global fpu_restore
+fpu_restore:
+  fxrstor [rdi]
+  ret
+
+section .data
+align 16
+default_mxcsr: dd 0x1F80   ; power-up-default MXCSR (all SSE FP exceptions masked)
+
+section .text
+; void fpu_clean_template(void *area) - resets the real FPU/SSE state to
+; its standard power-up-equivalent values (FNINIT alone doesn't touch
+; MXCSR, hence the explicit LDMXCSR) and FXSAVEs that clean state into
+; area (16-byte-aligned, 512 bytes). kernel/vm.c's fpuinit() calls this
+; once into a shared template; kernel/proc.c's allocproc() memcpy()s it
+; into every new process's own fpu_state - an all-zero FXSAVE image
+; would leave MXCSR=0, unmasking every SSE FP exception and trapping
+; (#XM, unhandled) on the first ordinary precision-loss condition.
+global fpu_clean_template
+fpu_clean_template:
+  fninit
+  ldmxcsr [rel default_mxcsr]
+  fxsave [rdi]
+  ret
+
 ; void wrmsr(uint msr, uint64 val)
 ; wrmsr itself takes the MSR index in ecx and the 64-bit value split as
 ; edx:eax (high:low), not as one 64-bit register - the "$" prefix is the

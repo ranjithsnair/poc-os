@@ -162,6 +162,7 @@ extern int sys_shm_create(void);
 extern int sys_epoll_create1(void);
 extern int sys_epoll_ctl(void);
 extern int sys_epoll_pwait(void);
+extern int sys_date(void);
 extern int sys_exec(void);
 extern int sys_exit(void);
 extern int sys_fork(void);
@@ -249,6 +250,7 @@ static int (*syscalls[])(void) = {
 [SYS_epoll_create1]     sys_epoll_create1,
 [SYS_epoll_ctl]         sys_epoll_ctl,
 [SYS_epoll_pwait]       sys_epoll_pwait,
+[SYS_date]              sys_date,
 };
 
 // Called from trap() for a T_SYSCALL trap. tf->eax holds the syscall

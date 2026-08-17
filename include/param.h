@@ -15,7 +15,17 @@
 // recursion or runaway allocation was involved.
 #define USTACKPAGES  16
 #define NCPU          8  // maximum number of CPUs
-#define NOFILE       16  // open files per process
+// Raised from 16 for the ToaruOS-style GUI rewrite: a GUI client that
+// double-forks to launch another GUI client (gui/desktop.c's
+// launch_terminal(), which fork()+execve()s /usr/bin/terminal) has the
+// new process inherit every fd the launcher had open (compositor
+// socket(s), epoll instance, ...) on top of its own (another
+// compositor socket, two pipes to bash, its own epoll instance) - 16
+// turned out too tight (found via gui/terminal.c's own pipe() call
+// failing with the 2nd of its two pipe() calls, once fd exhaustion was
+// suspected and confirmed by tracing errno). kernel/epoll.c's
+// EPOLL_MAXFDS is kept in sync with this, see its own comment.
+#define NOFILE       32  // open files per process
 #define NFILE       100  // open files per system
 #define NINODE       50  // maximum number of active i-nodes
 #define NDEV         10  // maximum major device number
@@ -39,5 +49,13 @@
 // handling) no room to run without hitting balloc()'s "out of
 // blocks" panic - confirmed by hitting exactly that panic once real
 // coreutils utilities pushed usage that high.
-#define FSSIZE       4000  // size of file system in blocks
+// Raised from 4000 (2MB) for the ToaruOS-style GUI rewrite: the DejaVu
+// TrueType fonts alone (usr/share/fonts/dejavu/*.ttf) total ~2.1MB, plus
+// a wallpaper + icon raw asset - all comfortably past the old ceiling.
+// mkfs/mkfs.c's balloc() now writes a real multi-sector bitmap (nbitmap
+// = FSSIZE/(BSIZE*8)+1 sectors, matching kernel/fs.c's own BBLOCK(b,sb)
+// addressing) instead of assuming everything fits in bmapstart's first
+// sector, so the old "hard ceiling at BSIZE*8=4096 blocks no matter what
+// FSSIZE says" limit this comment used to describe no longer applies.
+#define FSSIZE       20000  // size of file system in blocks
 

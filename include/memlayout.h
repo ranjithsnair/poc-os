@@ -22,7 +22,7 @@
 // kernel's own footprint (loaded at EXTMEM above, realistically under
 // 1MB) with margin, and the boot loader hardcodes the same address.
 #define RAMDISK_PADDR 0x400000
-#define RAMDISK_SIZE  2048000       // FSSIZE(4000) * BSIZE(512), param.h/fs.h
+#define RAMDISK_SIZE  10240000      // FSSIZE(20000) * BSIZE(512), param.h/fs.h
 
 // VBE_INFO_PADDR: where boot/boot2_bios.asm's real-mode VBE probe (see
 // its own comment) parks the struct vbeinfo (include/vbe.h) it builds -

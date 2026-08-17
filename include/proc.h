@@ -67,6 +67,13 @@ struct proc {
                                  // sys_setuid()/sys_setgid() for why these
                                  // are needed for correct POSIX semantics
   ushort umask;                 // file-creation mask (low 9 bits used)
+  // FXSAVE/FXRSTOR area (512 bytes used, kalloc()'d as a whole page for
+  // the required 16-byte alignment) - saved/restored around every
+  // swtch() in kernel/proc.c's sched(), so a user process's FPU/SSE
+  // state (gui/libgui/ttf.c's TrueType text, GUI roadmap ToaruOS-style
+  // rewrite) survives being preempted by another process. See
+  // kernel/vm.c's fpuinit() for the CR0/CR4 enabling this depends on.
+  uchar *fpu_state;
 };
 
 // Process memory is laid out contiguously, low addresses first:

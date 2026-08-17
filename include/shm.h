@@ -14,8 +14,15 @@
 // fbtest.c already calls syscall(SYS_mknod, ...) raw.
 
 #define SHM_MAXOBJS  16
-#define SHM_MAXPAGES 64      // 256KB cap per object - plenty for a
-                              // cursor or small test surface
+// 2MB cap per object. Raised from the original 64/256KB once real
+// antialiased TrueType text (GUI roadmap ToaruOS-style rewrite) made an
+// 80x24 terminal grid need ~375 pages at realistic DejaVu Sans Mono
+// cell metrics - bigger than a bitmap font's 8x16 cells allowed for in
+// the same pixel budget. Still under 1% of PHYSTOP's 224MB even with
+// several windows open at once (compositor.c's MAXWIN=8 ceiling), so
+// there's no real memory-pressure reason to keep shrinking surfaces to
+// fit instead.
+#define SHM_MAXPAGES 512
 
 // Exactly one struct file ever wraps a given shmobj (created once in
 // shmcreate() below; fork()/dup()/SCM_RIGHTS-passing all share that

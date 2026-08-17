@@ -1,0 +1,11 @@
+DejaVu fonts (DejaVuSans.ttf, DejaVuSans-Bold.ttf, DejaVuSansMono.ttf,
+DejaVuSansMono-Bold.ttf) - copied verbatim from ToaruOS
+(github.com/klange/toaruos, base/usr/share/fonts/truetype/dejavu/),
+which itself bundles the upstream DejaVu Fonts project
+(dejavu-fonts.github.io).
+
+DejaVu fonts are a derivative of the Bitstream Vera fonts and are
+released under a permissive license explicitly permitting embedding,
+modification, and redistribution (including as part of a larger
+software distribution) with no royalty required. See
+https://dejavu-fonts.github.io/License.html for the full text.

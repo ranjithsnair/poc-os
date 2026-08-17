@@ -307,16 +307,25 @@ void
 balloc(int used)
 {
   uchar buf[BSIZE];
-  int i;
+  int i, sect;
 
   printf("balloc: first %d blocks have been allocated\n", used);
-  assert(used < BSIZE*8);
-  bzero(buf, BSIZE);
-  for(i = 0; i < used; i++){
-    buf[i/8] = buf[i/8] | (0x1 << (i%8));
+  // used can span more than one BSIZE*8-bit bitmap sector once FSSIZE
+  // (and thus nbitmap, computed the same way above) exceeds BSIZE*8
+  // (4096) blocks - mirror kernel/fs.c's own BBLOCK(b,sb)=b/BPB+
+  // bmapstart addressing here instead of assuming everything fits in
+  // bmapstart's first sector, which is all the original single-wsect()
+  // version handled (see FSSIZE's own comment in include/param.h for
+  // why that was fine when FSSIZE was capped at 4000).
+  assert(used < nbitmap * BSIZE*8);
+  for(sect = 0; sect * BSIZE*8 < used; sect++){
+    bzero(buf, BSIZE);
+    for(i = 0; i < BSIZE*8 && sect*BSIZE*8 + i < used; i++){
+      buf[i/8] = buf[i/8] | (0x1 << (i%8));
+    }
+    printf("balloc: write bitmap block at sector %d\n", sb.bmapstart + sect);
+    wsect(sb.bmapstart + sect, buf);
   }
-  printf("balloc: write bitmap block at sector %d\n", sb.bmapstart);
-  wsect(sb.bmapstart, buf);
 }
 
 #define min(a, b) ((a) < (b) ? (a) : (b))

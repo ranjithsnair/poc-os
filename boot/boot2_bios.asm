@@ -384,10 +384,12 @@ lba_to_chs:
   mov [chs_head], dl
   ret
 
-; read_sector: reads the single sector at DWORD [cur_sec_lba] from
-; drive [drive] into ES:BX, retrying (with a controller reset) once
-; before giving up. Clobbers ax/bx/cx/dx.
-read_sector:
+; read_sectors: reads [read_count] sectors (1..spt - caller guarantees
+; this never crosses a track boundary, see load_chunks' batching)
+; starting at DWORD [cur_sec_lba] from drive [drive] into ES:BX,
+; retrying (with a controller reset) once before giving up. Clobbers
+; ax/bx/cx/dx.
+read_sectors:
   call lba_to_chs
   mov cx, [chs_cyl]
   mov ch, cl
@@ -396,7 +398,8 @@ read_sector:
   or cl, [chs_sector]
   mov dh, [chs_head]
   mov dl, [drive]
-  mov ax, 0x0201
+  mov al, [read_count]
+  mov ah, 0x02
   int 0x13
   jnc .ok
   xor ax, ax
@@ -409,7 +412,8 @@ read_sector:
   or cl, [chs_sector]
   mov dh, [chs_head]
   mov dl, [drive]
-  mov ax, 0x0201
+  mov al, [read_count]
+  mov ah, 0x02
   int 0x13
   jc diskfail
 .ok:
@@ -437,23 +441,52 @@ load_chunks:
 .have_count:
   mov [chunk_count], ax
 
-  ; Read this chunk's sectors, one CHS call at a time, into the
-  ; staging buffer at STAGE_BUF_SEG:0, STAGE_BUF_SEG:0x200, etc.
+  ; Read this chunk's sectors into the staging buffer at
+  ; STAGE_BUF_SEG:0, STAGE_BUF_SEG:0x200, etc. - batched into as few
+  ; INT13h AH=0x02 calls as the current track allows (never crossing a
+  ; track boundary within one call, the safe/universal convention for
+  ; multi-sector CHS reads), rather than one call per sector: with
+  ; RAMDISK_SIZE grown past ~2MB/4000 sectors (see its own comment),
+  ; one-call-per-sector made the ramdisk load alone take minutes under
+  ; QEMU/SeaBIOS's per-INT13h-call emulation overhead.
   mov eax, [cur_lba]
   mov [cur_sec_lba], eax
   mov word [stage_off], 0
-  mov cx, [chunk_count]
+  mov cx, [chunk_count]     ; cx = sectors remaining in this chunk
 .readloop:
-  jcxz .readdone
+  cmp cx, 0
+  je .readdone
+
+  ; count = min(cx, sectors remaining in the current track)
   push cx
+  mov eax, [cur_sec_lba]
+  xor edx, edx
+  movzx ebx, byte [spt]
+  div ebx                   ; edx = cur_sec_lba % spt (0-based sector-in-track)
+  movzx eax, byte [spt]
+  sub eax, edx               ; eax = sectors left in this track
+  pop cx
+  cmp ax, cx
+  jbe .have_batch
+  mov ax, cx
+.have_batch:
+  mov [read_count], al
+
   mov ax, STAGE_BUF_SEG
   mov es, ax
   mov bx, [stage_off]
-  call read_sector
-  add word [stage_off], 512
-  inc dword [cur_sec_lba]
+  push cx
+  call read_sectors
   pop cx
-  loop .readloop
+
+  movzx ax, byte [read_count]
+  mov dx, ax
+  shl dx, 9
+  add word [stage_off], dx
+  movzx edx, byte [read_count]
+  add [cur_sec_lba], edx
+  sub cx, ax
+  jmp .readloop
 .readdone:
 
   call flatten_es
@@ -498,6 +531,7 @@ heads:        dw 0
 chs_cyl:      dw 0
 chs_head:     db 0
 chs_sector:   db 0
+read_count:   db 0
 
 ; Bootstrap GDT - identical in shape to boot/bootasm.asm's own (flat,
 ; identity-mapped code/data descriptors): used both for the repeated

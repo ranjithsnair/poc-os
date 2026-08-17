@@ -232,6 +232,14 @@
 #define SYS_epoll_create1 66
 #define SYS_epoll_ctl 67
 #define SYS_epoll_pwait 68
+// (struct rtcdate *r): reads the real-time clock into *r via
+// kernel/lapic.c's cmostime() (CMOS/RTC hardware) - that function has
+// existed since the original xv6 skeleton but was never wired to a
+// syscall until the desktop panel's clock widget (GUI roadmap
+// ToaruOS-style rewrite) needed real wall-clock time. Not a real
+// Linux/musl syscall; called directly via syscall(SYS_date, &r), same
+// convention as SYS_shm_create.
+#define SYS_date 69
 
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value

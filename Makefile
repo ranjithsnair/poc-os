@@ -278,7 +278,7 @@ $(BUILD)/boot2_bios: $(OBJDIR)/boot/boot2_bios.o | $(BUILD)
 # separate drives, since real boot media (a USB stick, an internal
 # disk) is one physical device.
 $(BUILD)/poc_bios.img: $(BUILD)/bootblock_bios $(BUILD)/boot2_bios $(BUILD)/kernel.bin $(BUILD)/fs.img $(OBJDIR)/boot/bootconfig_bios.h | $(BUILD)
-	dd if=/dev/zero of=$(BUILD)/poc_bios.img count=15000
+	dd if=/dev/zero of=$(BUILD)/poc_bios.img count=22000
 	dd if=$(BUILD)/bootblock_bios of=$(BUILD)/poc_bios.img conv=notrunc
 	dd if=$(BUILD)/boot2_bios of=$(BUILD)/poc_bios.img seek=1 conv=notrunc
 	dd if=$(BUILD)/kernel.bin of=$(BUILD)/poc_bios.img seek=$(BOOT2_BIOS_LBA) conv=notrunc
@@ -841,10 +841,12 @@ $(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
 # already found today, just for a second .so for the first time.
 $(BUILD)/libgui.so: $(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
                      $(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+                     $(OBJDIR)/gui-pic/libgui/ttf.o \
                      $(BUILD)/libc.so | $(BUILD)
 	$(LD) -m elf_x86_64 -shared -z defs -o $@ \
 		$(OBJDIR)/gui-pic/libgui/gfx.o $(OBJDIR)/gui-pic/libgui/font.o \
 		$(OBJDIR)/gui-pic/libgui/wire.o $(OBJDIR)/gui-pic/libgui/client.o \
+		$(OBJDIR)/gui-pic/libgui/ttf.o \
 		-L $(BUILD) -lc
 	$(OBJDUMP) -S $@ > $(BUILD)/libgui.dis
 	$(OBJCOPY) --strip-debug $@
@@ -1608,6 +1610,18 @@ $(OBJDIR)/gui-pic/%.o: gui/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libgui -c -o $@ $<
 
+# ttf.c (vendor/stb_truetype.h, real antialiased TrueType text - GUI
+# roadmap ToaruOS-style rewrite) is the one file in this whole codebase
+# that needs real floating point, so it's the one file built without
+# -mgeneral-regs-only (every other user/kernel object stays built with
+# it - see kernel/vm.c's fpuinit()/kernel/proc.c's fpu_state for what
+# had to change kernel-side before this was even safe to allow at all).
+# A target-specific rule like this overrides the %.o pattern rule above
+# for this one exact file, per ordinary GNU Make precedence.
+$(OBJDIR)/gui-pic/libgui/ttf.o: gui/libgui/ttf.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(subst -mgeneral-regs-only,,$(BASH_PIC_CFLAGS)) $(BASH_INC) -Igui/libgui -c -o $@ $<
+
 $(OBJDIR)/bash-pic/poc/builtins/%.o: bash/poc/builtins/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -c -o $@ $<
@@ -1842,6 +1856,27 @@ $(BUILD)/_login_gui: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.
 	$(OBJDUMP) -S $@ > $(BUILD)/login_gui.dis
 	$(OBJCOPY) --strip-debug $@
 
+# TEMPORARY - gui/ttftest.c's own comment: standalone TrueType pipeline
+# verification, to be deleted once verified.
+$(BUILD)/_ttftest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/ttftest.o \
+                    $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/ttftest.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJCOPY) --strip-debug $@
+
+# desktop: gui/desktop.c's own comment - the desktop shell login_gui.c
+# hands off to. Compiled via the gui-pic/%.o generic pattern rule
+# (already has -Igui/libgui built in), linked against libgui.so same
+# as compositor/login_gui/terminal above.
+$(BUILD)/_desktop: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/desktop.o \
+                    $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/desktop.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/desktop.dis
+	$(OBJCOPY) --strip-debug $@
+
 # terminal: gui/terminal.c's own comment - GUI roadmap phase 10's
 # terminal emulator client. Compiled via the gui-pic/%.o generic
 # pattern rule (already has -Igui/libgui built in), linked against
@@ -1956,6 +1991,25 @@ MKFS_INSTALL += usr/bin/login_gui:$(BUILD)/_login_gui
 MKFS_INSTALL_DEPS += $(BUILD)/_login_gui
 MKFS_INSTALL += usr/bin/terminal:$(BUILD)/_terminal
 MKFS_INSTALL_DEPS += $(BUILD)/_terminal
+MKFS_INSTALL += usr/bin/ttftest:$(BUILD)/_ttftest
+MKFS_INSTALL_DEPS += $(BUILD)/_ttftest
+MKFS_INSTALL += usr/bin/desktop:$(BUILD)/_desktop
+MKFS_INSTALL_DEPS += $(BUILD)/_desktop
+
+# GUI assets (ToaruOS-style rewrite): the DejaVu fonts and the raw
+# wallpaper/icon assets tools/genraw.py generated - see gui/libgui/
+# ttf.c and gfx.c's gfx_load_raw()/gfx_load_raw_rgba() for the readers.
+# Plain data files, same imgpath:hostpath MKFS_INSTALL form etc/passwd
+# already uses above.
+MKFS_INSTALL += usr/share/fonts/dejavu/DejaVuSans.ttf:gui/assets/fonts/DejaVuSans.ttf \
+	usr/share/fonts/dejavu/DejaVuSans-Bold.ttf:gui/assets/fonts/DejaVuSans-Bold.ttf \
+	usr/share/fonts/dejavu/DejaVuSansMono.ttf:gui/assets/fonts/DejaVuSansMono.ttf \
+	usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf:gui/assets/fonts/DejaVuSansMono-Bold.ttf \
+	usr/share/wallpaper.raw:gui/assets/images/wallpaper.raw \
+	usr/share/icons/terminal.raw:gui/assets/images/terminal-icon.raw
+MKFS_INSTALL_DEPS += gui/assets/fonts/DejaVuSans.ttf gui/assets/fonts/DejaVuSans-Bold.ttf \
+	gui/assets/fonts/DejaVuSansMono.ttf gui/assets/fonts/DejaVuSansMono-Bold.ttf \
+	gui/assets/images/wallpaper.raw gui/assets/images/terminal-icon.raw
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

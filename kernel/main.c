@@ -28,6 +28,8 @@ main(void)
   mpinit();        // detect other processors
   lapicinit();     // interrupt controller
   seginit();       // segment descriptors
+  fpuinit();       // FPU/SSE (must come before userinit() creates the
+                    // first process - see kernel/proc.c's allocproc())
   picinit();       // disable pic
   ioapicinit();    // another interrupt controller
   consoleinit();   // console hardware
@@ -72,6 +74,7 @@ mpenter(void)
 {
   switchkvm();
   seginit();
+  fpuinit();       // this AP's own CR0/CR4 - see main()'s own call site
   lapicinit();
   mpmain();
 }

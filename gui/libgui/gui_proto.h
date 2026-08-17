@@ -30,9 +30,31 @@ enum {
   GUI_MSG_FOCUS_EVENT = 7,     // compositor -> client
 };
 
+// GUI_WIN_BORDERLESS: compositor draws no title bar/border chrome for
+// this window and uses its raw content size for hit-testing/redraw
+// (not decor_w()/decor_h()) - for the desktop shell's top bar/icon and
+// the login screen's own glass box, none of which should look like an
+// ordinary app window (ToaruOS-style GUI rewrite).
+#define GUI_WIN_BORDERLESS 0x1
+// GUI_WIN_NO_FOCUS: compositor never gives this window keyboard focus
+// (click-to-focus is skipped for it) - a separate concern from
+// BORDERLESS: the desktop bar/icon are both borderless *and* must
+// never steal keyboard focus from a real app window (e.g. the
+// terminal), but the login screen is borderless and still very much
+// needs focus to receive typed keystrokes at all.
+#define GUI_WIN_NO_FOCUS 0x2
+
 struct gui_msg_create_surface {
   int type;
   int w, h;
+  // Requested top-left placement in screen coordinates, or (-1,-1) to
+  // keep the compositor's existing auto-cascade behavior (unchanged
+  // for ordinary app windows like the terminal). Lets a client that
+  // knows the screen size (see screen_w/screen_h below) position
+  // itself precisely - the login box centered, the desktop bar at
+  // (0,0), the desktop icon at a fixed spot.
+  int x, y;
+  int flags;   // GUI_WIN_BORDERLESS, or 0
   char title[GUI_TITLE_MAX];
 };
 
@@ -48,6 +70,10 @@ struct gui_msg_surface_created {
   unsigned char red_mask_size, red_field_pos;
   unsigned char green_mask_size, green_field_pos;
   unsigned char blue_mask_size, blue_field_pos;
+  // Total framebuffer size, not this surface's own w/h - lets a
+  // client compute its own centered/full-width placement (see
+  // gui_msg_create_surface's x/y above) without a separate query.
+  unsigned int screen_w, screen_h;
 };
 
 struct gui_msg_commit {

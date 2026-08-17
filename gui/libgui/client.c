@@ -28,7 +28,8 @@ gui_connect(struct gui_conn *c, const char *sockpath)
 }
 
 int
-gui_create_surface(struct gui_conn *c, int w, int h, const char *title)
+gui_create_surface(struct gui_conn *c, int w, int h, int x, int y,
+                    int flags, const char *title)
 {
   struct gui_msg_create_surface req;
   union gui_msg resp;
@@ -38,6 +39,9 @@ gui_create_surface(struct gui_conn *c, int w, int h, const char *title)
   req.type = GUI_MSG_CREATE_SURFACE;
   req.w = w;
   req.h = h;
+  req.x = x;
+  req.y = y;
+  req.flags = flags;
   if (title) {
     unsigned long n = strlen(title);
 
@@ -64,6 +68,8 @@ gui_create_surface(struct gui_conn *c, int w, int h, const char *title)
   c->surface.green_field_pos = resp.surface_created.green_field_pos;
   c->surface.blue_mask_size = resp.surface_created.blue_mask_size;
   c->surface.blue_field_pos = resp.surface_created.blue_field_pos;
+  c->screen_w = resp.surface_created.screen_w;
+  c->screen_h = resp.surface_created.screen_h;
 
   c->surface.pixels = mmap(0, (unsigned long)resp.surface_created.pitch * resp.surface_created.h,
                             PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, 0);

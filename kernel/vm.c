@@ -37,6 +37,52 @@ seginit(void)
   lgdt(c->gdt, sizeof(c->gdt));
 }
 
+// Enables FPU/SSE instructions on this CPU - run once per CPU (see
+// kernel/main.c's mpmain(), reached by both the boot CPU and every AP),
+// same "once per core" scope as seginit() above. CR0.EM=0 lets x87/SSE
+// instructions execute instead of raising #UD/#NM; CR0.MP=1 makes a
+// task switch actually able to trap FPU use (unused by this kernel's
+// eager save/restore, kernel/proc.c's sched(), but the documented
+// correct pairing with EM=0 regardless). CR4.OSFXSR=1 is required for
+// FXSAVE/FXRSTOR and any SSE instruction to be legal at all; OSXMMEXCPT
+// =1 routes SSE floating-point exceptions through #XM rather than #UD.
+// Needed at all because gui/libgui/ttf.c (GUI roadmap ToaruOS-style
+// rewrite's real antialiased TrueType text, vendor/stb_truetype.h) is
+// the first floating-point code this kernel has ever had to run in
+// user space - see kernel/proc.c's fpu_state/fpu_save()/fpu_restore()
+// for the other half (per-process state survives a context switch).
+#define CR0_EM (1 << 2)
+#define CR0_MP (1 << 1)
+#define CR4_OSFXSR    (1 << 9)
+#define CR4_OSXMMEXCPT (1 << 10)
+
+// Shared clean FXSAVE-image template (kernel/x86.asm's
+// fpu_clean_template()) - kernel/proc.c's allocproc() memcpy()s this
+// into every new process's own fpu_state, rather than leaving it
+// zeroed (see fpu_clean_template's own comment for why that would be
+// unsafe). Rebuilt redundantly-but-harmlessly by every CPU's fpuinit()
+// call (the values are architecturally identical on every core) rather
+// than gated to the boot CPU only, to sidestep any ordering dependency
+// on exactly when each AP finishes coming up relative to the BSP.
+uchar fpu_template[512] __attribute__((aligned(16)));
+
+void
+fpuinit(void)
+{
+  uint64 cr0, cr4;
+
+  cr0 = rcr0();
+  cr0 &= ~(uint64)CR0_EM;
+  cr0 |= CR0_MP;
+  lcr0(cr0);
+
+  cr4 = rcr4();
+  cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
+  lcr4(cr4);
+
+  fpu_clean_template(fpu_template);
+}
+
 // Descend one level of a multi-level page table: return the next-level
 // table that table[idx] refers to, allocating and zeroing a fresh page
 // for it first if none exists yet and alloc is set.

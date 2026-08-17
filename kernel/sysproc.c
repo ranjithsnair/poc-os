@@ -552,6 +552,20 @@ sys_umask(void)
   return old;
 }
 
+// (struct rtcdate *r): see include/syscall.h - just forwards to
+// kernel/lapic.c's cmostime(), which already did the real CMOS/RTC
+// hardware reading, unused by anything until now.
+int
+sys_date(void)
+{
+  char *p;
+
+  if(argptr(0, &p, sizeof(struct rtcdate)) < 0)
+    return -1;
+  cmostime((struct rtcdate*)p);
+  return 0;
+}
+
 // return how many clock tick interrupts have occurred
 // since start.
 int

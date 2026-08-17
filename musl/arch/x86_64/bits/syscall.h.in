@@ -67,3 +67,4 @@
 #define __NR_epoll_create1 66
 #define __NR_epoll_ctl 67
 #define __NR_epoll_pwait 68
+#define __NR_date 69

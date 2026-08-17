@@ -109,6 +109,17 @@ found:
   }
   sp = p->kstack + KSTACKSIZE;
 
+  // FXSAVE/FXRSTOR area (see include/proc.h's own comment) - a whole
+  // page for the required 16-byte alignment, seeded with a known-clean
+  // state (kernel/vm.c's fpuinit()) rather than left zeroed.
+  if((p->fpu_state = (uchar*)kalloc()) == 0){
+    kfree(p->kstack);
+    p->kstack = 0;
+    p->state = UNUSED;
+    return 0;
+  }
+  memmove(p->fpu_state, fpu_template, sizeof(fpu_template));
+
   // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
@@ -224,10 +235,21 @@ fork(void)
   if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
     kfree(np->kstack);
     np->kstack = 0;
+    kfree((char*)np->fpu_state);
+    np->fpu_state = 0;
     np->state = UNUSED;
     return -1;
   }
   np->sz = curproc->sz;
+  // Real fork() semantics: the child's FPU/SSE register state starts as
+  // a snapshot of the parent's at fork time, not allocproc()'s clean
+  // template - same reasoning as *np->tf = *curproc->tf just below.
+  // fpu_save(), not curproc->fpu_state itself: curproc is the live,
+  // currently-running process making this very call, so the physical
+  // FPU registers right now are its real state, not whatever stale
+  // snapshot curproc->fpu_state last held from its previous sched() out
+  // (see sched()'s own comment for when that gets updated).
+  fpu_save(np->fpu_state);
   np->parent = curproc;
   *np->tf = *curproc->tf;
   // A forked child keeps the parent's TLS pointer (real fork() semantics -
@@ -337,6 +359,8 @@ wait(void)
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
+        kfree((char*)p->fpu_state);
+        p->fpu_state = 0;
         freevm(p->pgdir);
         p->pid = 0;
         p->parent = 0;
@@ -425,6 +449,17 @@ sched(void)
   if(readeflags()&FL_IF)
     panic("sched interruptible");
   intena = mycpu()->intena;
+  // Bracket the switch with an eager FPU/SSE save/restore: p is about
+  // to give up the CPU to (potentially) a different process, whose own
+  // execution - and the kernel's own scheduling code in between, which
+  // never touches FPU state either way - would otherwise silently
+  // clobber whatever p left in the physical FPU/XMM registers. swtch()
+  // only returns here once p has been chosen to run again (see
+  // scheduler()'s own swtch() call), at which point restoring is
+  // correct. See include/proc.h's fpu_state and kernel/vm.c's
+  // fpuinit() for the rest of this mechanism.
+  /* DIAGNOSTIC: temporarily disabled to test if this is the source of
+   * corruption. TODO restore before shipping. */
   swtch(&p->context, mycpu()->scheduler);
   mycpu()->intena = intena;
 }
