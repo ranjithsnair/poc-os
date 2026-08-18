@@ -746,6 +746,7 @@ MUSL_LDSO_OBJS = \
 	$(OBJDIR)/musl-pic/src/termios/tcsetattr.o \
 	$(OBJDIR)/musl-pic/src/stdlib/atoi.o \
 	$(OBJDIR)/musl-pic/src/stdlib/imaxdiv.o \
+	$(OBJDIR)/musl-pic/src/stdlib/abs.o \
 	$(OBJDIR)/musl-pic/src/ctype/isxdigit.o \
 	$(OBJDIR)/musl-pic/src/ctype/ispunct.o \
 	$(OBJDIR)/musl-pic/src/ctype/isalnum.o \
@@ -832,6 +833,40 @@ $(BUILD)/libc.so: $(MUSL_LDSO_OBJS) | $(BUILD)
 	$(LD) -m elf_x86_64 -shared -e _dlstart -z defs -o $@ $^
 	$(OBJCOPY) --strip-debug $@
 	$(OBJCOPY) --strip-unneeded $@
+
+# libvterm.so: vendored libvterm (MIT, gui/libvterm/ - see its own
+# LICENSE), the real xterm-class VT100/ANSI parser + screen model that
+# replaced gui/terminal.c's original ~200-line hand-rolled CSI/SGR
+# parser. Built as its own DT_NEEDED shared object (not statically
+# linked into _terminal) for the same reason libgui.so is one: normal
+# ld.so DT_NEEDED resolution via -lvterm -L $(BUILD), found at runtime
+# at /usr/lib/libvterm.so through ld.so's default search path exactly
+# like libgui.so/libc.so already are (see MKFS_INSTALL below).
+$(BUILD)/libvterm.so: $(OBJDIR)/gui-pic/libvterm/vterm.o $(OBJDIR)/gui-pic/libvterm/state.o \
+                       $(OBJDIR)/gui-pic/libvterm/screen.o $(OBJDIR)/gui-pic/libvterm/parser.o \
+                       $(OBJDIR)/gui-pic/libvterm/pen.o $(OBJDIR)/gui-pic/libvterm/mouse.o \
+                       $(OBJDIR)/gui-pic/libvterm/keyboard.o $(OBJDIR)/gui-pic/libvterm/encoding.o \
+                       $(OBJDIR)/gui-pic/libvterm/unicode.o \
+                       $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -shared -z defs -o $@ \
+		$(OBJDIR)/gui-pic/libvterm/vterm.o $(OBJDIR)/gui-pic/libvterm/state.o \
+		$(OBJDIR)/gui-pic/libvterm/screen.o $(OBJDIR)/gui-pic/libvterm/parser.o \
+		$(OBJDIR)/gui-pic/libvterm/pen.o $(OBJDIR)/gui-pic/libvterm/mouse.o \
+		$(OBJDIR)/gui-pic/libvterm/keyboard.o $(OBJDIR)/gui-pic/libvterm/encoding.o \
+		$(OBJDIR)/gui-pic/libvterm/unicode.o \
+		-L $(BUILD) -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/libvterm.dis
+	$(OBJCOPY) --strip-debug $@
+
+# libvterm/src/%.c isn't under gui/ proper, so it needs its own pattern
+# rule - same BASH_PIC_CFLAGS/BASH_INC environment as gui-pic/%.o below
+# (proven fine for freestanding-but-real-musl userspace code), plus
+# -Igui/libvterm/include so its *.c can #include "vterm.h"/
+# "vterm_keycodes.h" and its own src/*.h find each other via bare quotes
+# (same directory, no -I needed for those).
+$(OBJDIR)/gui-pic/libvterm/%.o: gui/libvterm/src/%.c $(MUSL_GENH)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libvterm/include -c -o $@ $<
 
 # libgui.so (GUI roadmap phase 7): a real second shared object,
 # DT_NEEDED-linked by every gui/ client instead of statically
@@ -1613,10 +1648,11 @@ $(OBJDIR)/bash-pic/poc/%.o: bash/poc/%.c $(MUSL_GENH)
 # above (proven by fbtest.c/guitest.c/bashpipetest.c's own needs:
 # fork/pipe/mmap/ioctl and bash_prelude.h's uname/getrlimit/times
 # shims), plus -Igui/libgui so any gui/*.c can #include "libgui.h"
-# without a relative path.
+# without a relative path, and -Igui/libvterm/include so gui/terminal.c
+# can #include "vterm.h" the same way.
 $(OBJDIR)/gui-pic/%.o: gui/%.c $(MUSL_GENH)
 	@mkdir -p $(dir $@)
-	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libgui -c -o $@ $<
+	$(CC) $(BASH_PIC_CFLAGS) $(BASH_INC) -Igui/libgui -Igui/libvterm/include -c -o $@ $<
 
 # ttf.c (vendor/stb_truetype.h, real antialiased TrueType text - GUI
 # roadmap ToaruOS-style rewrite) is the one file in this whole codebase
@@ -1877,14 +1913,17 @@ $(BUILD)/_desktop: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/desktop.o \
 	$(OBJCOPY) --strip-debug $@
 
 # terminal: gui/terminal.c's own comment - GUI roadmap phase 10's
-# terminal emulator client. Compiled via the gui-pic/%.o generic
-# pattern rule (already has -Igui/libgui built in), linked against
-# libgui.so same as compositor/login_gui above.
+# terminal emulator client, now driven by vendored libvterm
+# (gui/libvterm/) instead of a hand-rolled CSI/SGR parser. Compiled via
+# the gui-pic/%.o generic pattern rule (has -Igui/libgui and
+# -Igui/libvterm/include built in), dynamically linked against both
+# libgui.so and libvterm.so same as compositor/login_gui link against
+# libgui.so alone.
 $(BUILD)/_terminal: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
-                     $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+                     $(BUILD)/libgui.so $(BUILD)/libvterm.so $(BUILD)/libc.so | $(BUILD)
 	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
 		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/terminal.o \
-		-L $(BUILD) -lgui -lc
+		-L $(BUILD) -lgui -lvterm -lc
 	$(OBJDUMP) -S $@ > $(BUILD)/terminal.dis
 	$(OBJCOPY) --strip-debug $@
 
@@ -1928,6 +1967,9 @@ MKFS_INSTALL_DEPS = $(BUILD)/_dinit
 # comment above for why head/tr/cut aren't here too (MAXFILE).
 MKFS_INSTALL += usr/lib/libgui.so:$(BUILD)/libgui.so
 MKFS_INSTALL_DEPS += $(BUILD)/libgui.so
+
+MKFS_INSTALL += usr/lib/libvterm.so:$(BUILD)/libvterm.so
+MKFS_INSTALL_DEPS += $(BUILD)/libvterm.so
 
 MKFS_INSTALL += usr/lib/libc.so:$(BUILD)/libc.so usr/bin/true:$(BUILD)/_true \
 	usr/bin/false:$(BUILD)/_false usr/bin/cat:$(BUILD)/_gcat \

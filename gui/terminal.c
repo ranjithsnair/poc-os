@@ -4,23 +4,27 @@
  * false, confirmed bash tolerates this) instead of a real pty, since
  * none exists in this kernel.
  *
- * Restyled (ToaruOS-style GUI rewrite): antialiased DejaVu Sans Mono
- * text (gui/libgui/ttf.c) instead of the original 8x16 bitmap font,
- * a real (if bounded) CSI/SGR escape parser driving a 16-color ANSI
- * palette per cell instead of one fixed fg/bg pair, and a drawn cursor
- * caret. TERM stays "dumb" - a deliberate, unchanged choice: forcing
- * TERM=xterm without a real PTY risks readline/curses programs probing
- * capabilities this pipe-based shell can't back up, so the parser just
- * handles whatever escapes bash/coreutils *do* emit under non-tty
- * detection (colored `ls`, a colored prompt, `clear`) rather than
- * advertising full terminal capability. See this file's own COLS/ROWS
- * comment for why the grid grew from the original 32x15 to 80x24.
+ * The VT100/ANSI parsing and screen model come from vendored libvterm
+ * (gui/libvterm/, MIT, dynamically linked as libvterm.so) rather than
+ * this file's own escape parser - a real xterm-class state machine
+ * (SGR, cursor addressing, scrolling regions, UTF-8, ...) instead of
+ * the ~200-line bounded CSI/SGR parser it replaced. TERM stays "dumb"
+ * - a deliberate, unchanged choice: forcing TERM=xterm without a real
+ * PTY risks readline/curses programs probing capabilities this
+ * pipe-based shell can't back up, so libvterm just ends up parsing
+ * whatever escapes bash/coreutils *do* emit under non-tty detection
+ * (colored `ls`, a colored prompt, `clear`) rather than this app
+ * advertising full terminal capability.
  *
  * Forwards keystrokes received via the compositor's key_event messages
  * (only ever delivered while this window holds focus) into bash's
  * stdin pipe, translating '\r' to '\n' the way a real terminal's
  * canonical mode would, since bash expects a newline to process a line
- * with no pty of its own to do that translation for it.
+ * with no pty of its own to do that translation for it. Also feeds
+ * each keystroke straight into libvterm as if it were terminal output,
+ * for the same reason the original parser's put_char() call did: with
+ * no real pty, nothing else echoes a keystroke to the screen the way a
+ * tty's line discipline normally would.
  *
  * Multiplexes two fds - the compositor connection (for key/focus
  * events) and bash's stdout pipe (for output to render) - via
@@ -38,6 +42,7 @@
 #include "gui_proto.h"
 #include "libgui.h"
 #include "ttf.h"
+#include "vterm.h"
 
 // 80x24 is the classic default terminal size. Real cell pixel
 // dimensions are measured from the loaded DejaVu Sans Mono font at
@@ -54,6 +59,10 @@
 
 #define COLOR_CURSOR 0xD3D7CF
 
+// Same 16-color ANSI palette the original parser used, now handed to
+// libvterm's VTermState so its own SGR handling (30-37/90-97/40-47/
+// 100-107, including the ones the old parser never implemented, like
+// 38/48 extended color) resolves indexed colors the same way.
 static const unsigned int palette[16] = {
 	0x000000, 0xCC0000, 0x4E9A06, 0xC4A000,
 	0x3465A4, 0x75507B, 0x06989A, 0xD3D7CF,
@@ -63,258 +72,76 @@ static const unsigned int palette[16] = {
 #define DEFAULT_FG 7
 #define DEFAULT_BG 0
 
-struct cell {
-	char ch;
-	unsigned char fg, bg;
-};
-
-static struct cell grid[ROWS][COLS];
-static int cur_row, cur_col;
-static unsigned char cur_fg = DEFAULT_FG, cur_bg = DEFAULT_BG;
-
-// Minimal CSI/SGR escape parser state, byte-at-a-time (output arrives
-// in arbitrary-sized read() chunks, so this has to persist across
-// calls rather than parse one buffer in isolation).
-enum { ESC_NONE, ESC_SAW_ESC, ESC_CSI };
-static int esc_state = ESC_NONE;
-static int csi_params[8];
-static int csi_nparam;
-static int csi_cur_has_digit;
-
+static VTerm *vt;
+static VTermScreen *vscreen;
 static int cell_w, cell_h;
 
+// Write end of the pipe feeding bash's stdin - libvterm calls this
+// back for any bytes a parsed sequence needs to answer (e.g. a device
+// attributes or cursor position query), the same fd keystrokes are
+// forwarded to below.
+static int pty_in_fd = -1;
+
 static void
-clear_cell(struct cell *c)
+term_output(const char *s, size_t len, void *user)
 {
-	c->ch = ' ';
-	c->fg = DEFAULT_FG;
-	c->bg = DEFAULT_BG;
+	(void)user;
+	if (pty_in_fd >= 0)
+		write(pty_in_fd, s, len);
+}
+
+static unsigned int
+rgb_of(VTermColor col)
+{
+	vterm_screen_convert_color_to_rgb(vscreen, &col);
+	return ((unsigned int)col.rgb.red << 16) |
+	       ((unsigned int)col.rgb.green << 8) |
+	       (unsigned int)col.rgb.blue;
 }
 
 static void
-clear_row(int r)
+render(struct gui_conn *c, struct ttf_font *mono, struct ttf_font *mono_bold)
 {
-	int col;
+	VTermState *state = vterm_obtain_state(vt);
+	VTermPos cursorpos;
+	VTermPos pos;
 
-	for (col = 0; col < COLS; col++)
-		clear_cell(&grid[r][col]);
-}
+	vterm_state_get_cursorpos(state, &cursorpos);
 
-static void
-scroll_up(void)
-{
-	memmove(grid[0], grid[1], (ROWS - 1) * COLS * sizeof(struct cell));
-	clear_row(ROWS - 1);
-}
+	for (pos.row = 0; pos.row < ROWS; pos.row++) {
+		for (pos.col = 0; pos.col < COLS; pos.col++) {
+			VTermScreenCell cell;
+			unsigned int fg, bg;
+			uint32_t ch;
+			char s[2];
 
-static void
-advance_line(void)
-{
-	cur_col = 0;
-	if (++cur_row >= ROWS) {
-		scroll_up();
-		cur_row = ROWS - 1;
-	}
-}
-
-static void
-put_visible(char ch)
-{
-	grid[cur_row][cur_col].ch = ch;
-	grid[cur_row][cur_col].fg = cur_fg;
-	grid[cur_row][cur_col].bg = cur_bg;
-	if (++cur_col >= COLS)
-		advance_line();
-}
-
-// Applies one SGR (CSI ... 'm') parameter - 0 resets, 30-37/90-97 set
-// fg, 40-47/100-107 set bg, 39/49 reset fg/bg to default. Bold (1) is
-// approximated as "bright" (the +8 palette half) applied to whatever
-// color comes next/is already set, the common terminal convention.
-static int sgr_bold;
-
-static void
-apply_sgr(int p)
-{
-	if (p == 0) {
-		cur_fg = DEFAULT_FG;
-		cur_bg = DEFAULT_BG;
-		sgr_bold = 0;
-	} else if (p == 1) {
-		sgr_bold = 1;
-	} else if (p == 22) {
-		sgr_bold = 0;
-	} else if (p >= 30 && p <= 37) {
-		cur_fg = (unsigned char)((p - 30) + (sgr_bold ? 8 : 0));
-	} else if (p == 39) {
-		cur_fg = DEFAULT_FG;
-	} else if (p >= 40 && p <= 47) {
-		cur_bg = (unsigned char)(p - 40);
-	} else if (p == 49) {
-		cur_bg = DEFAULT_BG;
-	} else if (p >= 90 && p <= 97) {
-		cur_fg = (unsigned char)((p - 90) + 8);
-	} else if (p >= 100 && p <= 107) {
-		cur_bg = (unsigned char)((p - 100) + 8);
-	}
-}
-
-static void
-csi_final(char final)
-{
-	int i;
-
-	if (csi_nparam == 0 && csi_cur_has_digit == 0)
-		csi_nparam = 0; /* no params at all, e.g. plain ESC[H */
-
-	switch (final) {
-	case 'm':
-		if (csi_nparam == 0)
-			apply_sgr(0);
-		for (i = 0; i < csi_nparam; i++)
-			apply_sgr(csi_params[i]);
-		break;
-	case 'H':
-	case 'f': {
-		int row = csi_nparam > 0 ? csi_params[0] : 1;
-		int col = csi_nparam > 1 ? csi_params[1] : 1;
-
-		if (row < 1) row = 1;
-		if (col < 1) col = 1;
-		cur_row = row - 1 >= ROWS ? ROWS - 1 : row - 1;
-		cur_col = col - 1 >= COLS ? COLS - 1 : col - 1;
-		break;
-	}
-	case 'J': {
-		int mode = csi_nparam > 0 ? csi_params[0] : 0;
-		int r;
-
-		if (mode == 2 || mode == 3) {
-			for (r = 0; r < ROWS; r++)
-				clear_row(r);
-			cur_row = 0;
-			cur_col = 0;
-		}
-		break;
-	}
-	case 'K': {
-		int col;
-
-		for (col = cur_col; col < COLS; col++)
-			clear_cell(&grid[cur_row][col]);
-		break;
-	}
-	case 'C': {
-		int n = csi_nparam > 0 ? csi_params[0] : 1;
-
-		cur_col += n;
-		if (cur_col >= COLS)
-			cur_col = COLS - 1;
-		break;
-	}
-	case 'D': {
-		int n = csi_nparam > 0 ? csi_params[0] : 1;
-
-		cur_col -= n;
-		if (cur_col < 0)
-			cur_col = 0;
-		break;
-	}
-	default:
-		break; /* unrecognized final byte: sequence consumed, no-op */
-	}
-}
-
-static void
-put_char(char ch)
-{
-	if (esc_state == ESC_SAW_ESC) {
-		if (ch == '[') {
-			esc_state = ESC_CSI;
-			csi_nparam = 0;
-			csi_cur_has_digit = 0;
-			memset(csi_params, 0, sizeof(csi_params));
-		} else {
-			esc_state = ESC_NONE; /* unsupported non-CSI escape: drop it */
-		}
-		return;
-	}
-	if (esc_state == ESC_CSI) {
-		if (ch >= '0' && ch <= '9') {
-			if (csi_nparam < (int)(sizeof(csi_params) / sizeof(csi_params[0]))) {
-				csi_params[csi_nparam] = csi_params[csi_nparam] * 10 + (ch - '0');
-				csi_cur_has_digit = 1;
+			vterm_screen_get_cell(vscreen, pos, &cell);
+			fg = rgb_of(cell.fg);
+			bg = rgb_of(cell.bg);
+			if (cell.attrs.reverse) {
+				unsigned int t = fg;
+				fg = bg;
+				bg = t;
 			}
-			return;
-		}
-		if (ch == ';') {
-			if (csi_nparam < (int)(sizeof(csi_params) / sizeof(csi_params[0])) - 1)
-				csi_nparam++;
-			csi_cur_has_digit = 0;
-			return;
-		}
-		if (ch >= 0x40 && ch <= 0x7E) {
-			if (csi_cur_has_digit || csi_nparam > 0)
-				csi_nparam++;
-			csi_final(ch);
-			esc_state = ESC_NONE;
-			return;
-		}
-		return; /* intermediate byte (rare) - ignore, stay in CSI */
-	}
 
-	if (ch == 0x1b) {
-		esc_state = ESC_SAW_ESC;
-		return;
-	}
-	if (ch == '\n') {
-		advance_line();
-		return;
-	}
-	if (ch == '\r') {
-		cur_col = 0;
-		return;
-	}
-	if (ch == '\b' || ch == 0x7f) {
-		if (cur_col > 0) {
-			cur_col--;
-			clear_cell(&grid[cur_row][cur_col]);
-		}
-		return;
-	}
-	if (ch == '\t') {
-		int next = (cur_col / 8 + 1) * 8;
+			gfx_fill_rect(&c->surface, pos.col * cell_w, pos.row * cell_h,
+			              (pos.col + 1) * cell_w, (pos.row + 1) * cell_h, bg);
 
-		while (cur_col < next && cur_col < COLS)
-			put_visible(' ');
-		return;
-	}
-	if ((unsigned char)ch < 0x20)
-		return; /* other control bytes: drop, not rendered */
-
-	put_visible(ch);
-}
-
-static void
-render(struct gui_conn *c, struct ttf_font *mono)
-{
-	int r, col;
-
-	for (r = 0; r < ROWS; r++) {
-		for (col = 0; col < COLS; col++) {
-			struct cell *cell = &grid[r][col];
-			char s[2] = { cell->ch ? cell->ch : ' ', 0 };
-
-			gfx_fill_rect(&c->surface, col * cell_w, r * cell_h,
-			              (col + 1) * cell_w, (r + 1) * cell_h, palette[cell->bg]);
+			ch = cell.chars[0];
+			if (ch == 0)
+				ch = ' ';
+			else if (ch > 0xFF)
+				ch = '?'; // ttf_draw_string only takes single-byte codepoints
+			s[0] = (char)ch;
+			s[1] = 0;
 			if (s[0] != ' ')
-				ttf_draw_string(&c->surface, mono, col * cell_w, r * cell_h,
-				                 s, FONT_SIZE, palette[cell->fg]);
+				ttf_draw_string(&c->surface, (cell.attrs.bold && mono_bold) ? mono_bold : mono,
+				                 pos.col * cell_w, pos.row * cell_h, s, FONT_SIZE, fg);
 		}
 	}
 
-	gfx_fill_rect(&c->surface, cur_col * cell_w, (cur_row + 1) * cell_h - 3,
-	              (cur_col + 1) * cell_w, (cur_row + 1) * cell_h, COLOR_CURSOR);
+	gfx_fill_rect(&c->surface, cursorpos.col * cell_w, (cursorpos.row + 1) * cell_h - 3,
+	              (cursorpos.col + 1) * cell_w, (cursorpos.row + 1) * cell_h, COLOR_CURSOR);
 
 	gui_commit(c);
 }
@@ -323,27 +150,48 @@ int
 main(void)
 {
 	struct gui_conn c;
-	struct ttf_font *mono;
+	struct ttf_font *mono, *mono_bold;
+	VTermState *state;
+	VTermColor col;
 	int in[2], out[2];
 	pid_t pid;
 	int epfd;
 	struct epoll_event ev, events[2];
 	char *sh_argv[3];
 	char *sh_envp[3];
-	int r;
+	int i;
 
 	mono = ttf_load("/usr/share/fonts/dejavu/DejaVuSansMono.ttf");
 	if (!mono) {
 		printf("terminal: font load failed\n");
 		return 1;
 	}
+	mono_bold = ttf_load("/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf");
 	cell_w = ttf_string_width(mono, "M", FONT_SIZE);
 	cell_h = ttf_line_height(mono, FONT_SIZE) + 4;
 	if (cell_w <= 0) cell_w = 9;
 	if (cell_h <= 4) cell_h = 18;
 
-	for (r = 0; r < ROWS; r++)
-		clear_row(r);
+	vt = vterm_new(ROWS, COLS);
+	vterm_set_utf8(vt, 1);
+	vterm_output_set_callback(vt, term_output, NULL);
+	vscreen = vterm_obtain_screen(vt);
+	vterm_screen_reset(vscreen, 1);
+
+	state = vterm_obtain_state(vt);
+	vterm_color_rgb(&col, (palette[DEFAULT_FG] >> 16) & 0xff,
+	                (palette[DEFAULT_FG] >> 8) & 0xff, palette[DEFAULT_FG] & 0xff);
+	{
+		VTermColor bg;
+
+		vterm_color_rgb(&bg, (palette[DEFAULT_BG] >> 16) & 0xff,
+		                (palette[DEFAULT_BG] >> 8) & 0xff, palette[DEFAULT_BG] & 0xff);
+		vterm_state_set_default_colors(state, &col, &bg);
+	}
+	for (i = 0; i < 16; i++) {
+		vterm_color_rgb(&col, (palette[i] >> 16) & 0xff, (palette[i] >> 8) & 0xff, palette[i] & 0xff);
+		vterm_state_set_palette_color(state, i, &col);
+	}
 
 	{
 		int tries = 0;
@@ -359,12 +207,13 @@ main(void)
 		printf("terminal: gui_create_surface failed\n");
 		return 1;
 	}
-	render(&c, mono);
+	render(&c, mono, mono_bold);
 
 	if (pipe(in) < 0 || pipe(out) < 0) {
 		printf("terminal: pipe failed\n");
 		return 1;
 	}
+	pty_in_fd = in[1];
 
 	pid = fork();
 	if (pid < 0) {
@@ -405,16 +254,15 @@ main(void)
 
 	for (;;) {
 		int n = epoll_wait(epfd, events, 2, -1);
-		int i;
+		int ei;
 
 		if (n < 0)
 			continue;
 
-		for (i = 0; i < n; i++) {
-			if (events[i].data.fd == out[0]) {
+		for (ei = 0; ei < n; ei++) {
+			if (events[ei].data.fd == out[0]) {
 				char buf[256];
 				int rn = read(out[0], buf, sizeof(buf));
-				int j;
 
 				if (rn <= 0) {
 					int status;
@@ -423,10 +271,9 @@ main(void)
 					gui_destroy(&c);
 					return 0;
 				}
-				for (j = 0; j < rn; j++)
-					put_char(buf[j]);
-				render(&c, mono);
-			} else if (events[i].data.fd == c.fd) {
+				vterm_input_write(vt, buf, (size_t)rn);
+				render(&c, mono, mono_bold);
+			} else if (events[ei].data.fd == c.fd) {
 				struct gui_event gev;
 
 				if (gui_recv_event(&c, &gev) < 0) {
@@ -447,8 +294,8 @@ main(void)
 					// would - without this, typed characters were sent to
 					// bash but never appeared until its own output (e.g.
 					// the next prompt) happened to redraw the grid.
-					put_char(ch);
-					render(&c, mono);
+					vterm_input_write(vt, &ch, 1);
+					render(&c, mono, mono_bold);
 				}
 			}
 		}
