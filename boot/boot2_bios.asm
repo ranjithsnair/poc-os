@@ -38,8 +38,23 @@
 BITS 16
 
 %define STAGE_BUF_SEG   0x5000   ; 0x5000:0 = phys 0x50000, low staging buffer
-%define CHUNK_SECTORS   32       ; 32*512=16KB per copy (read one CHS sector
-                                  ; at a time within the chunk - see read_sector)
+%define CHUNK_SECTORS   126      ; 126*512=63KB per copy - as large as fits in
+                                  ; one real-mode segment (STAGE_BUF_SEG:0..
+                                  ; 0xFFFF) with margin below the 0x10000
+                                  ; offset-wraparound point; load_chunks'
+                                  ; readloop still sub-batches each chunk
+                                  ; against the real per-track limit (spt),
+                                  ; issuing one INT13h AH=0x02 call per
+                                  ; track-bounded batch (see read_sectors) -
+                                  ; this just raises how much a chunk can
+                                  ; accumulate before the copy-up-to-cur_dst
+                                  ; step, cutting the total INT13h call count
+                                  ; (real per-call BIOS/USB-emulation latency
+                                  ; being the dominant real-hardware boot-time
+                                  ; cost once fs.img's 20000 sectors are
+                                  ; batched at all - see load_chunks' own
+                                  ; comment on why one-call-per-sector was
+                                  ; already unacceptable).
 %define VBE_CTRLBUF (VBE_INFO_PADDR+0x100)   ; transient VBE Controller Info buffer
 %define VBE_MODEBUF (VBE_INFO_PADDR+0x300)   ; transient VBE Mode Info buffer
 

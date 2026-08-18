@@ -285,24 +285,32 @@ $(BUILD)/poc_bios.img: $(BUILD)/bootblock_bios $(BUILD)/boot2_bios $(BUILD)/kern
 	fsimglba=$$(sed -n 's/^#define KERNEL_SECTORS //p' $(OBJDIR)/boot/bootconfig_bios.h | awk '{print $$1+$(BOOT2_BIOS_LBA)}'); \
 	dd if=$(BUILD)/fs.img of=$(BUILD)/poc_bios.img seek=$$fsimglba conv=notrunc
 
-# One ISO, bootable identically on real hardware (Legacy/CSM BIOS off
-# a USB stick), VirtualBox, and QEMU, whether attached as an optical
-# drive or dd'd straight to a USB stick (isohybrid-style: it's both a
-# valid ISO9660 filesystem *and* the same raw, MBR-bootable disk image
-# poc_bios.img already is - see boot/bootasm_bios.asm's own comment
-# for why that image reads via CHS, not LBA extensions: found the hard
-# way that El-Torito "hard disk emulation" CD-boot - the mechanism
-# that lets a plain BIOS bootloader address an El-Torito-mounted ISO
-# at all - fails INT13h-extensions-present outright on real BIOS/
-# QEMU/SeaBIOS alike, while CHS is the one interface universal across
-# real disks, USB, and El-Torito emulation). -hard-disk-boot tells
-# xorriso to register the whole image as a "hard disk emulation" El
-# Torito boot entry (not "no emulation", which handed back the CD's
-# native drive - passed the extensions check but then hung on the
-# actual extended read; a QEMU/SeaBIOS ATAPI-sector-size quirk, near
-# as can be told) - boot-load-size is irrelevant in that mode (BIOS
-# always loads exactly the one MBR sector, like any real hard disk
-# boot) but xorriso still wants a value.
+# One ISO, bootable identically on real hardware (Legacy/CSM BIOS on),
+# VirtualBox, and QEMU when attached as an optical drive (-cdrom, or a
+# virtual/emulated CD/DVD drive) - see boot/bootasm_bios.asm's own
+# comment for why that embedded image reads via CHS, not LBA
+# extensions: found the hard way that El-Torito "hard disk emulation"
+# CD-boot - the mechanism that lets a plain BIOS bootloader address an
+# El-Torito-mounted ISO at all - fails INT13h-extensions-present
+# outright on real BIOS/QEMU/SeaBIOS alike, while CHS is the one
+# interface universal across real disks, USB, and El-Torito emulation.
+# -hard-disk-boot tells xorriso to register the whole image as a "hard
+# disk emulation" El Torito boot entry (not "no emulation", which
+# handed back the CD's native drive - passed the extensions check but
+# then hung on the actual extended read; a QEMU/SeaBIOS
+# ATAPI-sector-size quirk, near as can be told) - boot-load-size is
+# irrelevant in that mode (BIOS always loads exactly the one MBR
+# sector, like any real hard disk boot) but xorriso still wants a
+# value.
+#
+# NOT isohybrid: no isohybrid MBR patching is done here, so this ISO's
+# own LBA 0 is plain ISO9660 (zeroed boot area), not poc_bios.img's
+# MBR/bootblock - dd'ing poc-os.iso straight to a USB stick and
+# booting it as a raw disk will NOT work (confirmed: real hardware
+# selected the drive from the boot menu but hung on a black screen -
+# BIOS was executing the zeroed sector, not bootblock_bios). To make a
+# bootable USB stick, dd $(BUILD)/poc_bios.img (or dist/poc_bios.img)
+# itself, not the .iso - see the `dist` target below.
 $(BUILD)/poc-os.iso: $(BUILD)/poc_bios.img | $(BUILD)
 	rm -rf $(BUILD)/isoroot
 	mkdir -p $(BUILD)/isoroot
@@ -1995,10 +2003,12 @@ MKFS_INSTALL += usr/share/fonts/dejavu/DejaVuSans.ttf:gui/assets/fonts/DejaVuSan
 	usr/share/fonts/dejavu/DejaVuSansMono.ttf:gui/assets/fonts/DejaVuSansMono.ttf \
 	usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf:gui/assets/fonts/DejaVuSansMono-Bold.ttf \
 	usr/share/wallpaper.raw:gui/assets/images/wallpaper.raw \
-	usr/share/icons/terminal.raw:gui/assets/images/terminal-icon.raw
+	usr/share/icons/terminal.raw:gui/assets/images/terminal-icon.raw \
+	usr/share/cursor.raw:gui/assets/images/cursor.raw
 MKFS_INSTALL_DEPS += gui/assets/fonts/DejaVuSans.ttf gui/assets/fonts/DejaVuSans-Bold.ttf \
 	gui/assets/fonts/DejaVuSansMono.ttf gui/assets/fonts/DejaVuSansMono-Bold.ttf \
-	gui/assets/images/wallpaper.raw gui/assets/images/terminal-icon.raw
+	gui/assets/images/wallpaper.raw gui/assets/images/terminal-icon.raw \
+	gui/assets/images/cursor.raw
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)
@@ -2006,6 +2016,17 @@ $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 -include $(OBJDIR)/boot/*.d $(OBJDIR)/kernel/*.d $(OBJDIR)/user/*.d $(OBJDIR)/bash-pic/*.d $(OBJDIR)/bash-pic/poc/*.d $(OBJDIR)/bash-pic/poc/builtins/*.d $(OBJDIR)/bash-pic/builtins/*.d $(OBJDIR)/bash-pic/lib/sh/*.d $(OBJDIR)/bash-pic/lib/glob/*.d $(OBJDIR)/bash-pic/lib/tilde/*.d $(OBJDIR)/curses-pic/*.d $(OBJDIR)/nano-pic/*.d $(OBJDIR)/nano-pic/poc/*.d $(OBJDIR)/nano-pic/src/*.d $(OBJDIR)/nano-pic/lib/*.d $(OBJDIR)/nano-pic/lib/malloc/*.d
 
 all: $(BUILD)/poc_bios.img
+
+# dist/poc_bios.img is the one to dd to a USB stick for a real,
+# legacy-BIOS-bootable pendrive (see poc-os.iso's own comment above
+# for why the .iso itself won't work dd'd raw); dist/poc-os.iso is for
+# burning to optical media or attaching as a virtual/emulated CD/DVD
+# drive (QEMU -cdrom, VirtualBox).
+DISTDIR = dist
+dist: $(BUILD)/poc_bios.img $(BUILD)/poc-os.iso
+	mkdir -p $(DISTDIR)
+	cp $(BUILD)/poc_bios.img $(DISTDIR)/poc_bios.img
+	cp $(BUILD)/poc-os.iso $(DISTDIR)/poc-os.iso
 
 run: all
 	$(QEMU) $(QEMUOPTS_BIOS) </dev/null >/dev/null 2>&1 &
@@ -2064,4 +2085,4 @@ qemu-nox-gdb: $(BUILD)/poc_bios.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -nographic $(QEMUOPTS_BIOS) -S $(QEMUGDB)
 
-.PHONY: all run clean tags
+.PHONY: all dist run clean tags

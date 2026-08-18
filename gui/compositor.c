@@ -60,7 +60,75 @@ struct mousepkt {
 #define MAXEV (MAXWIN + 3)
 #define TITLEBAR_H 20
 #define BORDER 2
-#define CURSOR_HALF 5
+#define MOUSE_DRAIN_MAX 32 // cap on packets coalesced into one redraw - see
+                            // its use in main()'s mfd branch
+
+// Real cursor artwork: ToaruOS's own base/usr/share/cursor/normal.png,
+// alpha-matted and cropped to its visible bounding box (17x23) via
+// tools/genraw.py's "icon" mode (same RGBA raw pipeline as the desktop's
+// terminal icon) - see gui/assets/images/cursor.raw. The crop was taken
+// tight to the glyph's bbox, so the arrow's tip sits exactly at the raw
+// image's own (0,0): drawing at (cursor_x, cursor_y) with no extra
+// offset already puts the tip at the reported pointer position.
+#define CURSOR_PATH "/usr/share/cursor.raw"
+static struct gfx_image_rgba cursor_img; /* .pixels == 0 if the asset is missing */
+
+// Fallback if cursor.raw didn't load: a crude 12x19 ASCII-art arrow,
+// same top-left-is-the-tip hotspot convention as the real asset above.
+// '#' black outline, '.' white fill, anything else (space, or the
+// implicit '\0' padding on rows shorter than CURSOR_W) transparent.
+// Fixed-size rows rather than `const char *` so a row that's too long
+// is a compile error instead of an out-of-bounds read at draw time.
+#define CURSOR_W 12
+#define CURSOR_H 19
+static const char cursor_bitmap[CURSOR_H][CURSOR_W + 1] = {
+	"#",
+	"##",
+	"#.#",
+	"#..#",
+	"#...#",
+	"#....#",
+	"#.....#",
+	"#......#",
+	"#.......#",
+	"#........#",
+	"#.....#####",
+	"#..#..#",
+	"#.# #..#",
+	"##   #..#",
+	"#     #..#",
+	"      #..#",
+	"      #..#",
+	"       ##",
+	"",
+};
+
+static void
+draw_cursor(struct gfx_surface *s, int x, int y)
+{
+	int row, col;
+
+	if (cursor_img.pixels) {
+		gfx_blit_alpha(s, x, y, &cursor_img, 0, 0, (int)cursor_img.w, (int)cursor_img.h);
+		return;
+	}
+
+	for (row = 0; row < CURSOR_H; row++) {
+		for (col = 0; col < CURSOR_W; col++) {
+			char c = cursor_bitmap[row][col];
+			int px, py;
+
+			if (c != '#' && c != '.')
+				continue;
+			px = x + col;
+			py = y + row;
+			if (px < 0 || px >= (int)s->w || py < 0 || py >= (int)s->h)
+				continue;
+			*(unsigned int *)(s->pixels + (unsigned long)py * s->pitch + (unsigned long)px * 4) =
+				gfx_pack(s, c == '#' ? 0x000000 : 0xFFFFFF);
+		}
+	}
+}
 
 // Flat-fill approximation of ToaruOS's default "Fancy" decoration theme
 // (toaruos/lib/decor-fancy.c's ACTIVE_COLOR/INACTIVE_COLOR/
@@ -71,7 +139,6 @@ struct mousepkt {
 #define COLOR_TITLE_FOC 0xE2E2E2
 #define COLOR_TITLE_UNF 0x939393
 #define COLOR_TITLE_TXT 0x202020
-#define COLOR_CURSOR    0xFFFFFF
 
 #define WALLPAPER_PATH "/usr/share/wallpaper.raw"
 
@@ -97,6 +164,14 @@ static int zorder[MAXWIN]; /* indices into windows[], back(0) to front(nz-1) */
 static int nz;
 static int focus_idx = -1;
 static struct gfx_surface fbsurf;
+// System-RAM shadow of fbsurf: redraw_all() composites into this, then
+// flushes it to the real (mmap'd) framebuffer with one gfx_blit() at
+// the end. Without it every gfx_fill_rect()/gfx_blit() call in
+// redraw_all() lands on-screen individually - visibly flickering
+// (wallpaper, then each window, then the cursor, drawn as separate
+// frames) since nothing stops the display from scanning out a
+// half-composited frame.
+static struct gfx_surface backbuf;
 static struct gfx_surface wallpaper; /* .pixels == 0 if the asset is missing */
 static int cursor_x, cursor_y;
 static int next_surface_id = 1;
@@ -199,30 +274,31 @@ redraw_all(void)
 	struct window *w;
 
 	if (wallpaper.pixels)
-		gfx_blit(&fbsurf, 0, 0, &wallpaper, 0, 0, (int)wallpaper.w, (int)wallpaper.h);
+		gfx_blit(&backbuf, 0, 0, &wallpaper, 0, 0, (int)wallpaper.w, (int)wallpaper.h);
 	else
-		gfx_fill_rect(&fbsurf, 0, 0, (int)fbsurf.w, (int)fbsurf.h, COLOR_BG);
+		gfx_fill_rect(&backbuf, 0, 0, (int)backbuf.w, (int)backbuf.h, COLOR_BG);
 
 	for (i = 0; i < nz; i++) {
 		idx = zorder[i];
 		w = &windows[idx];
 		if (w->flags & GUI_WIN_BORDERLESS) {
 			if (w->committed)
-				gfx_blit(&fbsurf, w->x, w->y, &w->surf, 0, 0,
+				gfx_blit(&backbuf, w->x, w->y, &w->surf, 0, 0,
 				         (int)w->surf.w, (int)w->surf.h);
 			continue;
 		}
-		gfx_fill_rect(&fbsurf, w->x, w->y, w->x + decor_w(w), w->y + decor_h(w), COLOR_BORDER);
-		gfx_fill_rect(&fbsurf, w->x, w->y, w->x + decor_w(w), w->y + TITLEBAR_H,
+		gfx_fill_rect(&backbuf, w->x, w->y, w->x + decor_w(w), w->y + decor_h(w), COLOR_BORDER);
+		gfx_fill_rect(&backbuf, w->x, w->y, w->x + decor_w(w), w->y + TITLEBAR_H,
 		              idx == focus_idx ? COLOR_TITLE_FOC : COLOR_TITLE_UNF);
-		gfx_draw_string(&fbsurf, w->x + 4, w->y + 4, w->title, COLOR_TITLE_TXT);
+		gfx_draw_string(&backbuf, w->x + 4, w->y + 4, w->title, COLOR_TITLE_TXT);
 		if (w->committed)
-			gfx_blit(&fbsurf, w->x + BORDER, w->y + TITLEBAR_H,
+			gfx_blit(&backbuf, w->x + BORDER, w->y + TITLEBAR_H,
 			         &w->surf, 0, 0, (int)w->surf.w, (int)w->surf.h);
 	}
 
-	gfx_fill_rect(&fbsurf, cursor_x - CURSOR_HALF, cursor_y - CURSOR_HALF,
-	              cursor_x + CURSOR_HALF, cursor_y + CURSOR_HALF, COLOR_CURSOR);
+	draw_cursor(&backbuf, cursor_x, cursor_y);
+
+	gfx_blit(&fbsurf, 0, 0, &backbuf, 0, 0, (int)fbsurf.w, (int)fbsurf.h);
 }
 
 static void
@@ -344,6 +420,15 @@ main(void)
 	fbsurf.blue_mask_size = fi.blue_mask_size;
 	fbsurf.blue_field_pos = fi.blue_field_pos;
 
+	backbuf = fbsurf;
+	backbuf.pitch = fbsurf.w * 4; /* tightly packed - gfx_blit() copies scanline-by-scanline, so a
+	                               * different pitch than fbsurf's is fine */
+	backbuf.pixels = malloc((unsigned long)backbuf.pitch * fbsurf.h);
+	if (!backbuf.pixels) {
+		printf("compositor: backbuf alloc failed\n");
+		return 1;
+	}
+
 	mfd = open("mouse", O_RDONLY);
 	if (mfd < 0) {
 		syscall(SYS_mknod, "mouse", MOUSE_MAJOR, 0);
@@ -404,6 +489,9 @@ main(void)
 		free(wallpaper.pixels);
 		wallpaper.pixels = 0;
 	}
+	// cursor_img.pixels stays 0 (draw_cursor() falls back to the ASCII
+	// arrow) if the asset is missing.
+	gfx_load_raw_rgba(&cursor_img, CURSOR_PATH);
 	redraw_all();
 	printf("compositor: listening on %s\n", GUI_SOCK_PATH);
 
@@ -425,51 +513,118 @@ main(void)
 					epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 				}
 			} else if (fd == mfd) {
-				struct mousepkt pkt;
-				int pressed, wi, in_title;
+				// Drain mouse packets already queued (kernel/mouse.c's
+				// MOUSEBUFSIZE-deep ring) before redrawing once, instead of
+				// a full-frame redraw per packet - VirtualBox's PS/2 mouse
+				// can enqueue a burst of these for one physical motion, and
+				// without this a single mouse wiggle was doing dozens of
+				// full-screen redraws. Peek for more with a zero-timeout
+				// epoll_wait() rather than looping read() unconditionally:
+				// this kernel has no O_NONBLOCK (kernel/mouse.c's
+				// mouseread() genuinely sleeps when the ring is empty), so
+				// an unconditional next read() would block the whole
+				// compositor on the *next real* mouse move once drained.
+				// If the peek instead reports some other fd ready, that fd
+				// stays ready (epoll here is level-triggered) and gets
+				// picked up by the outer epoll_wait() on its next spin, so
+				// nothing is lost by stopping the drain here.
+				//
+				// MOUSE_DRAIN_MAX bounds this regardless: a real mouse under
+				// continuous motion can keep the ring nonempty indefinitely
+				// (the guest reading packets no faster than the host/VM
+				// keeps enqueuing them), and an unbounded loop here would
+				// starve every *other* fd - accept() on lfd, wire_recv() on
+				// a client socket - for as long as the flood lasts. That
+				// previously manifested as exactly this: touch the desktop
+				// icon, the mouse motion needed to reach and click it kept
+				// this loop spinning, so the newly launched terminal's
+				// CREATE_SURFACE never got processed and the screen never
+				// got redrawn (cursor looked frozen) until the mouse went
+				// idle.
+				int drained = 0;
+				int wi = -1, pressed = 0, sent_pressed = -1; /* sent_pressed:
+					-1 means "nothing sent yet this burst" */
 
-				if (read(mfd, &pkt, sizeof(pkt)) != (int)sizeof(pkt))
-					continue;
-				cursor_x += pkt.dx;
-				cursor_y -= pkt.dy;
-				if (cursor_x < 0) cursor_x = 0;
-				if (cursor_x >= (int)fbsurf.w) cursor_x = (int)fbsurf.w - 1;
-				if (cursor_y < 0) cursor_y = 0;
-				if (cursor_y >= (int)fbsurf.h) cursor_y = (int)fbsurf.h - 1;
+				for (; drained < MOUSE_DRAIN_MAX; drained++) {
+					struct mousepkt pkt;
+					int in_title;
+					struct epoll_event peek;
 
-				pressed = pkt.buttons & 0x1;
-				wi = window_at(cursor_x, cursor_y, &in_title);
-				if (dragging >= 0) {
-					windows[dragging].x = cursor_x - drag_off_x;
-					windows[dragging].y = cursor_y - drag_off_y;
-					if (!pressed)
-						dragging = -1;
-				} else if (pressed) {
-					if (wi >= 0) {
-						zorder_raise(wi);
-						// NO_FOCUS windows (desktop bar/icon) never take
-						// keyboard focus - see handle_create_surface()'s own
-						// comment. in_title is already forced 0 for
-						// BORDERLESS windows (window_at() above), so a
-						// borderless-but-focusable window (the login
-						// screen) still can't be dragged (no titlebar to
-						// grab) without needing a separate check here.
-						if (!(windows[wi].flags & GUI_WIN_NO_FOCUS))
-							set_focus(wi);
-						if (in_title) {
-							dragging = wi;
-							drag_off_x = cursor_x - windows[wi].x;
-							drag_off_y = cursor_y - windows[wi].y;
+					if (read(mfd, &pkt, sizeof(pkt)) != (int)sizeof(pkt))
+						break;
+					cursor_x += pkt.dx;
+					cursor_y -= pkt.dy;
+					if (cursor_x < 0) cursor_x = 0;
+					if (cursor_x >= (int)fbsurf.w) cursor_x = (int)fbsurf.w - 1;
+					if (cursor_y < 0) cursor_y = 0;
+					if (cursor_y >= (int)fbsurf.h) cursor_y = (int)fbsurf.h - 1;
+
+					pressed = pkt.buttons & 0x1;
+					wi = window_at(cursor_x, cursor_y, &in_title);
+					if (dragging >= 0) {
+						windows[dragging].x = cursor_x - drag_off_x;
+						windows[dragging].y = cursor_y - drag_off_y;
+						if (!pressed)
+							dragging = -1;
+					} else if (pressed) {
+						if (wi >= 0) {
+							zorder_raise(wi);
+							// NO_FOCUS windows (desktop bar/icon) never take
+							// keyboard focus - see handle_create_surface()'s own
+							// comment. in_title is already forced 0 for
+							// BORDERLESS windows (window_at() above), so a
+							// borderless-but-focusable window (the login
+							// screen) still can't be dragged (no titlebar to
+							// grab) without needing a separate check here.
+							if (!(windows[wi].flags & GUI_WIN_NO_FOCUS))
+								set_focus(wi);
+							if (in_title) {
+								dragging = wi;
+								drag_off_x = cursor_x - windows[wi].x;
+								drag_off_y = cursor_y - windows[wi].y;
+							}
 						}
 					}
+
+					// Send a pointer event immediately on every button-state
+					// transition (a client's click detection is edge-
+					// triggered on consecutive events - see gui/desktop.c's
+					// icon_was_pressed - so a press-then-release that both
+					// land inside one drained burst must still produce two
+					// separate messages, not just the final state), but
+					// otherwise skip sends for a burst's interior packets;
+					// one send after the loop below covers the settled
+					// position. A client's whole incoming queue is only
+					// SOCKQLEN (3, include/socket.h) messages deep - sending
+					// per-packet here (up to MOUSE_DRAIN_MAX) reliably
+					// overran that and wedged the compositor's wire_send()
+					// on a client (gui/desktop.c) that was itself briefly
+					// not draining its socket (blocked in launch_terminal()'s
+					// waitpid()), which looked like a permanent hang: this
+					// keeps traffic to roughly the same one-ish message per
+					// burst the pre-coalescing code sent per packet.
+					if (wi >= 0 && pressed != sent_pressed) {
+						struct window *w = &windows[wi];
+						struct gui_msg_pointer_event pev;
+						int cx_off = (w->flags & GUI_WIN_BORDERLESS) ? 0 : BORDER;
+						int cy_off = (w->flags & GUI_WIN_BORDERLESS) ? 0 : TITLEBAR_H;
+
+						pev.type = GUI_MSG_POINTER_EVENT;
+						pev.x = cursor_x - (w->x + cx_off);
+						pev.y = cursor_y - (w->y + cy_off);
+						pev.buttons = pressed;
+						wire_send(w->fd, &pev, sizeof(pev), -1);
+						sent_pressed = pressed;
+					}
+
+					if (epoll_wait(epfd, &peek, 1, 0) != 1 || peek.data.fd != mfd)
+						break;
 				}
 
-				// Pointer events go to whatever window is actually under
-				// the cursor right now, not the focused window - a
-				// borderless window (never focused) still needs to see
-				// clicks on itself (the desktop icon's launch-on-click),
-				// and this also matches ordinary WM hover/click semantics
-				// generally. Keyboard focus (above) is a separate concept.
+				// Final settled position/button-state, unconditionally (not
+				// gated on a transition): a burst that ends mid-drag or
+				// mid-hover with no further button change would otherwise
+				// never tell the client where the pointer actually stopped.
 				if (wi >= 0) {
 					struct window *w = &windows[wi];
 					struct gui_msg_pointer_event pev;
