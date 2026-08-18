@@ -171,18 +171,7 @@ get_glyph(struct ttf_font *f, int codepoint, int size_px)
   e->advance = (int)(adv * scale + 0.5f);
   e->coverage = 0;
   if (w > 0 && h > 0) {
-    // A small slack margin past the exact w*h stb_truetype is told to
-    // fill: an intermittent, timing-sensitive heap-corruption crash
-    // was traced to somewhere in this rasterization step (found via
-    // trace prints bisecting gui/terminal.c - a heap-metadata-corrupting
-    // overflow whose actual crash happens much later, at whatever
-    // malloc() call next touches the corrupted free-list, hence the
-    // "sometimes reproduces, sometimes doesn't" symptom depending on
-    // unrelated allocation timing). Root cause not pinned down exactly
-    // (either this vendored rasterizer or this file's own STBTT_ifloor/
-    // iceil overrides, both plausible - see this file's top comment),
-    // but this padding reliably absorbs it.
-    e->coverage = malloc((unsigned long)w * (unsigned long)h + 64);
+    e->coverage = malloc((unsigned long)w * (unsigned long)h);
     if (e->coverage)
       stbtt_MakeCodepointBitmap(&f->info, e->coverage, w, h, w, scale, scale, codepoint);
   }

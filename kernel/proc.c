@@ -458,9 +458,9 @@ sched(void)
   // scheduler()'s own swtch() call), at which point restoring is
   // correct. See include/proc.h's fpu_state and kernel/vm.c's
   // fpuinit() for the rest of this mechanism.
-  /* DIAGNOSTIC: temporarily disabled to test if this is the source of
-   * corruption. TODO restore before shipping. */
+  fpu_save(p->fpu_state);
   swtch(&p->context, mycpu()->scheduler);
+  fpu_restore(p->fpu_state);
   mycpu()->intena = intena;
 }
 

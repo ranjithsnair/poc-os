@@ -1856,15 +1856,6 @@ $(BUILD)/_login_gui: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/login_gui.
 	$(OBJDUMP) -S $@ > $(BUILD)/login_gui.dis
 	$(OBJCOPY) --strip-debug $@
 
-# TEMPORARY - gui/ttftest.c's own comment: standalone TrueType pipeline
-# verification, to be deleted once verified.
-$(BUILD)/_ttftest: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/ttftest.o \
-                    $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
-	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
-		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/ttftest.o \
-		-L $(BUILD) -lgui -lc
-	$(OBJCOPY) --strip-debug $@
-
 # desktop: gui/desktop.c's own comment - the desktop shell login_gui.c
 # hands off to. Compiled via the gui-pic/%.o generic pattern rule
 # (already has -Igui/libgui built in), linked against libgui.so same
@@ -1991,8 +1982,6 @@ MKFS_INSTALL += usr/bin/login_gui:$(BUILD)/_login_gui
 MKFS_INSTALL_DEPS += $(BUILD)/_login_gui
 MKFS_INSTALL += usr/bin/terminal:$(BUILD)/_terminal
 MKFS_INSTALL_DEPS += $(BUILD)/_terminal
-MKFS_INSTALL += usr/bin/ttftest:$(BUILD)/_ttftest
-MKFS_INSTALL_DEPS += $(BUILD)/_ttftest
 MKFS_INSTALL += usr/bin/desktop:$(BUILD)/_desktop
 MKFS_INSTALL_DEPS += $(BUILD)/_desktop
 

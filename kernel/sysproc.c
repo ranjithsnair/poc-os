@@ -117,6 +117,28 @@ sys_futex(void)
 // poc-os's own SYS_sbrk (a relative delta, returning the *old* break).
 // Built directly on allocuvm/deallocuvm rather than growproc(), since
 // growproc()'s "int n" parameter is a delta and brk's is not.
+//
+// Never actually shrinks (a real Linux brk() would): this kernel's
+// address space is one flat region shared by both the brk-managed heap
+// and every mmap() (kernel/sysproc.c's own sys_mmap(), used directly
+// by every GUI client's shm-backed window surface - gui/libgui/
+// client.c) - unlike a real OS, there's no separate mmap range a
+// libc's own brk bookkeeping is protected from. musl's malloc tracks
+// its own last-known break independently and only updates that
+// tracked value when *it* calls brk(); an unrelated shm mmap() growing
+// curproc->sz behind its back (exactly what every GUI client here
+// does right after loading a font/asset) leaves malloc's tracked value
+// stale, so its *next* heap-growth brk() call computes a target from
+// that stale top - which can land *below* the current real sz once the
+// mmap() has pushed sz higher. Honoring that as a real shrink (the
+// deallocuvm() call this replaced) unmaps whatever mmap() region
+// happens to sit above it - found by chasing an intermittent
+// gui/terminal.c crash (GUI roadmap ToaruOS-style rewrite) all the way
+// down to exactly this: a live SHM window surface getting silently
+// unmapped mid-render by musl's own malloc. Simply never shrinking
+// wastes a little address space on a process that frees a lot of heap
+// and never reuses it, but that's a far smaller cost than the
+// alternative here.
 int
 sys_brk(void)
 {
@@ -132,10 +154,8 @@ sys_brk(void)
   if(newsz > curproc->sz){
     if(allocuvm(curproc->pgdir, curproc->sz, newsz) == 0)
       return curproc->sz;  // failed: return the unchanged break
-  } else if(newsz < curproc->sz){
-    deallocuvm(curproc->pgdir, curproc->sz, newsz);
+    curproc->sz = newsz;
   }
-  curproc->sz = newsz;
   switchuvm(curproc);
   return curproc->sz;
 }

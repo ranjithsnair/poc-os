@@ -110,11 +110,16 @@ trap(struct trapframe *tf)
               (int)tf->trapno, cpuid(), (uintp)tf->eip, (uintp)rcr2());
       panic("trap");
     }
-    // In user space, assume process misbehaved.
+    // In user space, assume process misbehaved. sz (added during the
+    // GUI roadmap ToaruOS-style rewrite's terminal.c debugging) shows
+    // whether a faulting addr sits just past the process's own mapped
+    // top (a real overflow) or is a wildly out-of-range pointer -
+    // meaningfully narrows down userspace crashes without a debugger.
     cprintf("pid %d %s: trap %d err %d on cpu %d "
-            "eip 0x%p addr 0x%p--kill proc\n",
+            "eip 0x%p addr 0x%p sz 0x%p--kill proc\n",
             myproc()->pid, myproc()->name, (int)tf->trapno,
-            (int)tf->err, cpuid(), (uintp)tf->eip, (uintp)rcr2());
+            (int)tf->err, cpuid(), (uintp)tf->eip, (uintp)rcr2(),
+            (uintp)myproc()->sz);
     myproc()->killed = 1;
   }
 
