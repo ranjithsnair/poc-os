@@ -440,6 +440,15 @@ main(void)
 					if (ch == '\r')
 						ch = '\n';
 					write(in[1], &ch, 1);
+
+					// No real pty backs this shell (see this file's own
+					// top comment), so nothing else echoes a keystroke to
+					// the screen the way a tty's line discipline normally
+					// would - without this, typed characters were sent to
+					// bash but never appeared until its own output (e.g.
+					// the next prompt) happened to redraw the grid.
+					put_char(ch);
+					render(&c, mono);
 				}
 			}
 		}

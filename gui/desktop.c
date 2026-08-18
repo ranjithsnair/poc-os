@@ -167,7 +167,7 @@ main(void)
 	struct desktop d;
 	struct epoll_event ev, events[2];
 	int epfd;
-	int icon_was_pressed = 0, icon_hover = 0;
+	int icon_was_pressed = 0, icon_hover = 0, icon_hover_drawn = -1;
 
 	memset(&d, 0, sizeof(d));
 
@@ -268,7 +268,20 @@ main(void)
 			if ((gev.pointer.buttons & 1) && !icon_was_pressed && icon_hover)
 				launch_terminal();
 			icon_was_pressed = (gev.pointer.buttons & 1) != 0;
-			render_icon(&d, icon_hover);
+			// Only the hover flag changes what render_icon() actually
+			// draws - redrawing (and gui_commit()'s synchronous round
+			// trip to the compositor) on every single pointer event,
+			// including the many fired while the mouse just sits still
+			// or moves around inside an already-hovered icon, made the
+			// compositor's wire_send() to this window's socket back up
+			// (kernel/socket.c's 3-message queue cap) and block, which
+			// stalls its single-threaded event loop entirely - looked
+			// like the whole system freezing (mouse included) while
+			// the cursor was anywhere near the icon.
+			if (icon_hover != icon_hover_drawn) {
+				render_icon(&d, icon_hover);
+				icon_hover_drawn = icon_hover;
+			}
 		}
 	}
 }

@@ -140,6 +140,11 @@ draw_cursor(struct gfx_surface *s, int x, int y)
 #define COLOR_TITLE_UNF 0x939393
 #define COLOR_TITLE_TXT 0x202020
 
+#define CLOSE_BTN_SIZE   16
+#define CLOSE_BTN_MARGIN 2
+#define COLOR_CLOSE_BG   0xE81123
+#define COLOR_CLOSE_TXT  0xFFFFFF
+
 #define WALLPAPER_PATH "/usr/share/wallpaper.raw"
 
 struct window {
@@ -190,6 +195,31 @@ decor_h(struct window *w)
 	if (w->flags & GUI_WIN_BORDERLESS)
 		return (int)w->surf.h;
 	return (int)w->surf.h + TITLEBAR_H + BORDER;
+}
+
+// Close button lives in the titlebar's top-right corner - only decorated
+// (non-borderless) windows have a titlebar to put one in, so borderless
+// windows (desktop bar/icon, the login box) never get one.
+static int
+close_btn_x(struct window *w)
+{
+	return w->x + decor_w(w) - CLOSE_BTN_SIZE - CLOSE_BTN_MARGIN;
+}
+
+static int
+close_btn_y(struct window *w)
+{
+	return w->y + (TITLEBAR_H - CLOSE_BTN_SIZE) / 2;
+}
+
+static int
+in_close_btn(struct window *w, int px, int py)
+{
+	int bx = close_btn_x(w), by = close_btn_y(w);
+
+	return !(w->flags & GUI_WIN_BORDERLESS) &&
+	       px >= bx && px < bx + CLOSE_BTN_SIZE &&
+	       py >= by && py < by + CLOSE_BTN_SIZE;
 }
 
 static void
@@ -291,6 +321,12 @@ redraw_all(void)
 		gfx_fill_rect(&backbuf, w->x, w->y, w->x + decor_w(w), w->y + TITLEBAR_H,
 		              idx == focus_idx ? COLOR_TITLE_FOC : COLOR_TITLE_UNF);
 		gfx_draw_string(&backbuf, w->x + 4, w->y + 4, w->title, COLOR_TITLE_TXT);
+		{
+			int bx = close_btn_x(w), by = close_btn_y(w);
+
+			gfx_fill_rect(&backbuf, bx, by, bx + CLOSE_BTN_SIZE, by + CLOSE_BTN_SIZE, COLOR_CLOSE_BG);
+			gfx_draw_string(&backbuf, bx + 4, by, "x", COLOR_CLOSE_TXT);
+		}
 		if (w->committed)
 			gfx_blit(&backbuf, w->x + BORDER, w->y + TITLEBAR_H,
 			         &w->surf, 0, 0, (int)w->surf.w, (int)w->surf.h);
@@ -567,7 +603,17 @@ main(void)
 						if (!pressed)
 							dragging = -1;
 					} else if (pressed) {
-						if (wi >= 0) {
+						if (wi >= 0 && in_close_btn(&windows[wi], cursor_x, cursor_y)) {
+							// Server-initiated close: just close the client's
+							// socket. Its next gui_recv_event() then sees the
+							// same "connection closed" it already handles for
+							// a client-initiated disconnect (gui/terminal.c's
+							// own read loop writes "exit\n" to bash and exits
+							// cleanly on exactly that) - no new client-side
+							// protocol message needed.
+							remove_window(epfd, wi);
+							wi = -1;
+						} else if (wi >= 0) {
 							zorder_raise(wi);
 							// NO_FOCUS windows (desktop bar/icon) never take
 							// keyboard focus - see handle_create_surface()'s own
