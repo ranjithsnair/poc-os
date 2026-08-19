@@ -90,6 +90,33 @@ term_output(const char *s, size_t len, void *user)
 		write(pty_in_fd, s, len);
 }
 
+// No real pty backs this shell (see this file's own top comment), so
+// nothing ever does the ONLCR translation a real tty's line discipline
+// normally applies to outgoing bytes. bash (running under TERM=dumb)
+// writes bare '\n' and trusts the terminal to return the cursor to
+// column 0 itself - without this, libvterm (correctly, per real VT100
+// semantics) only moves the cursor down a row on '\n' and leaves the
+// column alone, so every line of output starts one column further
+// right than the last.
+static void
+vterm_write_onlcr(VTerm *v, const char *buf, size_t n)
+{
+	char out[512];
+	size_t oi = 0, i;
+
+	for (i = 0; i < n; i++) {
+		if (oi + 2 > sizeof(out)) {
+			vterm_input_write(v, out, oi);
+			oi = 0;
+		}
+		if (buf[i] == '\n')
+			out[oi++] = '\r';
+		out[oi++] = buf[i];
+	}
+	if (oi)
+		vterm_input_write(v, out, oi);
+}
+
 static unsigned int
 rgb_of(VTermColor col)
 {
@@ -271,7 +298,7 @@ main(void)
 					gui_destroy(&c);
 					return 0;
 				}
-				vterm_input_write(vt, buf, (size_t)rn);
+				vterm_write_onlcr(vt, buf, (size_t)rn);
 				render(&c, mono, mono_bold);
 			} else if (events[ei].data.fd == c.fd) {
 				struct gui_event gev;
@@ -294,7 +321,7 @@ main(void)
 					// would - without this, typed characters were sent to
 					// bash but never appeared until its own output (e.g.
 					// the next prompt) happened to redraw the grid.
-					vterm_input_write(vt, &ch, 1);
+					vterm_write_onlcr(vt, &ch, 1);
 					render(&c, mono, mono_bold);
 				}
 			}

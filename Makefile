@@ -2099,7 +2099,7 @@ endif
 # hardware - see the pocmemfs.img rule above for the one other thing
 # (bootasm.asm/bootmain.c/bootblock) still shared with that removed
 # path.
-QEMUOPTS_BIOS = -drive file=$(BUILD)/poc_bios.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+QEMUOPTS_BIOS = -drive file=$(BUILD)/poc_bios.img,index=0,media=disk,format=raw -smp $(CPUS) -m 4G $(QEMUEXTRA)
 
 # `run` launches QEMU detached from this shell's stdio (</dev/null so
 # it can't be suspended by SIGTTIN when backgrounded, output silenced)
