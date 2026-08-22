@@ -88,6 +88,24 @@ static int cols = COLS, rows = ROWS;
 // forwarded to below.
 static int pty_in_fd = -1;
 
+// bash reads its own input a byte at a time with no line-editing of
+// its own (grep confirms bash/input.c/parse.y never special-case 0x08/
+// 0x7f) - on a real terminal that's fine, because the *tty driver's*
+// canonical-mode line discipline is what erases a character on
+// backspace before bash ever sees the byte. There's no real pty here
+// (this file's own top comment), so nothing else does that job either:
+// once a character has been write()'n to bash's stdin pipe, bash has
+// already buffered it as part of the line it's building, and there is
+// no byte terminal.c could send afterwards that would make bash
+// un-see it. So backspace can only work if terminal.c holds the
+// current line here instead of forwarding each character to bash
+// immediately, exactly what a real tty's canonical mode would
+// otherwise be doing - only the completed line (up to and including
+// the terminating '\n') ever actually reaches bash's pipe.
+#define LINE_BUF_MAX 4096
+static char line_buf[LINE_BUF_MAX];
+static int line_len;
+
 static void
 term_output(const char *s, size_t len, void *user)
 {
@@ -315,20 +333,50 @@ main(void)
 					return 0;
 				}
 				if (gev.type == GUI_EVENT_KEY) {
-					char ch = (char)gev.key.ch;
+					int ch = gev.key.ch;
 
 					if (ch == '\r')
 						ch = '\n';
-					write(in[1], &ch, 1);
 
-					// No real pty backs this shell (see this file's own
-					// top comment), so nothing else echoes a keystroke to
-					// the screen the way a tty's line discipline normally
-					// would - without this, typed characters were sent to
-					// bash but never appeared until its own output (e.g.
-					// the next prompt) happened to redraw the grid.
-					vterm_write_onlcr(vt, &ch, 1);
-					render(&c, mono, mono_bold);
+					if (ch == 0x7f || ch == 0x08) {
+						// Backspace/DEL: only meaningful if there's
+						// something in the current line to take back -
+						// pop it locally (see line_buf's own comment)
+						// and erase it on screen (move left, blank the
+						// cell, move left again) rather than forwarding
+						// anything to bash, which was never told about
+						// this character in the first place.
+						if (line_len > 0) {
+							line_len--;
+							vterm_write_onlcr(vt, "\b \b", 3);
+							render(&c, mono, mono_bold);
+						}
+					} else if (ch == '\n') {
+						if (line_len > 0)
+							write(in[1], line_buf, (size_t)line_len);
+						write(in[1], "\n", 1);
+						line_len = 0;
+						// No real pty backs this shell (see this file's
+						// own top comment), so nothing else echoes a
+						// keystroke to the screen the way a tty's line
+						// discipline normally would - without this,
+						// typed characters were sent to bash but never
+						// appeared until its own output (e.g. the next
+						// prompt) happened to redraw the grid.
+						vterm_write_onlcr(vt, "\n", 1);
+						render(&c, mono, mono_bold);
+					} else if (ch >= 0x20 && ch < 0x7f) {
+						char cc = (char)ch;
+
+						if (line_len < LINE_BUF_MAX)
+							line_buf[line_len++] = cc;
+						vterm_write_onlcr(vt, &cc, 1);
+						render(&c, mono, mono_bold);
+					}
+					// Anything else (the KEY_LF/KEY_RT/... special
+					// codes kernel/kbd.h defines for arrow keys etc.,
+					// all >0x7f) is silently ignored, same as before
+					// this change - no mid-line cursor movement.
 				} else if (gev.type == GUI_EVENT_RESIZE) {
 					// c.surface is already remapped at the new pixel size
 					// (gui_recv_event() itself did the mmap/munmap dance) -

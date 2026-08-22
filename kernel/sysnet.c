@@ -359,3 +359,16 @@ sys_recvmsg(void)
 
   return off;
 }
+
+// (int fd): see include/syscall.h's own comment on SYS_sock_writable.
+// A thin argfd()+sockwritable() wrapper, the same shape sys_socket()
+// above already has around its own kernel/socket.c call.
+int
+sys_sock_writable(void)
+{
+  struct file *f;
+
+  if(argfd(0, 0, &f) < 0 || f->type != FD_SOCK)
+    return -1;
+  return sockwritable(f->sock);
+}

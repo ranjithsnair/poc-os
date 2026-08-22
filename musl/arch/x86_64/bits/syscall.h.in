@@ -68,3 +68,4 @@
 #define __NR_epoll_ctl 67
 #define __NR_epoll_pwait 68
 #define __NR_date 69
+#define __NR_sock_writable 70

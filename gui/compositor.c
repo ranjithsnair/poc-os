@@ -39,6 +39,38 @@
 
 extern long syscall(long, ...);
 
+// kernel/socket.c's socksend() (which wire_send() below eventually
+// calls) genuinely *sleeps* the caller while a socket's outgoing queue
+// is full (SOCKQLEN=3, include/socket.h) - fine for an ordinary client
+// with one peer, but fatal here: this compositor is single-threaded,
+// so blocking inside a send to any one client stalls its entire
+// epoll_wait() loop, freezing every window, the mouse, and the
+// keyboard until that specific client happens to drain its queue -
+// indistinguishable from the whole GUI session hanging. sock_writable()
+// is a non-blocking peek (SYS_sock_writable, kernel/socket.c's own
+// sockwritable() - the same check kernel/epoll.c's EPOLLOUT support
+// already uses internally) that must be checked before every send that
+// isn't already known to be going to an idle, empty-queued connection.
+static int
+sock_writable(int fd)
+{
+	return syscall(SYS_sock_writable, fd) > 0;
+}
+
+// For the "fire and forget" async notifications (focus/pointer/key
+// events, task-list updates) - all of these are superseded by
+// whatever the *next* one carries, so silently dropping one when the
+// target's queue is already full is harmless: at worst a client's
+// view of e.g. the taskbar or its own focus state is briefly one
+// update behind, which is far preferable to freezing the whole
+// session over it.
+static void
+try_send(int fd, void *data, int len)
+{
+	if (sock_writable(fd))
+		wire_send(fd, data, len, -1);
+}
+
 #define FRAMEBUFFER_MAJOR 2
 #define MOUSE_MAJOR 3
 #define FBIOGET_VSCREENINFO 1
@@ -241,10 +273,41 @@ mark_dirty_full(void)
 	mark_dirty(0, 0, (int)fbsurf.w, (int)fbsurf.h);
 }
 
+// True if at least one window currently has real, committed content
+// to show - not just "a window exists" (a freshly-created, not-yet-
+// committed window contributes nothing visible, and a minimized one
+// is deliberately not drawn either). Used by flush_dirty() below to
+// refuse to push a frame that would only show bare wallpaper: that
+// can happen momentarily at any window-count transition through zero
+// - compositor startup (before gui/login_gui.c's first commit), the
+// login->desktop handoff (login_gui.c calls gui_destroy() on its own
+// window *before* execve()-ing into gui/desktop.c, so there's a real
+// gap where zero windows exist until gui/desktop.c's icon/bar connect
+// and commit), or even later if every window is ever closed at once -
+// and a stray mouse-move event landing in any such gap used to be
+// enough to trigger a redraw_all()+flush_dirty() that flushed the
+// compositor's own wallpaper background to the screen, producing
+// exactly the "boot splash/login box flashes to bare wallpaper before
+// the next real screen is ready" symptom this avoids. Checked fresh on
+// every flush (not just once) since this gap can recur, not just
+// happen once at startup.
+static int
+has_committed_content(void)
+{
+	int i;
+
+	for (i = 0; i < MAXWIN; i++)
+		if (windows[i].inuse && windows[i].committed && !windows[i].minimized)
+			return 1;
+	return 0;
+}
+
 static void
 flush_dirty(void)
 {
 	if (!dirty_valid)
+		return;
+	if (!has_committed_content())
 		return;
 	gfx_blit(&fbsurf, dirty.x0, dirty.y0, &backbuf, dirty.x0, dirty.y0,
 	         dirty.x1 - dirty.x0, dirty.y1 - dirty.y0);
@@ -325,7 +388,7 @@ send_task_list(void)
 		n++;
 	}
 	msg.task_list.count = n;
-	wire_send(taskbar_fd, &msg, sizeof(msg), -1);
+	try_send(taskbar_fd, &msg, sizeof(msg));
 }
 
 static void
@@ -360,13 +423,13 @@ set_focus(int idx)
 	if (focus_idx >= 0 && windows[focus_idx].inuse) {
 		ev.type = GUI_MSG_FOCUS_EVENT;
 		ev.focused = 0;
-		wire_send(windows[focus_idx].fd, &ev, sizeof(ev), -1);
+		try_send(windows[focus_idx].fd, &ev, sizeof(ev));
 	}
 	focus_idx = idx;
 	if (focus_idx >= 0) {
 		ev.type = GUI_MSG_FOCUS_EVENT;
 		ev.focused = 1;
-		wire_send(windows[focus_idx].fd, &ev, sizeof(ev), -1);
+		try_send(windows[focus_idx].fd, &ev, sizeof(ev));
 	}
 	send_task_list();
 }
@@ -580,9 +643,23 @@ handle_create_surface(int epfd, int fd, struct gui_msg_create_surface *req)
 	// NO_FOCUS windows (desktop bar/icon) never steal keyboard focus -
 	// they only care about pointer clicks, and the whole point is to
 	// leave a real app window (e.g. the terminal) as the keyboard target.
+	//
+	// No explicit send_task_list() call here: for a focusable window,
+	// set_focus() below always actually changes focus_idx (a brand new
+	// window can never already be the current focus) and already sends
+	// one itself; for a NO_FOCUS window, it's excluded from the task
+	// list anyway (send_task_list()'s own filter), so no update is
+	// needed either way. A second explicit send here used to double up
+	// with set_focus()'s own send on every single window creation -
+	// harmless alone, but stacked with a client that's slow to drain
+	// its own incoming queue (SOCKQLEN=3, include/socket.h - e.g. a
+	// second terminal window still busy with its own startup/font
+	// loading), the extra send was sometimes the one that tipped a
+	// client's queue over the edge and wedged this wire_send() - see
+	// the mouse-burst coalescing comment elsewhere in this file for the
+	// same underlying failure mode.
 	if (!(req->flags & GUI_WIN_NO_FOCUS))
 		set_focus(idx);
-	send_task_list();
 }
 
 // Maximize/restore: allocates a *new* shm block of the given content
@@ -619,7 +696,17 @@ resize_window_content(int idx, int new_w, int new_h)
 	msg.resize.w = (unsigned int)new_w;
 	msg.resize.h = (unsigned int)new_h;
 	msg.resize.pitch = (unsigned int)new_w * 4;
-	if (wire_send(w->fd, &msg, sizeof(msg), newfd) != (int)sizeof(msg)) {
+	// Unlike the "fire and forget" events try_send() drops when a
+	// client's queue is full (see its own comment), this one carries
+	// the new shm fd and changes what size the client (and this
+	// compositor's own w->surf right below) agree the window's content
+	// is - silently dropping it would desync the two, not just show
+	// slightly-stale state. So: check first and fail the whole
+	// maximize/restore (caller leaves the window as it was) rather than
+	// either blocking the compositor or sending something that would
+	// corrupt that agreement.
+	if (!sock_writable(w->fd) ||
+	    wire_send(w->fd, &msg, sizeof(msg), newfd) != (int)sizeof(msg)) {
 		munmap(newpix, (unsigned long)new_w * 4 * (unsigned long)new_h);
 		close(newfd);
 		return -1;
@@ -947,7 +1034,7 @@ main(void)
 						pev.x = cursor_x - (w->x + cx_off);
 						pev.y = cursor_y - (w->y + cy_off);
 						pev.buttons = pressed;
-						wire_send(w->fd, &pev, sizeof(pev), -1);
+						try_send(w->fd, &pev, sizeof(pev));
 						sent_pressed = pressed;
 					}
 
@@ -969,7 +1056,7 @@ main(void)
 					pev.x = cursor_x - (w->x + cx_off);
 					pev.y = cursor_y - (w->y + cy_off);
 					pev.buttons = pressed;
-					wire_send(w->fd, &pev, sizeof(pev), -1);
+					try_send(w->fd, &pev, sizeof(pev));
 				}
 				redraw_all();
 				if (topology_changed) {
@@ -998,7 +1085,7 @@ main(void)
 
 					kev.type = GUI_MSG_KEY_EVENT;
 					kev.ch = c;
-					wire_send(windows[focus_idx].fd, &kev, sizeof(kev), -1);
+					try_send(windows[focus_idx].fd, &kev, sizeof(kev));
 				}
 			} else {
 				union gui_msg msg;

@@ -2061,12 +2061,11 @@ MKFS_INSTALL += usr/share/fonts/dejavu/DejaVuSans.ttf:gui/assets/fonts/DejaVuSan
 	usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf:gui/assets/fonts/DejaVuSansMono-Bold.ttf \
 	usr/share/wallpaper.raw:gui/assets/images/wallpaper.raw \
 	usr/share/icons/terminal.raw:gui/assets/images/terminal-icon.raw \
-	usr/share/cursor.raw:gui/assets/images/cursor.raw \
-	usr/share/bootsplash.raw:gui/assets/images/bootsplash.raw
+	usr/share/cursor.raw:gui/assets/images/cursor.raw
 MKFS_INSTALL_DEPS += gui/assets/fonts/DejaVuSans.ttf gui/assets/fonts/DejaVuSans-Bold.ttf \
 	gui/assets/fonts/DejaVuSansMono.ttf gui/assets/fonts/DejaVuSansMono-Bold.ttf \
 	gui/assets/images/wallpaper.raw gui/assets/images/terminal-icon.raw \
-	gui/assets/images/cursor.raw gui/assets/images/bootsplash.raw
+	gui/assets/images/cursor.raw
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

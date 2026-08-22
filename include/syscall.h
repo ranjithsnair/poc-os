@@ -240,6 +240,18 @@
 // Linux/musl syscall; called directly via syscall(SYS_date, &r), same
 // convention as SYS_shm_create.
 #define SYS_date 69
+// (int fd): non-blocking peek at whether a send on this AF_UNIX socket
+// fd would fit in its queue without blocking - kernel/socket.c's own
+// sockwritable(), the same check kernel/epoll.c's EPOLLOUT support
+// already calls internally, just exposed directly for a caller (gui/
+// compositor.c) that wants a yes/no answer for exactly one fd right
+// before deciding whether to send, not a whole epoll_wait() round
+// trip. Returns 1 if a send would fit (or the peer's gone - the send
+// would fail immediately rather than block either way), 0 if the
+// queue is currently full. Not a real Linux/musl syscall; called
+// directly via syscall(SYS_sock_writable, fd), same convention as
+// SYS_shm_create/SYS_date.
+#define SYS_sock_writable 70
 
 // arch_prctl "code" values. Kept the same numeric value Linux (and so
 // musl's __set_thread_area.s) uses for ARCH_SET_FS, purely so a value
