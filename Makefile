@@ -1888,6 +1888,19 @@ $(BUILD)/_compositor: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/composito
 	$(OBJDUMP) -S $@ > $(BUILD)/compositor.dis
 	$(OBJCOPY) --strip-debug $@
 
+# bootsplash: gui/bootsplash.c's own comment - a one-shot program that
+# draws the boot splash image directly to the real framebuffer and
+# exits, run by bash/poc/dinit.c before the compositor ever starts.
+# Compiled via the gui-pic/%.o generic pattern rule, linked against
+# libgui.so (gfx_load_raw()/gfx_blit()) same as compositor above.
+$(BUILD)/_bootsplash: $(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/bootsplash.o \
+                       $(BUILD)/libgui.so $(BUILD)/libc.so | $(BUILD)
+	$(LD) -m elf_x86_64 -pie -z now --dynamic-linker /usr/lib/libc.so -o $@ \
+		$(OBJDIR)/musl-pic/crt/Scrt1.o $(OBJDIR)/gui-pic/bootsplash.o \
+		-L $(BUILD) -lgui -lc
+	$(OBJDUMP) -S $@ > $(BUILD)/bootsplash.dis
+	$(OBJCOPY) --strip-debug $@
+
 # login_gui: gui/login_gui.c's own comment - GUI roadmap phase 9's
 # graphical login screen. Compiled via the gui-pic/%.o generic pattern
 # rule (already has -Igui/libgui built in), linked against libgui.so
@@ -2028,6 +2041,8 @@ MKFS_INSTALL_DEPS += $(BUILD)/_login $(BUILD)/_su etc/passwd etc/group
 # into by default - see its own comment).
 MKFS_INSTALL += usr/bin/compositor:$(BUILD)/_compositor
 MKFS_INSTALL_DEPS += $(BUILD)/_compositor
+MKFS_INSTALL += usr/bin/bootsplash:$(BUILD)/_bootsplash
+MKFS_INSTALL_DEPS += $(BUILD)/_bootsplash
 MKFS_INSTALL += usr/bin/login_gui:$(BUILD)/_login_gui
 MKFS_INSTALL_DEPS += $(BUILD)/_login_gui
 MKFS_INSTALL += usr/bin/terminal:$(BUILD)/_terminal
@@ -2046,11 +2061,12 @@ MKFS_INSTALL += usr/share/fonts/dejavu/DejaVuSans.ttf:gui/assets/fonts/DejaVuSan
 	usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf:gui/assets/fonts/DejaVuSansMono-Bold.ttf \
 	usr/share/wallpaper.raw:gui/assets/images/wallpaper.raw \
 	usr/share/icons/terminal.raw:gui/assets/images/terminal-icon.raw \
-	usr/share/cursor.raw:gui/assets/images/cursor.raw
+	usr/share/cursor.raw:gui/assets/images/cursor.raw \
+	usr/share/bootsplash.raw:gui/assets/images/bootsplash.raw
 MKFS_INSTALL_DEPS += gui/assets/fonts/DejaVuSans.ttf gui/assets/fonts/DejaVuSans-Bold.ttf \
 	gui/assets/fonts/DejaVuSansMono.ttf gui/assets/fonts/DejaVuSansMono-Bold.ttf \
 	gui/assets/images/wallpaper.raw gui/assets/images/terminal-icon.raw \
-	gui/assets/images/cursor.raw
+	gui/assets/images/cursor.raw gui/assets/images/bootsplash.raw
 
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UPROGS) $(MKFS_INSTALL_DEPS)
 	./$(BUILD)/mkfs $(BUILD)/fs.img $(UPROGS) $(MKFS_INSTALL)

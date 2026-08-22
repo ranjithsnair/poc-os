@@ -83,6 +83,28 @@ fpuinit(void)
   fpu_clean_template(fpu_template);
 }
 
+// Reprograms PAT7 (bits 56-63 of the IA32_PAT MSR) to the
+// Write-Combining memory type (encoding 1) - read-modify-write, not a
+// blind overwrite, so whatever a real BIOS/QEMU firmware already left
+// in the other 7 entries survives untouched. Must run on every CPU
+// (IA32_PAT is per-core state, like fpuinit()'s CR0/CR4 bits) before
+// any page is ever mapped PTE_WC (kernel/sysproc.c's sys_mmap()
+// FRAMEBUFFER branch) - otherwise PAT index 7 would still mean
+// whatever its power-up default is (UC), and a WC-requested mapping
+// would silently map uncached instead. Same PAT7=WC encoding ToaruOS's
+// own pat_initialize() uses.
+#define MSR_IA32_PAT 0x277
+
+void
+patinit(void)
+{
+  uint64 pat = rdmsr(MSR_IA32_PAT);
+
+  pat |= (uint64)1 << 56;         // set bit 56
+  pat &= ~(((uint64)3) << 57);    // clear bits 57-58
+  wrmsr(MSR_IA32_PAT, pat);
+}
+
 // Descend one level of a multi-level page table: return the next-level
 // table that table[idx] refers to, allocating and zeroing a fresh page
 // for it first if none exists yet and alloc is set.
@@ -162,6 +184,16 @@ mappages(pde_t *pgdir, void *va, uintp size, uintp pa, int perm)
 {
   char *a, *last, *end;
   pte_t *pde, *pte;
+  // PTE_WC (include/mmu.h) is a transient request, never a real
+  // hardware bit: strip it out of what actually gets OR'd into every
+  // leaf entry below, and instead OR in whichever hardware PWT/PCD/PAT
+  // combination selects PAT index 7 (patinit() above sets that entry
+  // to Write-Combining) - a 4KB PTE and a 2MB PS-bit PDE disagree on
+  // where the PAT bit lives (bit 7 vs bit 12), so each leaf path below
+  // computes its own hw_wc.
+  int wc = perm & PTE_WC;
+
+  perm &= ~PTE_WC;
 
   a = (char*)PGROUNDDOWN((uintp)va);
   last = (char*)PGROUNDDOWN(((uintp)va) + size - 1);
@@ -169,22 +201,28 @@ mappages(pde_t *pgdir, void *va, uintp size, uintp pa, int perm)
   for(;;){
     if((uintp)a % PGSIZE2M == 0 && pa % PGSIZE2M == 0 &&
        (uintp)a + PGSIZE2M <= (uintp)end){
+      int hw_wc = wc ? (PTE_PWT | PTE_PCD | (1 << 12)) : 0;
+
       if((pde = walkpd(pgdir, a, 1)) == 0)
         return -1;
       if(*pde & PTE_P)
         panic("remap");
-      *pde = pa | perm | PTE_P | PTE_PS;
+      *pde = pa | perm | hw_wc | PTE_P | PTE_PS;
       a += PGSIZE2M;
       pa += PGSIZE2M;
       if((uintp)a > (uintp)last)
         break;
       continue;
     }
-    if((pte = walkpgdir(pgdir, a, 1)) == 0)
-      return -1;
-    if(*pte & PTE_P)
-      panic("remap");
-    *pte = pa | perm | PTE_P;
+    {
+      int hw_wc = wc ? (PTE_PWT | PTE_PCD | (1 << 7)) : 0;
+
+      if((pte = walkpgdir(pgdir, a, 1)) == 0)
+        return -1;
+      if(*pte & PTE_P)
+        panic("remap");
+      *pte = pa | perm | hw_wc | PTE_P;
+    }
     if(a == last)
       break;
     a += PGSIZE;
@@ -601,7 +639,6 @@ copyuvm(pde_t *pgdir, uintp sz)
   pde_t *d;
   pte_t *pte;
   uintp pa, i, flags;
-  char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -636,28 +673,81 @@ copyuvm(pde_t *pgdir, uintp sz)
         goto bad;
       continue;
     }
-    // PTE_SHM (include/mmu.h) is stripped here: this loop already
-    // gives the child its own freshly kalloc()'d, physically distinct
-    // copy of the page (fork() has no real COW in this kernel) - a
-    // child that inherited a shm mapping this way is no longer
-    // sharing anything with the shmobj it came from, so its copy must
-    // go back to being an ordinary, normally-freed anonymous page.
-    // Leaving the flag set would make deallocuvm() skip kfree()ing it
-    // forever (mistaking it for a still-shared page), leaking it on
-    // every such child's exit.
-    flags = PTE_FLAGS(*pte) & ~PTE_SHM;
-    if((mem = kalloc()) == 0)
+    // PTE_SHM (include/mmu.h) is stripped here: an shm mapping stays
+    // shared through its own shmobj refcount (kernel/shm.c), not this
+    // page's own pageref[] - a child that inherited one this way must
+    // go back to being an ordinary COW-eligible page, not doubly
+    // shared through two different mechanisms at once.
+    //
+    // Ordinary anonymous RAM: real copy-on-write. Mark the *parent's*
+    // own live PTE read-only+COW (invlpg it - the parent keeps running
+    // under its already-loaded CR3 once fork() returns, and without
+    // this its TLB could still serve the old writable translation,
+    // silently bypassing the new protection on its very next write),
+    // then map the same physical page into the child with the same
+    // flags and add its reference. vm_handle_pagefault() (called from
+    // kernel/trap.c's T_PGFLT case) resolves the eventual write fault
+    // by either handing back sole ownership (last remaining owner) or
+    // actually copying now that there's more than one.
+    flags = (PTE_FLAGS(*pte) & ~(PTE_SHM | PTE_W)) | PTE_COW;
+    *pte = pa | flags;
+    invlpg((void*)i);
+    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0)
       goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
-      goto bad;
-    }
+    kaddref(pa);
   }
   return d;
 
 bad:
   freevm(d);
+  return 0;
+}
+
+// Resolve a write fault against a copy-on-write page (kernel/trap.c's
+// T_PGFLT case, only for a fault from user mode). Returns -1 for
+// anything that isn't ours to handle - no mapping at va at all, or a
+// present-but-not-COW page (a real bug: writing to a genuinely
+// read-only mapping) - leaving the caller to kill the process exactly
+// as it already does for any other unhandled trap.
+//
+// A COW page can only ever be faulted on by a write: copyuvm() leaves
+// PTE_P set, so an ordinary read already succeeds at the hardware
+// level (PTE_W only gates writes) - there's no separate read-vs-write
+// check needed here.
+int
+vm_handle_pagefault(pde_t *pgdir, uintp va)
+{
+  pte_t *pte;
+  uintp pa;
+  char *mem;
+
+  if((pte = walkpgdir(pgdir, (void*)PGROUNDDOWN(va), 0)) == 0)
+    return -1;
+  if(!(*pte & PTE_P) || !(*pte & PTE_COW))
+    return -1;
+
+  pa = PTE_ADDR(*pte);
+
+  if(kgetref(pa) == 1){
+    // No other process still shares this page (a sibling already
+    // dropped its own copy, or this was the only reference to begin
+    // with e.g. after the partial-fork-failure case in copyuvm()) -
+    // just reclaim it in place, no copy needed.
+    *pte = (*pte & ~PTE_COW) | PTE_W;
+    invlpg((void*)PGROUNDDOWN(va));
+    return 0;
+  }
+
+  // Still shared: this process needs its own physically distinct copy
+  // before it can write. Leave the fault unresolved (the process gets
+  // killed on OOM, same as any other allocation failure reaching user
+  // space) rather than panicking the kernel.
+  if((mem = kalloc()) == 0)
+    return -1;
+  memmove(mem, (char*)P2V(pa), PGSIZE);
+  *pte = V2P(mem) | (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W;
+  invlpg((void*)PGROUNDDOWN(va));
+  kfree((char*)P2V(pa)); // drop this mapping's own share of the old page
   return 0;
 }
 

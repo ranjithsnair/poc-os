@@ -140,10 +140,21 @@ draw_cursor(struct gfx_surface *s, int x, int y)
 #define COLOR_TITLE_UNF 0x939393
 #define COLOR_TITLE_TXT 0x202020
 
-#define CLOSE_BTN_SIZE   16
-#define CLOSE_BTN_MARGIN 2
-#define COLOR_CLOSE_BG   0xE81123
-#define COLOR_CLOSE_TXT  0xFFFFFF
+// Button geometry: right-to-left slot order matches ToaruOS's own
+// lib/decor-fancy.c layout (its BUTTON_OFFSET constants put close
+// nearest the edge, then maximize, then minimize) - slot 0 = close,
+// 1 = maximize, 2 = minimize.
+#define BTN_SIZE   16
+#define BTN_MARGIN 4
+#define BTN_GAP    6
+
+// Reserves this much of the top of the screen for gui/desktop.c's own
+// top bar, so a maximized window's content never grows into it -
+// mirrors that file's own PANEL_H. Not shared via a common header:
+// this codebase already duplicates small ABI-shaped constants across
+// components rather than introduce one for two callers (see struct
+// fb_info's own precedent, just below).
+#define TOPBAR_RESERVED_H 27
 
 #define WALLPAPER_PATH "/usr/share/wallpaper.raw"
 
@@ -162,6 +173,12 @@ struct window {
 	int flags;                /* GUI_WIN_* from gui_proto.h */
 	char title[GUI_TITLE_MAX];
 	int committed;
+	int minimized;            /* hidden from both redraw_all() and
+	                            * window_at() but the client stays
+	                            * connected - see GUI_MSG_TASK_ACTION */
+	int maximized;
+	int restore_x, restore_y;               /* pre-maximize decoration position */
+	int restore_content_w, restore_content_h; /* pre-maximize content size */
 };
 
 static struct window windows[MAXWIN];
@@ -169,17 +186,70 @@ static int zorder[MAXWIN]; /* indices into windows[], back(0) to front(nz-1) */
 static int nz;
 static int focus_idx = -1;
 static struct gfx_surface fbsurf;
-// System-RAM shadow of fbsurf: redraw_all() composites into this, then
-// flushes it to the real (mmap'd) framebuffer with one gfx_blit() at
-// the end. Without it every gfx_fill_rect()/gfx_blit() call in
-// redraw_all() lands on-screen individually - visibly flickering
-// (wallpaper, then each window, then the cursor, drawn as separate
-// frames) since nothing stops the display from scanning out a
-// half-composited frame.
+// System-RAM shadow of fbsurf: redraw_all() composites into this;
+// flush_dirty() below then copies only the changed sub-rect out to the
+// real (mmap'd) framebuffer. Without this intermediate buffer, every
+// gfx_fill_rect()/gfx_blit() call in redraw_all() would land on-screen
+// individually - visibly flickering (wallpaper, then each window, then
+// the cursor, drawn as separate frames) since nothing stops the
+// display from scanning out a half-composited frame.
 static struct gfx_surface backbuf;
 static struct gfx_surface wallpaper; /* .pixels == 0 if the asset is missing */
 static int cursor_x, cursor_y;
 static int next_surface_id = 1;
+// The one client (gui/desktop.c's bar) that asked for GUI_MSG_TASK_LIST
+// updates via GUI_MSG_TASK_SUBSCRIBE - -1 if none has (yet).
+static int taskbar_fd = -1;
+
+// Dirty-rect tracking for flush_dirty() below: redraw_all() still
+// recomposites the *entire* backbuf every event (RAM-to-RAM, cheap),
+// but only the sub-rect actually touched since the last flush needs to
+// go back out to the real (now write-combined, but still far slower
+// than RAM) framebuffer. mark_dirty() callers only need to give a safe
+// superset of what changed - a rect that's bigger than necessary just
+// costs a few extra pixels; a rect that's too small would leave a
+// stale on-screen artifact, so every call site below either tracks the
+// exact old+new region involved or falls back to mark_dirty_full().
+struct rect { int x0, y0, x1, y1; };
+static struct rect dirty;
+static int dirty_valid;
+
+static void
+mark_dirty(int x0, int y0, int x1, int y1)
+{
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > (int)fbsurf.w) x1 = (int)fbsurf.w;
+	if (y1 > (int)fbsurf.h) y1 = (int)fbsurf.h;
+	if (x0 >= x1 || y0 >= y1)
+		return;
+
+	if (!dirty_valid) {
+		dirty.x0 = x0; dirty.y0 = y0; dirty.x1 = x1; dirty.y1 = y1;
+		dirty_valid = 1;
+		return;
+	}
+	if (x0 < dirty.x0) dirty.x0 = x0;
+	if (y0 < dirty.y0) dirty.y0 = y0;
+	if (x1 > dirty.x1) dirty.x1 = x1;
+	if (y1 > dirty.y1) dirty.y1 = y1;
+}
+
+static void
+mark_dirty_full(void)
+{
+	mark_dirty(0, 0, (int)fbsurf.w, (int)fbsurf.h);
+}
+
+static void
+flush_dirty(void)
+{
+	if (!dirty_valid)
+		return;
+	gfx_blit(&fbsurf, dirty.x0, dirty.y0, &backbuf, dirty.x0, dirty.y0,
+	         dirty.x1 - dirty.x0, dirty.y1 - dirty.y0);
+	dirty_valid = 0;
+}
 
 static int
 decor_w(struct window *w)
@@ -197,29 +267,65 @@ decor_h(struct window *w)
 	return (int)w->surf.h + TITLEBAR_H + BORDER;
 }
 
-// Close button lives in the titlebar's top-right corner - only decorated
-// (non-borderless) windows have a titlebar to put one in, so borderless
-// windows (desktop bar/icon, the login box) never get one.
+// The three titlebar buttons live in the top-right corner, in ToaruOS's
+// own right-to-left order (see BTN_SIZE's own comment) - only decorated
+// (non-borderless) windows have a titlebar to put them in, so borderless
+// windows (desktop bar/icon, the login box) never get any.
 static int
-close_btn_x(struct window *w)
+btn_x(struct window *w, int slot)
 {
-	return w->x + decor_w(w) - CLOSE_BTN_SIZE - CLOSE_BTN_MARGIN;
+	return w->x + decor_w(w) - BTN_MARGIN - (slot + 1) * BTN_SIZE - slot * BTN_GAP;
 }
 
 static int
-close_btn_y(struct window *w)
+btn_y(struct window *w)
 {
-	return w->y + (TITLEBAR_H - CLOSE_BTN_SIZE) / 2;
+	return w->y + (TITLEBAR_H - BTN_SIZE) / 2;
 }
 
 static int
-in_close_btn(struct window *w, int px, int py)
+in_btn(struct window *w, int slot, int px, int py)
 {
-	int bx = close_btn_x(w), by = close_btn_y(w);
+	int bx = btn_x(w, slot), by = btn_y(w);
 
 	return !(w->flags & GUI_WIN_BORDERLESS) &&
-	       px >= bx && px < bx + CLOSE_BTN_SIZE &&
-	       py >= by && py < by + CLOSE_BTN_SIZE;
+	       px >= bx && px < bx + BTN_SIZE &&
+	       py >= by && py < by + BTN_SIZE;
+}
+
+static int in_close_btn(struct window *w, int px, int py) { return in_btn(w, 0, px, py); }
+static int in_max_btn(struct window *w, int px, int py) { return in_btn(w, 1, px, py); }
+static int in_min_btn(struct window *w, int px, int py) { return in_btn(w, 2, px, py); }
+
+// Pushes the current window set to whichever client subscribed via
+// GUI_MSG_TASK_SUBSCRIBE (gui/desktop.c's bar) - called from every
+// point that changes what a taskbar would need to show: window
+// creation/removal, focus changes, and minimize/restore. NO_FOCUS
+// windows (the bar/icon themselves) are never real "tasks" and are
+// excluded, same filter handle_create_surface() already uses to decide
+// which windows are even focusable.
+static void
+send_task_list(void)
+{
+	union gui_msg msg;
+	int i, n = 0;
+
+	if (taskbar_fd < 0)
+		return;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.task_list.type = GUI_MSG_TASK_LIST;
+	for (i = 0; i < MAXWIN && n < GUI_MAX_TASKS; i++) {
+		if (!windows[i].inuse || (windows[i].flags & GUI_WIN_NO_FOCUS))
+			continue;
+		msg.task_list.tasks[n].surface_id = windows[i].surface_id;
+		msg.task_list.tasks[n].minimized = windows[i].minimized;
+		msg.task_list.tasks[n].focused = (i == focus_idx);
+		memcpy(msg.task_list.tasks[n].title, windows[i].title, GUI_TITLE_MAX);
+		n++;
+	}
+	msg.task_list.count = n;
+	wire_send(taskbar_fd, &msg, sizeof(msg), -1);
 }
 
 static void
@@ -262,6 +368,7 @@ set_focus(int idx)
 		ev.focused = 1;
 		wire_send(windows[focus_idx].fd, &ev, sizeof(ev), -1);
 	}
+	send_task_list();
 }
 
 static void
@@ -269,6 +376,8 @@ remove_window(int epfd, int idx)
 {
 	struct window *w = &windows[idx];
 
+	if (w->fd == taskbar_fd)
+		taskbar_fd = -1;
 	epoll_ctl(epfd, EPOLL_CTL_DEL, w->fd, 0);
 	close(w->fd);
 	close(w->shmfd);
@@ -276,6 +385,9 @@ remove_window(int epfd, int idx)
 	if (focus_idx == idx)
 		focus_idx = nz > 0 ? zorder[nz - 1] : -1;
 	w->inuse = 0;
+	w->minimized = 0;
+	w->maximized = 0;
+	send_task_list();
 }
 
 static int
@@ -287,6 +399,8 @@ window_at(int px, int py, int *in_titlebar)
 	for (i = nz - 1; i >= 0; i--) {
 		idx = zorder[i];
 		w = &windows[idx];
+		if (w->minimized)
+			continue;
 		if (px >= w->x && px < w->x + decor_w(w) &&
 		    py >= w->y && py < w->y + decor_h(w)) {
 			*in_titlebar = !(w->flags & GUI_WIN_BORDERLESS) &&
@@ -295,6 +409,37 @@ window_at(int px, int py, int *in_titlebar)
 		}
 	}
 	return -1;
+}
+
+// Draws one decorated window's titlebar buttons: simple monochrome
+// glyphs in the titlebar's own text color (matching ToaruOS's
+// lib/decor-fancy.c, which paints its close/maximize/minimize sprites
+// tinted to ACTIVE_COLOR/INACTIVE_COLOR rather than using a colored
+// button background) rather than the single filled-red-square close
+// button this used to draw. No hover-highlight state: ToaruOS's
+// decorator tracks continuous pointer-motion hover per button, but
+// this compositor only ever reacts to clicks - adding continuous
+// decoration-hover tracking is out of scope here.
+static void
+draw_titlebar_buttons(struct window *w, unsigned int color)
+{
+	int bx, by;
+
+	bx = btn_x(w, 0); by = btn_y(w);
+	gfx_draw_string(&backbuf, bx + 4, by, "x", color);
+
+	bx = btn_x(w, 1); by = btn_y(w);
+	{
+		int sx0 = bx + 3, sy0 = by + 3, sx1 = bx + BTN_SIZE - 3, sy1 = by + BTN_SIZE - 3;
+
+		gfx_fill_rect(&backbuf, sx0, sy0, sx1, sy0 + 1, color);   /* top */
+		gfx_fill_rect(&backbuf, sx0, sy1 - 1, sx1, sy1, color);   /* bottom */
+		gfx_fill_rect(&backbuf, sx0, sy0, sx0 + 1, sy1, color);   /* left */
+		gfx_fill_rect(&backbuf, sx1 - 1, sy0, sx1, sy1, color);   /* right */
+	}
+
+	bx = btn_x(w, 2); by = btn_y(w);
+	gfx_fill_rect(&backbuf, bx + 3, by + BTN_SIZE - 5, bx + BTN_SIZE - 3, by + BTN_SIZE - 3, color);
 }
 
 static void
@@ -311,6 +456,14 @@ redraw_all(void)
 	for (i = 0; i < nz; i++) {
 		idx = zorder[i];
 		w = &windows[idx];
+		// NO_FOCUS windows (the desktop bar/icon) are drawn in a
+		// second, always-on-top pass below instead - otherwise a
+		// maximized window (which fills everything below
+		// TOPBAR_RESERVED_H, but is still just an ordinary z-order
+		// entry) could paint right over the panel the moment it's
+		// raised above it.
+		if (w->minimized || (w->flags & GUI_WIN_NO_FOCUS))
+			continue;
 		if (w->flags & GUI_WIN_BORDERLESS) {
 			if (w->committed)
 				gfx_blit(&backbuf, w->x, w->y, &w->surf, 0, 0,
@@ -321,20 +474,30 @@ redraw_all(void)
 		gfx_fill_rect(&backbuf, w->x, w->y, w->x + decor_w(w), w->y + TITLEBAR_H,
 		              idx == focus_idx ? COLOR_TITLE_FOC : COLOR_TITLE_UNF);
 		gfx_draw_string(&backbuf, w->x + 4, w->y + 4, w->title, COLOR_TITLE_TXT);
-		{
-			int bx = close_btn_x(w), by = close_btn_y(w);
-
-			gfx_fill_rect(&backbuf, bx, by, bx + CLOSE_BTN_SIZE, by + CLOSE_BTN_SIZE, COLOR_CLOSE_BG);
-			gfx_draw_string(&backbuf, bx + 4, by, "x", COLOR_CLOSE_TXT);
-		}
+		// Buttons are drawn in the same color as the title text itself
+		// (which likewise doesn't vary by focus state here) rather than
+		// ToaruOS's own black-titlebar-background convention - this
+		// titlebar fills with a light ACTIVE/INACTIVE_COLOR instead and
+		// needs a dark foreground for contrast, the opposite pairing.
+		draw_titlebar_buttons(w, COLOR_TITLE_TXT);
 		if (w->committed)
 			gfx_blit(&backbuf, w->x + BORDER, w->y + TITLEBAR_H,
 			         &w->surf, 0, 0, (int)w->surf.w, (int)w->surf.h);
 	}
 
-	draw_cursor(&backbuf, cursor_x, cursor_y);
+	for (i = 0; i < nz; i++) {
+		idx = zorder[i];
+		w = &windows[idx];
+		if (w->minimized || !(w->flags & GUI_WIN_NO_FOCUS))
+			continue;
+		if (w->committed)
+			gfx_blit(&backbuf, w->x, w->y, &w->surf, 0, 0, (int)w->surf.w, (int)w->surf.h);
+	}
 
-	gfx_blit(&fbsurf, 0, 0, &backbuf, 0, 0, (int)fbsurf.w, (int)fbsurf.h);
+	draw_cursor(&backbuf, cursor_x, cursor_y);
+	// Recompositing above is always full-screen (cheap: backbuf is
+	// plain RAM) - callers decide how much of the result actually needs
+	// to reach the real framebuffer via mark_dirty()/flush_dirty().
 }
 
 static void
@@ -419,6 +582,58 @@ handle_create_surface(int epfd, int fd, struct gui_msg_create_surface *req)
 	// leave a real app window (e.g. the terminal) as the keyboard target.
 	if (!(req->flags & GUI_WIN_NO_FOCUS))
 		set_focus(idx);
+	send_task_list();
+}
+
+// Maximize/restore: allocates a *new* shm block of the given content
+// size, hands it to the window's client via GUI_MSG_RESIZE (same
+// "shm fd rides via SCM_RIGHTS" convention as GUI_MSG_SURFACE_CREATED,
+// just re-keyed onto this window's existing surface_id instead of
+// allocating a new window slot), then drops the old mapping on this
+// (the compositor's) side. Returns -1 (leaving the window as it was)
+// on any allocation failure, 0 on success. windows[idx].committed is
+// deliberately cleared - the old content is the wrong size/stale the
+// moment this returns, and must not be blitted again until the client
+// answers with a fresh GUI_MSG_COMMIT at the new size.
+static int
+resize_window_content(int idx, int new_w, int new_h)
+{
+	struct window *w = &windows[idx];
+	int newfd;
+	void *newpix;
+	union gui_msg msg;
+
+	newfd = syscall(SYS_shm_create, (unsigned int)(new_w * 4 * new_h));
+	if (newfd < 0)
+		return -1;
+	newpix = mmap(0, (unsigned long)new_w * 4 * (unsigned long)new_h,
+	              PROT_READ | PROT_WRITE, MAP_SHARED, newfd, 0);
+	if (newpix == MAP_FAILED) {
+		close(newfd);
+		return -1;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	msg.resize.type = GUI_MSG_RESIZE;
+	msg.resize.surface_id = w->surface_id;
+	msg.resize.w = (unsigned int)new_w;
+	msg.resize.h = (unsigned int)new_h;
+	msg.resize.pitch = (unsigned int)new_w * 4;
+	if (wire_send(w->fd, &msg, sizeof(msg), newfd) != (int)sizeof(msg)) {
+		munmap(newpix, (unsigned long)new_w * 4 * (unsigned long)new_h);
+		close(newfd);
+		return -1;
+	}
+
+	munmap(w->surf.pixels, (unsigned long)w->surf.pitch * w->surf.h);
+	close(w->shmfd);
+	w->shmfd = newfd;
+	w->surf.pixels = newpix;
+	w->surf.w = (unsigned int)new_w;
+	w->surf.h = (unsigned int)new_h;
+	w->surf.pitch = (unsigned int)new_w * 4;
+	w->committed = 0;
+	return 0;
 }
 
 int
@@ -528,7 +743,13 @@ main(void)
 	// cursor_img.pixels stays 0 (draw_cursor() falls back to the ASCII
 	// arrow) if the asset is missing.
 	gfx_load_raw_rgba(&cursor_img, CURSOR_PATH);
-	redraw_all();
+	// Deliberately no redraw_all()/flush here: bash/poc/dinit.c runs
+	// gui/bootsplash.c before this process ever starts, and that
+	// splash image is still sitting in the real framebuffer right now
+	// (this mmap() didn't touch it) - leave it alone until the first
+	// real client (gui/login_gui.c) actually commits something, so the
+	// splash transitions directly into the login box with no
+	// intermediate bare-wallpaper frame.
 	printf("compositor: listening on %s\n", GUI_SOCK_PATH);
 
 	for (;;) {
@@ -580,6 +801,23 @@ main(void)
 				int drained = 0;
 				int wi = -1, pressed = 0, sent_pressed = -1; /* sent_pressed:
 					-1 means "nothing sent yet this burst" */
+				// Damage tracking for this burst's flush_dirty() call
+				// below: the common case (plain cursor motion, no
+				// drag, no click that changes stacking/focus) only
+				// needs the cursor's old+new bbox redrawn.
+				// topology_changed covers anything that could affect
+				// more than that (a raise-to-front reshuffles what's
+				// visible under every other window, not just this
+				// one) by falling back to a full-screen flush instead
+				// of trying to track it precisely.
+				int old_cursor_x = cursor_x, old_cursor_y = cursor_y;
+				int drag_win = dragging, old_wx = 0, old_wy = 0;
+				int topology_changed = 0;
+
+				if (drag_win >= 0) {
+					old_wx = windows[drag_win].x;
+					old_wy = windows[drag_win].y;
+				}
 
 				for (; drained < MOUSE_DRAIN_MAX; drained++) {
 					struct mousepkt pkt;
@@ -613,8 +851,52 @@ main(void)
 							// protocol message needed.
 							remove_window(epfd, wi);
 							wi = -1;
+							topology_changed = 1;
+						} else if (wi >= 0 && in_max_btn(&windows[wi], cursor_x, cursor_y)) {
+							struct window *w = &windows[wi];
+							int nw, nh;
+
+							if (!w->maximized) {
+								w->restore_x = w->x;
+								w->restore_y = w->y;
+								w->restore_content_w = (int)w->surf.w;
+								w->restore_content_h = (int)w->surf.h;
+								nw = (int)fbsurf.w - 2 * BORDER;
+								nh = (int)fbsurf.h - TOPBAR_RESERVED_H - TITLEBAR_H - BORDER;
+								if (resize_window_content(wi, nw, nh) == 0) {
+									w->x = 0;
+									w->y = TOPBAR_RESERVED_H;
+									w->maximized = 1;
+								}
+							} else if (resize_window_content(wi, w->restore_content_w,
+							                                   w->restore_content_h) == 0) {
+								w->x = w->restore_x;
+								w->y = w->restore_y;
+								w->maximized = 0;
+							}
+							// Same reasoning as the close branch above: a click on
+							// this window's own decoration chrome is not content-
+							// area input, so it must not also be forwarded as a
+							// pointer event below - GUI_MSG_RESIZE (just sent by
+							// resize_window_content()) already puts this client's
+							// incoming queue at its SOCKQLEN (3, include/socket.h)
+							// depth limit on its own; stacking an unnecessary
+							// pointer-event send on top of that reliably
+							// overran it and wedged this wire_send() the same
+							// way the mouse-burst coalescing comment below
+							// already describes for plain pointer events.
+							wi = -1;
+							topology_changed = 1;
+						} else if (wi >= 0 && in_min_btn(&windows[wi], cursor_x, cursor_y)) {
+							windows[wi].minimized = 1;
+							if (wi == focus_idx)
+								set_focus(-1);
+							send_task_list();
+							wi = -1; // see the max-button branch's own comment above
+							topology_changed = 1;
 						} else if (wi >= 0) {
 							zorder_raise(wi);
+							topology_changed = 1;
 							// NO_FOCUS windows (desktop bar/icon) never take
 							// keyboard focus - see handle_create_surface()'s own
 							// comment. in_title is already forced 0 for
@@ -628,6 +910,12 @@ main(void)
 								dragging = wi;
 								drag_off_x = cursor_x - windows[wi].x;
 								drag_off_y = cursor_y - windows[wi].y;
+								// Window hasn't moved yet this iteration -
+								// its position right now is its "old" one
+								// for the damage rect below.
+								drag_win = wi;
+								old_wx = windows[wi].x;
+								old_wy = windows[wi].y;
 							}
 						}
 					}
@@ -684,6 +972,22 @@ main(void)
 					wire_send(w->fd, &pev, sizeof(pev), -1);
 				}
 				redraw_all();
+				if (topology_changed) {
+					mark_dirty_full();
+				} else {
+					int cw = cursor_img.pixels ? (int)cursor_img.w : CURSOR_W;
+					int ch = cursor_img.pixels ? (int)cursor_img.h : CURSOR_H;
+
+					mark_dirty(old_cursor_x, old_cursor_y, old_cursor_x + cw, old_cursor_y + ch);
+					mark_dirty(cursor_x, cursor_y, cursor_x + cw, cursor_y + ch);
+					if (drag_win >= 0) {
+						struct window *dw = &windows[drag_win];
+
+						mark_dirty(old_wx, old_wy, old_wx + decor_w(dw), old_wy + decor_h(dw));
+						mark_dirty(dw->x, dw->y, dw->x + decor_w(dw), dw->y + decor_h(dw));
+					}
+				}
+				flush_dirty();
 			} else if (fd == 0) {
 				unsigned char c;
 
@@ -706,6 +1010,8 @@ main(void)
 						if (windows[wi].inuse && windows[wi].fd == fd) {
 							remove_window(epfd, wi);
 							redraw_all();
+							mark_dirty_full();
+							flush_dirty();
 							break;
 						}
 					continue;
@@ -715,13 +1021,36 @@ main(void)
 				case GUI_MSG_CREATE_SURFACE:
 					handle_create_surface(epfd, fd, &msg.create_surface);
 					redraw_all();
+					mark_dirty_full();
+					flush_dirty();
 					break;
-				case GUI_MSG_COMMIT:
-					for (wi = 0; wi < MAXWIN; wi++)
-						if (windows[wi].inuse && windows[wi].fd == fd)
-							windows[wi].committed = 1;
+				case GUI_MSG_COMMIT: {
+					// The hot repaint path (e.g. a terminal echoing a
+					// keystroke) - only this window's own decor rect
+					// needs to reach the real framebuffer, not the
+					// whole screen. A block-scoped loop index, not the
+					// outer event-loop's `i`, which this switch nests
+					// inside.
+					int cwi;
+
+					wi = -1;
+					for (cwi = 0; cwi < MAXWIN; cwi++)
+						if (windows[cwi].inuse && windows[cwi].fd == fd) {
+							windows[cwi].committed = 1;
+							wi = cwi;
+							break;
+						}
 					redraw_all();
+					if (wi >= 0) {
+						struct window *w = &windows[wi];
+
+						mark_dirty(w->x, w->y, w->x + decor_w(w), w->y + decor_h(w));
+					} else {
+						mark_dirty_full();
+					}
+					flush_dirty();
 					break;
+				}
 				case GUI_MSG_DESTROY:
 					for (wi = 0; wi < MAXWIN; wi++)
 						if (windows[wi].inuse && windows[wi].fd == fd) {
@@ -729,6 +1058,36 @@ main(void)
 							break;
 						}
 					redraw_all();
+					mark_dirty_full();
+					flush_dirty();
+					break;
+				case GUI_MSG_TASK_SUBSCRIBE:
+					taskbar_fd = fd;
+					send_task_list();
+					break;
+				case GUI_MSG_TASK_ACTION:
+					for (wi = 0; wi < MAXWIN; wi++)
+						if (windows[wi].inuse && windows[wi].surface_id == msg.task_action.surface_id)
+							break;
+					if (wi < MAXWIN) {
+						// A click on the already-focused, already-visible
+						// task minimizes it (the usual taskbar toggle);
+						// anything else (minimized, or just not focused)
+						// restores/raises/focuses it instead.
+						if (wi == focus_idx && !windows[wi].minimized) {
+							windows[wi].minimized = 1;
+							set_focus(-1);
+						} else {
+							windows[wi].minimized = 0;
+							zorder_raise(wi);
+							if (!(windows[wi].flags & GUI_WIN_NO_FOCUS))
+								set_focus(wi);
+						}
+						send_task_list();
+						redraw_all();
+						mark_dirty_full();
+						flush_dirty();
+					}
 					break;
 				default:
 					break;

@@ -45,6 +45,8 @@
  * pulling in a broader feature-test macro just for this one call. */
 extern long syscall(long, ...);
 
+static char *const splash_argv[] = { "bootsplash", 0 };
+static char *const splash_envp[] = { "PATH=/usr/bin", "HOME=/", "TERM=dumb", 0 };
 static char *const comp_argv[] = { "compositor", 0 };
 static char *const comp_envp[] = { "PATH=/usr/bin", "HOME=/", "TERM=dumb", 0 };
 static char *const login_argv[] = { "login_gui", 0 };
@@ -54,6 +56,7 @@ int
 main(void)
 {
 	pid_t comp_pid, pid, wpid;
+	pid_t splash_pid;
 
 	/* initcode64.asm execs "/usr/bin/init" with no open file
 	 * descriptors at all, so this open() is guaranteed to become
@@ -75,6 +78,25 @@ main(void)
 	}
 	dup(0);	/* stdout */
 	dup(0);	/* stderr */
+
+	/* Draws the splash directly to the real framebuffer and exits -
+	 * waited for (not backgrounded) so it's fully done, and has
+	 * released the framebuffer device, before the compositor below
+	 * ever opens it. gui/compositor.c no longer paints anything of its
+	 * own at startup (see its own comment), so whatever this leaves on
+	 * screen stays there untouched until gui/login_gui.c's first
+	 * gui_commit() - no intermediate blank/wallpaper-only frame. */
+	printf("init: starting bootsplash\n");
+	fflush(stdout);
+	splash_pid = fork();
+	if (splash_pid == 0) {
+		execve("/usr/bin/bootsplash", splash_argv, splash_envp);
+		printf("init: exec bootsplash failed\n");
+		fflush(stdout);
+		_exit(1);
+	}
+	if (splash_pid > 0)
+		waitpid(splash_pid, 0, 0);
 
 	printf("init: starting compositor\n");
 	fflush(stdout);

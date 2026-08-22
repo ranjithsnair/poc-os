@@ -75,6 +75,12 @@ static const unsigned int palette[16] = {
 static VTerm *vt;
 static VTermScreen *vscreen;
 static int cell_w, cell_h;
+// Current grid size - starts at the COLS/ROWS this window was created
+// with, but changes on a GUI_EVENT_RESIZE (maximize/restore,
+// gui/compositor.c's own GUI_MSG_RESIZE): vterm_set_size() reflows the
+// real terminal state to match, so the shell continues at the new
+// dimensions rather than just having its existing 80x24 grid stretched.
+static int cols = COLS, rows = ROWS;
 
 // Write end of the pipe feeding bash's stdin - libvterm calls this
 // back for any bytes a parsed sequence needs to answer (e.g. a device
@@ -135,8 +141,8 @@ render(struct gui_conn *c, struct ttf_font *mono, struct ttf_font *mono_bold)
 
 	vterm_state_get_cursorpos(state, &cursorpos);
 
-	for (pos.row = 0; pos.row < ROWS; pos.row++) {
-		for (pos.col = 0; pos.col < COLS; pos.col++) {
+	for (pos.row = 0; pos.row < rows; pos.row++) {
+		for (pos.col = 0; pos.col < cols; pos.col++) {
 			VTermScreenCell cell;
 			unsigned int fg, bg;
 			uint32_t ch;
@@ -322,6 +328,24 @@ main(void)
 					// bash but never appeared until its own output (e.g.
 					// the next prompt) happened to redraw the grid.
 					vterm_write_onlcr(vt, &ch, 1);
+					render(&c, mono, mono_bold);
+				} else if (gev.type == GUI_EVENT_RESIZE) {
+					// c.surface is already remapped at the new pixel size
+					// (gui_recv_event() itself did the mmap/munmap dance) -
+					// just work out how many whole cells that is and
+					// reflow libvterm to match, same as a real terminal
+					// emulator resizing its pty. Any leftover fractional
+					// row/col of pixels (the new size need not be an exact
+					// multiple of cell_w/cell_h) is simply left blank by
+					// render(), not stretched.
+					int new_cols = (int)c.surface.w / cell_w;
+					int new_rows = (int)c.surface.h / cell_h;
+
+					if (new_cols < 1) new_cols = 1;
+					if (new_rows < 1) new_rows = 1;
+					vterm_set_size(vt, new_rows, new_cols);
+					cols = new_cols;
+					rows = new_rows;
 					render(&c, mono, mono_bold);
 				}
 			}

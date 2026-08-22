@@ -71,6 +71,7 @@ gui_create_surface(struct gui_conn *c, int w, int h, int x, int y,
   c->screen_w = resp.surface_created.screen_w;
   c->screen_h = resp.surface_created.screen_h;
 
+  c->shmfd = shmfd;
   c->surface.pixels = mmap(0, (unsigned long)resp.surface_created.pitch * resp.surface_created.h,
                             PROT_READ | PROT_WRITE, MAP_SHARED, shmfd, 0);
   // Deliberately not close(shmfd): kernel/shm.c's refcounting only
@@ -109,11 +110,31 @@ gui_destroy(struct gui_conn *c)
 }
 
 int
+gui_task_subscribe(struct gui_conn *c)
+{
+  struct gui_msg_task_subscribe msg;
+
+  msg.type = GUI_MSG_TASK_SUBSCRIBE;
+  return wire_send(c->fd, &msg, sizeof(msg), -1) == (int)sizeof(msg) ? 0 : -1;
+}
+
+int
+gui_task_action(struct gui_conn *c, int surface_id)
+{
+  struct gui_msg_task_action msg;
+
+  msg.type = GUI_MSG_TASK_ACTION;
+  msg.surface_id = surface_id;
+  return wire_send(c->fd, &msg, sizeof(msg), -1) == (int)sizeof(msg) ? 0 : -1;
+}
+
+int
 gui_recv_event(struct gui_conn *c, struct gui_event *ev)
 {
   union gui_msg raw;
+  int recv_fd = -1;
 
-  if (wire_recv(c->fd, &raw, sizeof(raw), 0) <= 0)
+  if (wire_recv(c->fd, &raw, sizeof(raw), &recv_fd) <= 0)
     return -1;
 
   switch (raw.type) {
@@ -131,6 +152,37 @@ gui_recv_event(struct gui_conn *c, struct gui_event *ev)
     ev->type = GUI_EVENT_FOCUS;
     ev->focus.focused = raw.focus_event.focused;
     break;
+  case GUI_MSG_TASK_LIST:
+    ev->type = GUI_EVENT_TASK_LIST;
+    ev->tasklist.count = raw.task_list.count;
+    memcpy(ev->tasklist.tasks, raw.task_list.tasks, sizeof(ev->tasklist.tasks));
+    break;
+  case GUI_MSG_RESIZE: {
+    // Same shm-fd-via-SCM_RIGHTS handoff gui_create_surface() already
+    // does, just replacing an existing mapping instead of establishing
+    // the first one - munmap the old surface and close its shmfd only
+    // *after* the new one is confirmed mapped, so a failure here
+    // leaves the caller's still-valid old surface alone.
+    unsigned long newsize = (unsigned long)raw.resize.pitch * raw.resize.h;
+    void *newpix;
+
+    if (recv_fd < 0)
+      return -1;
+    newpix = mmap(0, newsize, PROT_READ | PROT_WRITE, MAP_SHARED, recv_fd, 0);
+    if (newpix == MAP_FAILED) {
+      close(recv_fd);
+      return -1;
+    }
+    munmap(c->surface.pixels, (unsigned long)c->surface.pitch * c->surface.h);
+    close(c->shmfd);
+    c->shmfd = recv_fd;
+    c->surface.pixels = newpix;
+    c->surface.w = raw.resize.w;
+    c->surface.h = raw.resize.h;
+    c->surface.pitch = raw.resize.pitch;
+    ev->type = GUI_EVENT_RESIZE;
+    break;
+  }
   default:
     return -1;
   }

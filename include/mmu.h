@@ -140,6 +140,31 @@ struct segdesc {
 // pages).
 #define PTE_SHM          0x200
 
+// Hardware cache-control bits (Page Write-Through / Page Cache-Disable) -
+// combined with a leaf entry's PAT bit (a different position for a 4KB
+// PTE vs a 2MB PS-bit PDE - see mappages()' PTE_WC handling in
+// kernel/vm.c) to select one of the 8 PAT-MSR-defined memory types.
+#define PTE_PWT          0x008
+#define PTE_PCD          0x010
+
+// Bit 10: another "available for OS use" bit, distinct from PTE_SHM
+// above. Transient only - passed into mappages()'s perm argument to
+// request the write-combining memory type (kernel/vm.c's patinit()
+// sets up PAT7 = WC for exactly this), and translated into the real
+// hardware PWT/PCD/PAT bits by mappages() before the PTE is ever
+// stored, so it never appears in a live PTE. See kernel/sysproc.c's
+// sys_mmap() FRAMEBUFFER branch, the one caller.
+#define PTE_WC           0x400
+
+// Bit 11: persistent marker for a copy-on-write page (kernel/vm.c's
+// copyuvm()/vm_handle_pagefault()) - present alongside PTE_P but
+// without PTE_W on a page a fork() shared (refcounted, see
+// kernel/kalloc.c's pageref[]) rather than copied. A write fault on
+// such a page is what vm_handle_pagefault() (kernel/trap.c's T_PGFLT
+// case) resolves, either by granting sole ownership back or by
+// actually copying now that a second owner exists.
+#define PTE_COW          0x800
+
 // Address in page table or page directory entry
 #define PTE_ADDR(pte)   ((uintp)(pte) & ~0xFFF)
 #define PTE_FLAGS(pte)  ((uintp)(pte) &  0xFFF)

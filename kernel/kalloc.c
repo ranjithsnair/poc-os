@@ -27,6 +27,27 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Per-physical-page reference count, indexed by pa/PGSIZE - the basis
+// for copy-on-write fork (kernel/vm.c's copyuvm()/vm_handle_pagefault()).
+// BSS-zeroed at boot: every entry starts at 0, which kfree() below
+// treats as "never kalloc()'d before" (the boot-time freerange() case)
+// rather than a real reference dropping to a negative count. Sized to
+// cover every physical page below PHYSTOP - the only range kalloc()
+// ever hands out (device memory like the real framebuffer, always
+// >= PHYSTOP, is mapped directly and never touches this table - see
+// kernel/vm.c's copyuvm() pa>=PHYSTOP branch).
+static ushort pageref[PHYSTOP / PGSIZE];
+
+// Guarded by kmem.lock (already held across every kalloc()/kfree() call
+// below) rather than a second lock - refcounts only ever change from
+// inside kalloc()/kfree()/kaddref(), so one lock covering all three is
+// enough and avoids any lock-ordering question between two locks.
+static uint
+pageidx(uintp pa)
+{
+  return (uint)(pa / PGSIZE);
+}
+
 // Initialization happens in two phases.
 // 1. main() calls kinit1() while still using the boot-time page table
 // kernel/entry.asm built (entrypml4/entrypdpt_low/entrypdpt_high/
@@ -61,24 +82,77 @@ freerange(void *vstart, void *vend)
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
+//
+// Copy-on-write fork (kernel/vm.c's copyuvm()) can leave one physical
+// page mapped into more than one process's page table, each with its
+// own kfree() call as it exits/execs/shrinks (kernel/vm.c's
+// deallocuvm()) - so this only actually returns the page to the
+// freelist once every such caller has dropped its share. A pageref[]
+// entry that's still 0 means this exact page has never been through
+// kalloc() since boot (freerange()'s own initial seeding of the free
+// list, kinit1()/kinit2() below) - free it unconditionally, the same
+// as before refcounting existed, rather than underflowing a count that
+// was never incremented in the first place.
 void
 kfree(char *v)
 {
   struct run *r;
+  uint idx;
+  int dofree;
 
   if((uintp)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(v, 1, PGSIZE);
+  idx = pageidx(V2P(v));
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
-  r = (struct run*)v;
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+  if(pageref[idx] == 0)
+    dofree = 1;
+  else if(--pageref[idx] == 0)
+    dofree = 1;
+  else
+    dofree = 0;
+  if(dofree){
+    // Fill with junk to catch dangling refs - only safe now that we
+    // know no other mapping still shares this physical page.
+    memset(v, 1, PGSIZE);
+    r = (struct run*)v;
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
+}
+
+// Add one reference to an already-kalloc()'d page - called by
+// kernel/vm.c's copyuvm() when a fork shares a page COW instead of
+// copying it, and by vm_handle_pagefault() when a COW fault resolves
+// without needing a fresh copy.
+void
+kaddref(uintp pa)
+{
+  if(kmem.use_lock)
+    acquire(&kmem.lock);
+  pageref[pageidx(pa)]++;
+  if(kmem.use_lock)
+    release(&kmem.lock);
+}
+
+// Current reference count of an already-kalloc()'d page - used by
+// kernel/vm.c's vm_handle_pagefault() to tell "I'm the last owner,
+// just reclaim this page in place" from "still shared, must copy".
+int
+kgetref(uintp pa)
+{
+  int n;
+
+  if(kmem.use_lock)
+    acquire(&kmem.lock);
+  n = pageref[pageidx(pa)];
+  if(kmem.use_lock)
+    release(&kmem.lock);
+  return n;
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -92,8 +166,14 @@ kalloc(void)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    // A freshly-handed-out page always starts single-owner, regardless
+    // of what it was last used for (kfree() only ever leaves a page on
+    // the freelist once its refcount already reached 0) - set, not
+    // increment.
+    pageref[pageidx(V2P(r))] = 1;
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;

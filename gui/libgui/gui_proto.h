@@ -28,6 +28,36 @@ enum {
   GUI_MSG_KEY_EVENT = 5,       // compositor -> client
   GUI_MSG_POINTER_EVENT = 6,   // compositor -> client
   GUI_MSG_FOCUS_EVENT = 7,     // compositor -> client
+  // Taskbar protocol (ToaruOS-style minimize/restore): a client (gui/
+  // desktop.c's bar) subscribes once, and thereafter gets an updated
+  // GUI_MSG_TASK_LIST every time the compositor's window set,
+  // minimized state, or focus changes; it answers a click on one of
+  // its own task buttons with GUI_MSG_TASK_ACTION, identifying the
+  // window by surface_id (stable across the window's whole lifetime,
+  // unlike its index into the compositor's own windows[] array).
+  GUI_MSG_TASK_SUBSCRIBE = 8, // client -> compositor, no payload beyond type
+  GUI_MSG_TASK_LIST = 9,      // compositor -> subscribed client
+  GUI_MSG_TASK_ACTION = 10,   // client -> compositor
+  // Maximize/restore: the compositor decides the new content size and
+  // creates the replacement shm block itself (mirrors
+  // GUI_MSG_SURFACE_CREATED's own shm handoff - the client never calls
+  // SYS_shm_create directly), re-keyed onto the *same* surface_id
+  // rather than allocating a new window. The client must mmap the new
+  // fd, munmap() its old surface, update its own w/h/pitch, and
+  // recommit at the new size (gui/terminal.c additionally calls
+  // libvterm's vterm_set_size() so the shell reflows instead of just
+  // being stretched).
+  GUI_MSG_RESIZE = 11,        // compositor -> client, new shm fd via SCM_RIGHTS
+};
+
+#define GUI_MAX_TASKS 8 // == MAXWIN (gui/compositor.c) - one taskbar
+                        // entry per possible window
+
+struct gui_task_entry {
+  int surface_id;
+  int minimized;
+  int focused;
+  char title[GUI_TITLE_MAX];
 };
 
 // GUI_WIN_BORDERLESS: compositor draws no title bar/border chrome for
@@ -102,6 +132,31 @@ struct gui_msg_focus_event {
   int focused; // 1 = gained focus, 0 = lost
 };
 
+struct gui_msg_task_subscribe {
+  int type;
+};
+
+struct gui_msg_task_list {
+  int type;
+  int count; // valid entries in tasks[], 0..GUI_MAX_TASKS
+  struct gui_task_entry tasks[GUI_MAX_TASKS];
+};
+
+struct gui_msg_task_action {
+  int type;
+  int surface_id;
+};
+
+// Field layout deliberately mirrors gui_msg_surface_created (same w/h/
+// pitch fields, same "shm fd rides via SCM_RIGHTS" convention) - a
+// resize is really "here is your surface_created reply again, for the
+// window you already have" rather than a distinct shape.
+struct gui_msg_resize {
+  int type;
+  int surface_id;
+  unsigned int w, h, pitch;
+};
+
 // Largest of the above - sized so a single fixed-size recvmsg() buffer
 // on either side can hold any message type without a preliminary
 // "peek the type first" round trip.
@@ -114,6 +169,10 @@ union gui_msg {
   struct gui_msg_key_event key_event;
   struct gui_msg_pointer_event pointer_event;
   struct gui_msg_focus_event focus_event;
+  struct gui_msg_task_subscribe task_subscribe;
+  struct gui_msg_task_list task_list;
+  struct gui_msg_task_action task_action;
+  struct gui_msg_resize resize;
 };
 
 #endif

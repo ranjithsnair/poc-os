@@ -8,10 +8,14 @@
 #define LIBGUI_H
 
 #include "gfx.h"
+#include "gui_proto.h" // struct gui_task_entry/GUI_MAX_TASKS, used below
 
 struct gui_conn {
   int fd;
   int surface_id;
+  int shmfd; // the surface's current backing shm fd - remembered so a
+             // later GUI_MSG_RESIZE (gui_recv_event()) can close the
+             // old one once the new mapping is in place
   struct gfx_surface surface;
   unsigned int screen_w, screen_h;  // whole framebuffer, not just this surface
 };
@@ -39,7 +43,20 @@ int gui_commit(struct gui_conn *c);
 // Tells the compositor to drop the surface and closes the connection.
 void gui_destroy(struct gui_conn *c);
 
-enum { GUI_EVENT_KEY, GUI_EVENT_POINTER, GUI_EVENT_FOCUS };
+// Registers this connection to receive GUI_EVENT_TASK_LIST updates
+// whenever the compositor's window set/focus/minimized state changes
+// (gui/desktop.c's bar - the one place any client needs this: it's
+// the only thing that draws a taskbar). Returns 0 on success, -1 on
+// failure.
+int gui_task_subscribe(struct gui_conn *c);
+
+// Tells the compositor a taskbar button for this surface_id (from a
+// received GUI_EVENT_TASK_LIST entry) was clicked - minimizes it if
+// already focused and visible, otherwise restores/raises/focuses it.
+// Returns 0 on success, -1 on failure.
+int gui_task_action(struct gui_conn *c, int surface_id);
+
+enum { GUI_EVENT_KEY, GUI_EVENT_POINTER, GUI_EVENT_FOCUS, GUI_EVENT_TASK_LIST, GUI_EVENT_RESIZE };
 
 struct gui_event {
   int type;
@@ -47,6 +64,14 @@ struct gui_event {
     struct { int ch; } key;
     struct { int x, y, buttons; } pointer;
     struct { int focused; } focus;
+    // GUI_EVENT_TASK_LIST: mirrors gui_msg_task_list's own tasks/count
+    // (gui_proto.h) - copied through as-is, not reinterpreted.
+    struct { int count; struct gui_task_entry tasks[GUI_MAX_TASKS]; } tasklist;
+    // GUI_EVENT_RESIZE: c->surface is already updated (new mmap, old
+    // one unmapped) by the time this is returned - the caller just
+    // needs to know a resize happened (to reflow/re-render at the new
+    // size), not the new dimensions themselves (already in
+    // c->surface.w/h).
   };
 };
 

@@ -30,6 +30,8 @@ main(void)
   seginit();       // segment descriptors
   fpuinit();       // FPU/SSE (must come before userinit() creates the
                     // first process - see kernel/proc.c's allocproc())
+  patinit();       // PAT MSR: PAT7 = write-combining, for the real
+                    // framebuffer (kernel/sysproc.c's sys_mmap())
   picinit();       // disable pic
   ioapicinit();    // another interrupt controller
   consoleinit();   // console hardware
@@ -75,6 +77,7 @@ mpenter(void)
   switchkvm();
   seginit();
   fpuinit();       // this AP's own CR0/CR4 - see main()'s own call site
+  patinit();       // this AP's own PAT MSR - see main()'s own call site
   lapicinit();
   mpmain();
 }

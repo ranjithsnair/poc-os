@@ -45,6 +45,12 @@ void fpu_clean_template(void *area);
 // WRMSR is only ever used here for MSR_FS_BASE (see include/mmu.h),
 // which takes a full 64-bit value.
 void wrmsr(uint msr, uint64 val);
+uint64 rdmsr(uint msr);
+
+// Invalidate one page's TLB entry - needed after modifying a live PTE
+// still cached in the CPU's TLB (see kernel/vm.c's copyuvm() and
+// vm_handle_pagefault()).
+void invlpg(void *va);
 
 //PAGEBREAK: 36
 // Layout of the trap frame built on the stack by the hardware and by

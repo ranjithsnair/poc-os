@@ -306,8 +306,15 @@ sys_mmap(void)
     if(offset < 0 || (uint)offset + n > fbsize || (uint)offset + n < (uint)offset)
       return -1;
     base = curproc->sz;
+    // PTE_WC (include/mmu.h): map the real VRAM write-combining, not
+    // whatever the platform's default MTRR/PAT cache type happens to
+    // be for an otherwise-uncovered PCI BAR (typically uncached, UC) -
+    // every pixel write to VRAM was a slow, non-combinable bus
+    // transaction without this. kernel/vm.c's patinit() sets up PAT7 =
+    // WC at boot; mappages() translates this transient flag into the
+    // real hardware bits.
     if(mapuvm_phys(curproc->pgdir, base, n,
-                    PGROUNDDOWN(vbe.phys_base) + (uint)offset, PTE_W|PTE_U) < 0)
+                    PGROUNDDOWN(vbe.phys_base) + (uint)offset, PTE_W|PTE_U|PTE_WC) < 0)
       return -1;
     curproc->sz = base + n;
     switchuvm(curproc);

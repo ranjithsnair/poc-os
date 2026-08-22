@@ -250,3 +250,27 @@ $wrmsr:
   shr rdx, 32    ; edx = val's high 32 bits
   wrmsr
   ret
+
+; uint64 rdmsr(uint msr)
+; Inverse of $wrmsr above: rdmsr reads the MSR indexed by ecx into
+; edx:eax (high:low); reassembled into one 64-bit rax for the caller
+; (kernel/vm.c's patinit(), which needs the PAT MSR's current value to
+; modify just one 8-bit PAT-entry field rather than blindly overwriting
+; entries a BIOS/firmware may already have set up).
+global $rdmsr
+$rdmsr:
+  mov ecx, edi   ; msr
+  rdmsr
+  shl rdx, 32
+  or rax, rdx
+  ret
+
+; void invlpg(void *va)
+; Invalidates the TLB entry for one page, so a PTE just modified in
+; memory (kernel/vm.c's copyuvm()/vm_handle_pagefault(), downgrading or
+; upgrading a page's COW/writable state) takes effect immediately
+; instead of possibly still being served by a stale cached translation.
+global $invlpg
+$invlpg:
+  invlpg [rdi]
+  ret

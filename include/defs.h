@@ -80,6 +80,8 @@ char*           kalloc(void);
 void            kfree(char*);
 void            kinit1(void*, void*);
 void            kinit2(void*, void*);
+void            kaddref(uintp);
+int             kgetref(uintp);
 
 // kbd.c
 void            kbdintr(void);
@@ -221,6 +223,8 @@ void            vbeinit(void);
 // vm.c
 void            seginit(void);
 void            fpuinit(void);
+void            patinit(void);
+int             vm_handle_pagefault(pde_t*, uintp);
 extern uchar    fpu_template[512];
 void            kvmalloc(void);
 pde_t*          setupkvm(void);

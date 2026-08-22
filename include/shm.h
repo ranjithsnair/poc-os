@@ -14,15 +14,21 @@
 // fbtest.c already calls syscall(SYS_mknod, ...) raw.
 
 #define SHM_MAXOBJS  16
-// 2MB cap per object. Raised from the original 64/256KB once real
-// antialiased TrueType text (GUI roadmap ToaruOS-style rewrite) made an
-// 80x24 terminal grid need ~375 pages at realistic DejaVu Sans Mono
-// cell metrics - bigger than a bitmap font's 8x16 cells allowed for in
-// the same pixel budget. Still under 1% of PHYSTOP's 224MB even with
-// several windows open at once (compositor.c's MAXWIN=8 ceiling), so
-// there's no real memory-pressure reason to keep shrinking surfaces to
-// fit instead.
-#define SHM_MAXPAGES 512
+// 4MB cap per object. Raised from 2MB (originally raised from 64/
+// 256KB once real antialiased TrueType text - GUI roadmap ToaruOS-
+// style rewrite - made an 80x24 terminal grid need ~375 pages at
+// realistic DejaVu Sans Mono cell metrics, bigger than a bitmap font's
+// 8x16 cells allowed for in the same pixel budget) again for
+// gui/compositor.c's maximize: a maximized window's content can need
+// close to the full 1024x768 screen (~717 pages at 4 bytes/pixel),
+// which the old 512-page/2MB cap couldn't fit at all - SYS_shm_create
+// silently failed and maximize did nothing. Still under 2% of
+// PHYSTOP's 224MB even with several windows open at once
+// (compositor.c's MAXWIN=8 ceiling), and pages are only ever
+// kalloc()'d up to whatever size is actually requested (shmcreate()
+// below) - raising this cap only grows shmobj's own pages[] pointer
+// array (kernel BSS, harmless), not real physical allocation.
+#define SHM_MAXPAGES 1024
 
 // Exactly one struct file ever wraps a given shmobj (created once in
 // shmcreate() below; fork()/dup()/SCM_RIGHTS-passing all share that

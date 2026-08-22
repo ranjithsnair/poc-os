@@ -48,6 +48,24 @@ idtinit(void)
   lidt(idt, sizeof(idt));
 }
 
+// Diagnostic + kill, shared by T_PGFLT's unresolved-fault path and the
+// default: case below - both mean "user process misbehaved", just
+// reached from different trap numbers.
+static void
+baduseraccess(struct trapframe *tf)
+{
+  // %p (not %x): tf->cs/tf->eip are uintp-width on the 64-bit build
+  // (see x86.h's trapframe) - passing them to a %x, which reads a
+  // plain 4-byte int/uint, would desync cprintf's va_arg reads for
+  // the rest of the format string.
+  cprintf("pid %d %s: trap %d err %d on cpu %d "
+          "eip 0x%p addr 0x%p sz 0x%p--kill proc\n",
+          myproc()->pid, myproc()->name, (int)tf->trapno,
+          (int)tf->err, cpuid(), (uintp)tf->eip, (uintp)rcr2(),
+          (uintp)myproc()->sz);
+  myproc()->killed = 1;
+}
+
 //PAGEBREAK: 41
 void
 trap(struct trapframe *tf)
@@ -102,6 +120,25 @@ trap(struct trapframe *tf)
     lapiceoi();
     break;
 
+  case T_PGFLT:
+    if(myproc() == 0 || (tf->cs&3) == 0){
+      // A page fault in the kernel is still always a real bug here -
+      // this kernel has no lazy-mapping/demand-paging path of its own
+      // that would ever expect one.
+      cprintf("unexpected trap %d from cpu %d eip %p (cr2=0x%p)\n",
+              (int)tf->trapno, cpuid(), (uintp)tf->eip, (uintp)rcr2());
+      panic("trap");
+    }
+    // vm_handle_pagefault() (kernel/vm.c) resolves a copy-on-write
+    // fault (kernel/vm.c's copyuvm(), from fork()) in place; anything
+    // else - a genuine wild pointer, a write to real read-only memory -
+    // it declines (-1), and reaches the same kill path as any other
+    // unhandled trap below.
+    if(vm_handle_pagefault(myproc()->pgdir, (uintp)rcr2()) == 0)
+      goto done;
+    baduseraccess(tf);
+    break;
+
   //PAGEBREAK: 13
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){
@@ -115,12 +152,7 @@ trap(struct trapframe *tf)
     // whether a faulting addr sits just past the process's own mapped
     // top (a real overflow) or is a wildly out-of-range pointer -
     // meaningfully narrows down userspace crashes without a debugger.
-    cprintf("pid %d %s: trap %d err %d on cpu %d "
-            "eip 0x%p addr 0x%p sz 0x%p--kill proc\n",
-            myproc()->pid, myproc()->name, (int)tf->trapno,
-            (int)tf->err, cpuid(), (uintp)tf->eip, (uintp)rcr2(),
-            (uintp)myproc()->sz);
-    myproc()->killed = 1;
+    baduseraccess(tf);
   }
 
   // Force process exit if it has been killed and is in user space.
